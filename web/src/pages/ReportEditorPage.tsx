@@ -13,7 +13,8 @@ import { newExecutionId } from '../utils/format';
 
 export function ReportEditorPage() {
   const { id } = useParams();
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
+  const autoRan = useRef(false);
   const nav = useNavigate();
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(Boolean(id));
@@ -90,8 +91,10 @@ export function ReportEditorPage() {
 
   // Auto-run when opened from a dashboard "Run" action.
   useEffect(() => {
-    if (report && params.get('run') === '1') {
-      setParams({}, { replace: true });
+    if (report && params.get('run') === '1' && !autoRan.current) {
+      autoRan.current = true;
+      // Drop ?run=1 without a router navigation so a reload doesn't re-run it.
+      window.history.replaceState(window.history.state, '', window.location.pathname);
       void run();
     }
   }, [report]); // eslint-disable-line react-hooks/exhaustive-deps

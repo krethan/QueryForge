@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { SQLJob } from '@ibm/mapepire-js';
+import mapepire from '@ibm/mapepire-js';
+// The package is CommonJS; Node ESM cannot statically see its named exports.
+const { SQLJob } = mapepire;
 import type { AppConfig, DbIdentity } from '../config/config.js';
 import { AppError, toDbError } from '../util/errors.js';
 import type { DaemonServer, JDBCOptions, JobFactory, MetadataDb, SqlJobLike } from './types.js';

@@ -37,6 +37,14 @@ npm run dev                      # API on :3001, UI on http://localhost:5173
 Production: `npm run build && NODE_ENV=production npm start` (server also serves `web/dist`).
 Put it behind TLS; set `APP_ORIGIN`, `COOKIE_SECURE=true`, `TRUST_PROXY` as appropriate.
 
+## Demo mode (development only)
+
+`npm run demo` builds the UI and starts the app on http://127.0.0.1:3005 with the **in-memory test fakes**
+for both Mapepire and the metadata store. It never connects to IBM i, ignores `.env`, refuses
+`NODE_ENV=production`, and is not used by `npm start`/`npm run dev`. Login `demo` / `demo-password-123`;
+all rows are fictional. With it running, `npm run screenshots` captures 1440×900 PNGs into `screenshots/`
+(first time: `npx playwright install chromium`).
+
 ## Commands
 
 | Command                                 | Description                                                                   |

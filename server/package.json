@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "migrate": "tsx scripts/migrate.ts",
-    "user:create": "tsx scripts/create-user.ts"
+    "user:create": "tsx scripts/create-user.ts",
+    "demo": "tsx scripts/demo.ts"
   },
   "dependencies": {
     "@ibm/mapepire-js": "1.0.2",
