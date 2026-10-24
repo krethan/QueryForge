@@ -4,6 +4,12 @@ import type { MetadataDb } from '../db/types.js';
 import { NOW_UTC, T, q } from '../db/schema.js';
 import { AppError, DbError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
+import {
+  countMarkers,
+  parameterListSchema,
+  parseStoredParameters,
+  type ParameterDef,
+} from './parameters.js';
 
 export type ExecutionStatus =
   'NEVER' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT' | 'CANCELLED';
@@ -22,6 +28,13 @@ export interface Report {
   lastStatus: ExecutionStatus;
   lastRowCount: number | null;
   lastDurationMs: number | null;
+  parameters: ParameterDef[];
+}
+
+export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
+export interface AccessibleReport extends Report {
+  access: AccessRole;
+  ownerName?: string;
 }
 
 const optText = (max: number) =>
@@ -32,25 +45,39 @@ const optText = (max: number) =>
     .nullable()
     .transform((v) => (v && v.trim() ? v.trim() : null));
 
-export const reportInputSchema = z.object({
-  name: z
-    .string()
-    .transform((s) => s.trim())
-    .pipe(
-      z
-        .string()
-        .min(1, 'Report name is required')
-        .max(128, 'Report name must be 128 characters or fewer'),
-    ),
-  description: optText(2000),
-  category: optText(128),
-  sql: z.string().min(1, 'SQL is required'),
-});
-export type ReportInput = z.infer<typeof reportInputSchema>;
+export const reportInputSchema = z
+  .object({
+    name: z
+      .string()
+      .transform((s) => s.trim())
+      .pipe(
+        z
+          .string()
+          .min(1, 'Report name is required')
+          .max(128, 'Report name must be 128 characters or fewer'),
+      ),
+    description: optText(2000),
+    category: optText(128),
+    sql: z.string().min(1, 'SQL is required'),
+    parameters: parameterListSchema,
+  })
+  .superRefine((r, ctx) => {
+    const n = countMarkers(r.sql);
+    if (n !== r.parameters.length)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['parameters'],
+        message: `The SQL has ${n} parameter marker(s) (?) but ${r.parameters.length} parameter(s) are defined.`,
+      });
+  });
+export type ReportInput = Omit<z.infer<typeof reportInputSchema>, 'parameters'> & {
+  parameters?: ParameterDef[];
+};
 
-export const reportUpdateSchema = reportInputSchema.extend({
-  version: z.number().int().positive().optional(),
-});
+export const reportUpdateSchema = z.intersection(
+  reportInputSchema,
+  z.object({ version: z.number().int().positive().optional() }),
+);
 
 export type SortKey = 'name' | 'created' | 'lastRun' | 'updated';
 const SORT_SQL: Record<SortKey, string> = {
@@ -61,7 +88,7 @@ const SORT_SQL: Record<SortKey, string> = {
 };
 
 const COLS = `REPORT_ID, OWNER_ID, REPORT_NAME, DESCRIPTION, CATEGORY, SQL_TEXT, VERSION, CREATED_AT, UPDATED_AT,
-  LAST_EXECUTED_AT, LAST_STATUS, LAST_ROW_COUNT, LAST_DURATION_MS`;
+  LAST_EXECUTED_AT, LAST_STATUS, LAST_ROW_COUNT, LAST_DURATION_MS, PARAMETERS_JSON`;
 
 type Row = Record<string, unknown>;
 const toReport = (r: Row): Report => ({
@@ -82,8 +109,10 @@ const toReport = (r: Row): Report => ({
     r.LAST_DURATION_MS === null || r.LAST_DURATION_MS === undefined
       ? null
       : Number(r.LAST_DURATION_MS),
+  parameters: parseStoredParameters(r.PARAMETERS_JSON),
 });
 
+const paramsJson = (p: ParameterDef[] | undefined) => (p?.length ? JSON.stringify(p) : null);
 const nameKey = (name: string) => name.trim().toUpperCase();
 const isDuplicate = (e: unknown) =>
   e instanceof DbError && (e.sqlState === '23505' || e.sqlCode === -803);
@@ -98,7 +127,7 @@ export class ReportRepository {
   readonly table: string;
   constructor(
     private readonly db: MetadataDb,
-    schema: string,
+    private readonly schema: string,
   ) {
     this.table = q(schema, T.reports);
   }
@@ -134,13 +163,53 @@ export class ReportRepository {
     return toReport(rows[0]);
   }
 
+  /** Unscoped read by id. Callers MUST authorise via AccessService before returning data. */
+  async findById(id: string): Promise<Report | null> {
+    const rows = await this.db.query<Row>(`SELECT ${COLS} FROM ${this.table} WHERE REPORT_ID = ?`, [
+      id,
+    ]);
+    return rows[0] ? toReport(rows[0]) : null;
+  }
+
+  /** Reports shared with the user directly or through one of their groups (never their own). */
+  async listShared(userId: string, groups: string[]): Promise<AccessibleReport[]> {
+    const shares = q(this.schema, T.shares);
+    const users = q(this.schema, T.users);
+    const params: string[] = [userId, userId];
+    let groupClause = '';
+    if (groups.length) {
+      groupClause = ` OR (S.PRINCIPAL_TYPE = 'GROUP' AND S.PRINCIPAL_ID IN (${groups.map(() => '?').join(', ')}))`;
+      params.push(...groups);
+    }
+    const rows = await this.db.query<Row>(
+      `SELECT ${COLS.split(',')
+        .map((c) => `R.${c.trim()}`)
+        .join(', ')}, S.SHARE_ROLE, U.DISPLAY_NAME AS OWNER_NAME
+         FROM ${this.table} R
+         JOIN ${shares} S ON S.REPORT_ID = R.REPORT_ID
+         JOIN ${users} U ON U.USER_ID = R.OWNER_ID
+        WHERE R.OWNER_ID <> ? AND ((S.PRINCIPAL_TYPE = 'USER' AND S.PRINCIPAL_ID = ?)${groupClause})
+        ORDER BY R.REPORT_NAME_KEY ASC`,
+      params,
+    );
+    const byId = new Map<string, AccessibleReport>();
+    for (const r of rows) {
+      const rep = toReport(r);
+      const access: AccessRole = r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER';
+      const prev = byId.get(rep.id);
+      if (!prev || (prev.access === 'VIEWER' && access === 'EDITOR'))
+        byId.set(rep.id, { ...rep, access, ownerName: String(r.OWNER_NAME ?? '') });
+    }
+    return [...byId.values()];
+  }
+
   async create(ownerId: string, input: ReportInput): Promise<Report> {
     const id = randomUUID();
     try {
       await this.db.update(
         `INSERT INTO ${this.table} (REPORT_ID, OWNER_ID, REPORT_NAME, REPORT_NAME_KEY, DESCRIPTION, CATEGORY, SQL_TEXT,
-            VERSION, CREATED_AT, UPDATED_AT, LAST_STATUS)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ${NOW_UTC}, ${NOW_UTC}, 'NEVER')`,
+            PARAMETERS_JSON, VERSION, CREATED_AT, UPDATED_AT, LAST_STATUS)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ${NOW_UTC}, ${NOW_UTC}, 'NEVER')`,
         [
           id,
           ownerId,
@@ -149,6 +218,7 @@ export class ReportRepository {
           input.description,
           input.category,
           input.sql,
+          paramsJson(input.parameters),
         ],
       );
     } catch (e) {
@@ -174,6 +244,7 @@ export class ReportRepository {
       input.description,
       input.category,
       input.sql,
+      paramsJson(input.parameters),
       id,
       ownerId,
     ];
@@ -186,7 +257,7 @@ export class ReportRepository {
     try {
       n = await this.db.update(
         `UPDATE ${this.table}
-            SET REPORT_NAME = ?, REPORT_NAME_KEY = ?, DESCRIPTION = ?, CATEGORY = ?, SQL_TEXT = ?,
+            SET REPORT_NAME = ?, REPORT_NAME_KEY = ?, DESCRIPTION = ?, CATEGORY = ?, SQL_TEXT = ?, PARAMETERS_JSON = ?,
                 VERSION = VERSION + 1, UPDATED_AT = ${NOW_UTC}
           WHERE REPORT_ID = ? AND OWNER_ID = ?${versionClause}`,
         params,

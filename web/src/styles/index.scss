@@ -195,3 +195,107 @@ body {
   width: 100% !important;
   height: 100% !important;
 }
+
+// ---- v2: parameters, sharing, schedules, SSO ----
+.qf-params-panel {
+  margin-top: 1rem;
+  border: 1px solid var(--cds-border-subtle);
+  background: var(--cds-layer);
+  padding: 0.75rem 1rem;
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+  }
+}
+.qf-params {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  align-items: flex-start;
+}
+.qf-params__hint {
+  font-size: 0.875rem;
+  color: var(--cds-text-secondary);
+}
+.qf-params__hint--warn {
+  color: var(--cds-support-warning-inverse, #8e6a00);
+}
+.qf-param-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  width: 100%;
+  > .cds--form-item {
+    flex: 1 1 9rem;
+    min-width: 8rem;
+  }
+}
+.qf-param-row__index {
+  font-family: var(--cds-code-01-font-family, monospace);
+  color: var(--cds-text-helper);
+  padding-bottom: 0.5rem;
+}
+.qf-share-add {
+  display: grid;
+  grid-template-columns: 1fr 9rem auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+.qf-share-who {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.qf-muted {
+  color: var(--cds-text-secondary);
+  font-size: 0.875rem;
+}
+.qf-error-text {
+  color: var(--cds-text-error);
+  font-size: 0.75rem;
+}
+.qf-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+.qf-upcoming {
+  font-size: 0.875rem;
+  background: var(--cds-layer-accent);
+  padding: 0.5rem 0.75rem;
+}
+.qf-fieldset {
+  border: 1px solid var(--cds-border-subtle);
+  padding: 0.75rem 1rem 1rem;
+  legend {
+    font-size: 0.75rem;
+    color: var(--cds-text-secondary);
+    padding: 0 0.25rem;
+  }
+}
+.qf-row-actions {
+  white-space: nowrap;
+}
+.qf-section__title {
+  font-size: 1.25rem;
+  margin: 2rem 0 1rem;
+}
+.qf-tile__owner {
+  font-size: 0.75rem;
+  color: var(--cds-text-secondary);
+}
+.qf-sso {
+  margin-bottom: 1.5rem;
+  .qf-sso__button {
+    width: 100%;
+    max-width: none;
+  }
+}
+.qf-or {
+  text-align: center;
+  color: var(--cds-text-helper);
+  margin-top: 1rem;
+  font-size: 0.875rem;
+}

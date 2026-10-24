@@ -11,6 +11,26 @@ export interface AppUser {
   username: string;
   displayName: string;
   role: Role;
+  email?: string | null;
+  authSource?: AuthSource;
+}
+export type AuthSource = 'LOCAL' | 'OIDC' | 'LDAP';
+
+/** Identity asserted by an external provider after it has authenticated the user. */
+export interface ExternalIdentity {
+  source: 'OIDC' | 'LDAP';
+  externalId: string;
+  username: string;
+  displayName: string;
+  email?: string | null;
+  /** Raw IdP / directory group names (mapped to app groups via GROUP_MAP). */
+  groups: string[];
+}
+
+export interface UserSummary {
+  id: string;
+  username: string;
+  displayName: string;
 }
 
 const BCRYPT_COST = 12;
@@ -30,6 +50,8 @@ interface UserRow {
   IS_ACTIVE: number;
   FAILED_LOGINS: number;
   LOCKED_UNTIL: string | null;
+  AUTH_SOURCE?: AuthSource;
+  EMAIL?: string | null;
 }
 
 const toUser = (r: UserRow): AppUser => ({
@@ -37,6 +59,8 @@ const toUser = (r: UserRow): AppUser => ({
   username: r.USERNAME,
   displayName: r.DISPLAY_NAME,
   role: r.ROLE,
+  email: r.EMAIL ?? null,
+  authSource: r.AUTH_SOURCE ?? 'LOCAL',
 });
 
 /**
@@ -54,7 +78,7 @@ export class UserRepository {
 
   async findById(id: string): Promise<AppUser | null> {
     const rows = await this.db.query<UserRow>(
-      `SELECT USER_ID, USERNAME, DISPLAY_NAME, ROLE, IS_ACTIVE FROM ${this.table} WHERE USER_ID = ? AND IS_ACTIVE = 1`,
+      `SELECT USER_ID, USERNAME, DISPLAY_NAME, ROLE, IS_ACTIVE, AUTH_SOURCE, EMAIL FROM ${this.table} WHERE USER_ID = ? AND IS_ACTIVE = 1`,
       [id],
     );
     return rows[0] ? toUser(rows[0]) : null;
@@ -63,13 +87,19 @@ export class UserRepository {
   async verifyCredentials(username: string, password: string): Promise<AppUser | null> {
     const uname = username.trim().toLowerCase();
     const rows = await this.db.query<UserRow>(
-      `SELECT USER_ID, USERNAME, DISPLAY_NAME, PASSWORD_HASH, ROLE, IS_ACTIVE, FAILED_LOGINS,
+      `SELECT USER_ID, USERNAME, DISPLAY_NAME, PASSWORD_HASH, ROLE, IS_ACTIVE, FAILED_LOGINS, AUTH_SOURCE, EMAIL,
               CASE WHEN LOCKED_UNTIL > ${NOW_UTC} THEN LOCKED_UNTIL ELSE NULL END AS LOCKED_UNTIL
          FROM ${this.table} WHERE USERNAME = ?`,
       [uname],
     );
     const row = rows[0];
-    if (!row || Number(row.IS_ACTIVE) !== 1) {
+    // External (OIDC / LDAP) accounts can never sign in with a local password.
+    if (
+      !row ||
+      Number(row.IS_ACTIVE) !== 1 ||
+      (row.AUTH_SOURCE ?? 'LOCAL') !== 'LOCAL' ||
+      !String(row.PASSWORD_HASH).startsWith('$2')
+    ) {
       await bcrypt.compare(password, DUMMY_HASH);
       return null;
     }
@@ -99,6 +129,72 @@ export class UserRepository {
       [row.USER_ID],
     );
     return toUser(row);
+  }
+
+  /**
+   * Find or create the account for an externally authenticated identity, keyed by
+   * (AUTH_SOURCE, EXTERNAL_ID). A local account with the same username is never
+   * taken over: the sign-in is rejected instead.
+   */
+  async upsertExternal(id: ExternalIdentity, role: Role): Promise<AppUser> {
+    const username = normaliseUsername(id.username);
+    const displayName = (id.displayName || username).slice(0, 256);
+    const email = id.email ? id.email.slice(0, 320) : null;
+    const existing = await this.db.query<UserRow>(
+      `SELECT USER_ID, USERNAME, DISPLAY_NAME, ROLE, IS_ACTIVE, AUTH_SOURCE, EMAIL FROM ${this.table}
+        WHERE AUTH_SOURCE = ? AND EXTERNAL_ID = ?`,
+      [id.source, id.externalId],
+    );
+    if (existing[0]) {
+      if (Number(existing[0].IS_ACTIVE) !== 1)
+        throw new AppError(403, 'ACCOUNT_DISABLED', 'Your QueryForge account is disabled.');
+      await this.db.update(
+        `UPDATE ${this.table} SET DISPLAY_NAME = ?, EMAIL = ?, ROLE = ?, LAST_LOGIN_AT = ${NOW_UTC}, UPDATED_AT = ${NOW_UTC}
+          WHERE USER_ID = ?`,
+        [displayName, email, role, existing[0].USER_ID],
+      );
+      return {
+        id: existing[0].USER_ID,
+        username: existing[0].USERNAME,
+        displayName,
+        role,
+        email,
+        authSource: id.source,
+      };
+    }
+    const clash = await this.db.query<{ USER_ID: string }>(
+      `SELECT USER_ID FROM ${this.table} WHERE USERNAME = ?`,
+      [username],
+    );
+    if (clash[0])
+      throw new AppError(
+        409,
+        'USERNAME_TAKEN',
+        'An account with this username already exists. Ask an administrator to link it.',
+      );
+    const newId = randomUUID();
+    await this.db.update(
+      `INSERT INTO ${this.table} (USER_ID, USERNAME, DISPLAY_NAME, PASSWORD_HASH, ROLE, IS_ACTIVE, FAILED_LOGINS,
+          AUTH_SOURCE, EXTERNAL_ID, EMAIL, LAST_LOGIN_AT, CREATED_AT, UPDATED_AT)
+       VALUES (?, ?, ?, '!', ?, 1, 0, ?, ?, ?, ${NOW_UTC}, ${NOW_UTC}, ${NOW_UTC})`,
+      [newId, username, displayName, role, id.source, id.externalId, email],
+    );
+    return { id: newId, username, displayName, role, email, authSource: id.source };
+  }
+
+  /** Active users matching a search term, for the share dialog. */
+  async search(term: string, limit = 20): Promise<UserSummary[]> {
+    const t = `%${term
+      .trim()
+      .toUpperCase()
+      .replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = await this.db.query<UserRow>(
+      `SELECT USER_ID, USERNAME, DISPLAY_NAME FROM ${this.table}
+        WHERE IS_ACTIVE = 1 AND (UPPER(USERNAME) LIKE ? ESCAPE '\\' OR UPPER(DISPLAY_NAME) LIKE ? ESCAPE '\\')
+        ORDER BY USERNAME FETCH FIRST ${Math.min(Math.max(limit, 1), 50)} ROWS ONLY`,
+      [t, t],
+    );
+    return rows.map((r) => ({ id: r.USER_ID, username: r.USERNAME, displayName: r.DISPLAY_NAME }));
   }
 
   async upsert(input: {
@@ -142,4 +238,20 @@ export class UserRepository {
     );
     return { id, username, displayName: input.displayName, role: input.role };
   }
+}
+
+/** Usernames for external identities: lower-case, restricted character set. */
+export function normaliseUsername(raw: string): string {
+  const u = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._@-]/g, '_')
+    .slice(0, 128);
+  if (u.length < 2)
+    throw new AppError(
+      400,
+      'INVALID_USERNAME',
+      'The identity provider did not supply a usable username.',
+    );
+  return u;
 }

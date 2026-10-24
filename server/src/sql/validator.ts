@@ -1,6 +1,8 @@
 import { LexError, tokenize, type Token } from './lexer.js';
 
 export interface ValidationOptions {
+  /** Accept `?` markers (bound by Mapepire; the caller checks them against parameter definitions). */
+  allowParameterMarkers?: boolean;
   maxLength: number;
   /** Schemas/libraries (upper case) that reporting SQL may never reference. */
   protectedSchemas: string[];
@@ -146,10 +148,10 @@ export function validateReportingSql(input: string, opts: ValidationOptions): Va
     const next = body[k + 1];
     const prev = body[k - 1];
 
-    if (t.type === 'symbol' && t.value === '?')
+    if (t.type === 'symbol' && t.value === '?' && !opts.allowParameterMarkers)
       return fail(
         'PARAMETER_MARKER',
-        'Parameter markers (?) are not supported in reports.',
+        'Parameter markers (?) need a matching report parameter definition.',
         t.start,
       );
     if (t.type === 'symbol' && t.value === ':' && next?.type === 'word' && prev?.type !== 'number')

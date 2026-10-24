@@ -55,4 +55,46 @@ page.once('dialog', (d) => d.accept());
 await page.getByRole('button', { name: /test connection/i }).click();
 await page.getByText(/OK ·/).first().waitFor();
 await shot('05-data-source');
+
+// ---- v2: parameters, sharing, schedules ----
+await page.goto(`${base}/`);
+const shared = page.getByRole('heading', { name: 'Shared with me' });
+await shared.waitFor();
+await shared.scrollIntoViewIfNeeded();
+await shot('v2-dashboard-shared');
+
+await page.goto(`${base}/`);
+await page
+  .locator('.qf-tile', { hasText: 'Orders by Region and Date' })
+  .getByRole('button', { name: /run/i })
+  .first()
+  .click();
+const dialog = page.getByRole('dialog');
+await dialog
+  .getByLabel(/Region/)
+  .first()
+  .waitFor();
+await dialog
+  .getByLabel(/Region/)
+  .first()
+  .selectOption('West');
+await dialog.getByLabel(/Minimum amount/).fill('250');
+await shot('v2-run-params');
+await page.keyboard.press('Escape');
+
+await page.goto(`${base}/`);
+await page.getByRole('button', { name: 'Share Customer Credit Limits' }).click();
+await page
+  .getByRole('dialog')
+  .getByText(/finance/i)
+  .first()
+  .waitFor();
+await shot('v2-share-dialog');
+await page.keyboard.press('Escape');
+
+await page.goto(`${base}/schedules`);
+await page.getByRole('button', { name: 'Edit schedule' }).first().click();
+await page.getByText(/Next runs/).waitFor();
+await shot('v2-schedule-editor');
+
 await browser.close();

@@ -38,6 +38,28 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON QFMETA.QF_USERS, QFMETA.QF_REPORTS,
 ```
 
 Objects: `QF_USERS`, `QF_REPORTS`, `QF_EXECUTIONS`, `QF_SCHEMA_VERSION` and their indexes.
+
+### Migration 002 — parameters, sharing, schedules
+
+`server/migrations/002_parameters_sharing_schedules.sql` (applied by `npm run migrate`, or print it with
+`npm run migrate -- --print` for a DBA) adds:
+
+- `QF_REPORTS.PARAMETERS_JSON` (parameter definitions), `QF_EXECUTIONS.PARAMS_JSON` and `SCHEDULE_ID`,
+  and the `QF_EXEC_CK_KIND` check constraint is dropped and re-created to allow kind `SCHEDULE`;
+- `QF_USERS.AUTH_SOURCE` / `EXTERNAL_ID` / `EMAIL` (+ unique index) for OIDC/LDAP users;
+- new tables `QF_USER_GROUPS`, `QF_REPORT_SHARES`, `QF_SCHEDULES` and `QF_LOCKS` (scheduler lease).
+
+It is additive (no data is dropped) and recorded in `QF_SCHEMA_VERSION`. Run it on a non-production
+system first and take a save of `QFMETA` before applying it anywhere else. If a DBA applies it, grant:
+
+```
+GRANT SELECT, INSERT, UPDATE, DELETE ON QFMETA.QF_USER_GROUPS, QFMETA.QF_REPORT_SHARES,
+      QFMETA.QF_SCHEDULES, QFMETA.QF_LOCKS TO QFAPP;
+```
+
+`QFREPORT` still needs no authority to `QFMETA`. Scheduled runs use the same `QFREPORT` read-only job as
+interactive runs, so no extra IBM i authority is needed for scheduling. SMTP, OIDC and LDAP traffic
+originates from the QueryForge server, not from IBM i.
 `QFREPORT` should have **no** authority to `QFMETA` (it is also blocked by the validator).
 
 ## 4. Reporting authorities

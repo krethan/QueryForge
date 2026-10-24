@@ -64,6 +64,50 @@ const schema = z.object({
   // Additional protected schemas (comma-separated) user SQL may never reference
   PROTECTED_SCHEMAS: z.string().optional(),
   XLSX_FORMULA_ESCAPE: z.enum(['prefix', 'none']).default('prefix'),
+
+  // Sign-in methods
+  AUTH_LOCAL_ENABLED: bool.default(true),
+  OIDC_ISSUER_URL: z.string().url().optional(),
+  OIDC_CLIENT_ID: z.string().optional(),
+  OIDC_CLIENT_SECRET: z.string().optional(),
+  OIDC_REDIRECT_URI: z.string().url().optional(),
+  OIDC_SCOPES: z.string().default('openid profile email'),
+  OIDC_GROUPS_CLAIM: z.string().default('groups'),
+  OIDC_USERNAME_CLAIM: z.string().default('preferred_username'),
+  OIDC_LABEL: z.string().default('Single sign-on'),
+  LDAP_URL: z.string().optional(),
+  LDAP_STARTTLS: bool.default(false),
+  LDAP_REJECT_UNAUTHORIZED: bool.default(true),
+  LDAP_CA_FILE: z.string().optional(),
+  LDAP_BIND_DN: z.string().optional(),
+  LDAP_BIND_PASSWORD: z.string().optional(),
+  LDAP_SEARCH_BASE: z.string().optional(),
+  LDAP_USER_FILTER: z.string().default('(sAMAccountName={{username}})'),
+  LDAP_GROUP_ATTRIBUTE: z.string().default('memberOf'),
+  LDAP_LABEL: z.string().default('Directory (LDAP / AD)'),
+  LDAP_TIMEOUT_MS: int(10000),
+  /** IdP or directory group -> application group, e.g. "QF-Finance=finance;CN=Sales,OU=Groups,DC=corp=sales" */
+  GROUP_MAP: z.string().optional(),
+  /** Application groups whose members get the ADMIN role on sign-in. */
+  ADMIN_GROUPS: z.string().optional(),
+
+  // Scheduled runs and email
+  SCHEDULER_ENABLED: bool.default(false),
+  SCHEDULER_POLL_MS: int(30000, 1000),
+  SCHEDULER_LEASE_MS: int(120000, 5000),
+  SCHEDULE_MAX_FAILURES: int(3),
+  SCHEDULE_MIN_INTERVAL_MINUTES: int(15),
+  SCHEDULE_MAX_RECIPIENTS: int(20),
+  SCHEDULE_RECIPIENT_DOMAINS: z.string().optional(),
+  SCHEDULE_DEFAULT_TIMEZONE: z.string().default('UTC'),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: int(587),
+  SMTP_SECURE: bool.default(false),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  SMTP_FROM: z.string().optional(),
+  SMTP_REJECT_UNAUTHORIZED: bool.default(true),
+  SMTP_CA_FILE: z.string().optional(),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -99,6 +143,75 @@ export interface AppConfig {
   session: { secret: string; ttlMinutes: number; cookieSecure: boolean };
   protectedSchemas: string[];
   xlsxFormulaEscape: 'prefix' | 'none';
+  auth: {
+    localEnabled: boolean;
+    oidc?: {
+      issuer: string;
+      clientId: string;
+      clientSecret?: string;
+      redirectUri: string;
+      scopes: string;
+      groupsClaim: string;
+      usernameClaim: string;
+      label: string;
+    };
+    ldap?: {
+      url: string;
+      startTls: boolean;
+      rejectUnauthorized: boolean;
+      caFile?: string;
+      bindDn?: string;
+      bindPassword?: string;
+      searchBase: string;
+      userFilter: string;
+      groupAttribute: string;
+      label: string;
+      timeoutMs: number;
+    };
+    /** lower-cased external group -> application group */
+    groupMap: Map<string, string>;
+    adminGroups: string[];
+  };
+  scheduler: {
+    enabled: boolean;
+    pollMs: number;
+    leaseMs: number;
+    maxFailures: number;
+    minIntervalMinutes: number;
+    maxRecipients: number;
+    recipientDomains: string[];
+    defaultTimezone: string;
+  };
+  smtp?: {
+    host: string;
+    port: number;
+    secure: boolean;
+    user?: string;
+    password?: string;
+    from: string;
+    rejectUnauthorized: boolean;
+    caFile?: string;
+  };
+}
+
+/** Parse "external=app;external2=app2". Keys compare case-insensitively. */
+export function parseGroupMap(s?: string): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const part of (s ?? '').split(';')) {
+    const i = part.lastIndexOf('=');
+    if (i <= 0) continue;
+    const ext = part.slice(0, i).trim();
+    const app = part
+      .slice(i + 1)
+      .trim()
+      .toLowerCase();
+    if (!ext || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(app))
+      throw new Error(
+        `Invalid configuration: GROUP_MAP entry "${part}" (app group must match [a-z0-9._-])`,
+      );
+    m.set(ext.toLowerCase(), app);
+  }
+  return m;
 }
 
 const list = (s?: string) =>
@@ -123,6 +236,30 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
   const metaSchema = e.META_SCHEMA.toUpperCase();
+  const prod = e.NODE_ENV === 'production';
+  const oidcVars = [e.OIDC_ISSUER_URL, e.OIDC_CLIENT_ID, e.OIDC_REDIRECT_URI];
+  if (oidcVars.some(Boolean) && !oidcVars.every(Boolean))
+    throw new Error(
+      'Invalid configuration: OIDC_ISSUER_URL, OIDC_CLIENT_ID and OIDC_REDIRECT_URI must be set together.',
+    );
+  if (prod && e.OIDC_ISSUER_URL && !e.OIDC_ISSUER_URL.startsWith('https://'))
+    throw new Error('Invalid configuration: OIDC_ISSUER_URL must use https in production.');
+  if (e.LDAP_URL) {
+    if (!/^ldaps?:\/\//.test(e.LDAP_URL))
+      throw new Error('Invalid configuration: LDAP_URL must start with ldap:// or ldaps://');
+    if (!e.LDAP_SEARCH_BASE)
+      throw new Error('Invalid configuration: LDAP_SEARCH_BASE is required with LDAP_URL.');
+    if (!e.LDAP_USER_FILTER.includes('{{username}}'))
+      throw new Error('Invalid configuration: LDAP_USER_FILTER must contain {{username}}.');
+    if (prod && e.LDAP_URL.startsWith('ldap://') && !e.LDAP_STARTTLS)
+      throw new Error('Invalid configuration: use ldaps:// or LDAP_STARTTLS=true in production.');
+  }
+  if (!e.AUTH_LOCAL_ENABLED && !e.OIDC_ISSUER_URL && !e.LDAP_URL)
+    throw new Error(
+      'Invalid configuration: AUTH_LOCAL_ENABLED=false requires OIDC or LDAP to be configured.',
+    );
+  if (e.SMTP_HOST && !e.SMTP_FROM)
+    throw new Error('Invalid configuration: SMTP_FROM is required with SMTP_HOST.');
   return {
     env: e.NODE_ENV,
     port: e.PORT,
@@ -169,5 +306,65 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     protectedSchemas: Array.from(new Set([metaSchema, ...list(e.PROTECTED_SCHEMAS)])),
     xlsxFormulaEscape: e.XLSX_FORMULA_ESCAPE,
+    auth: {
+      localEnabled: e.AUTH_LOCAL_ENABLED,
+      oidc: e.OIDC_ISSUER_URL
+        ? {
+            issuer: e.OIDC_ISSUER_URL,
+            clientId: e.OIDC_CLIENT_ID!,
+            clientSecret: e.OIDC_CLIENT_SECRET || undefined,
+            redirectUri: e.OIDC_REDIRECT_URI!,
+            scopes: e.OIDC_SCOPES,
+            groupsClaim: e.OIDC_GROUPS_CLAIM,
+            usernameClaim: e.OIDC_USERNAME_CLAIM,
+            label: e.OIDC_LABEL,
+          }
+        : undefined,
+      ldap: e.LDAP_URL
+        ? {
+            url: e.LDAP_URL,
+            startTls: e.LDAP_STARTTLS,
+            rejectUnauthorized: e.LDAP_REJECT_UNAUTHORIZED,
+            caFile: e.LDAP_CA_FILE,
+            bindDn: e.LDAP_BIND_DN,
+            bindPassword: e.LDAP_BIND_PASSWORD,
+            searchBase: e.LDAP_SEARCH_BASE!,
+            userFilter: e.LDAP_USER_FILTER,
+            groupAttribute: e.LDAP_GROUP_ATTRIBUTE,
+            label: e.LDAP_LABEL,
+            timeoutMs: e.LDAP_TIMEOUT_MS,
+          }
+        : undefined,
+      groupMap: parseGroupMap(e.GROUP_MAP),
+      adminGroups: (e.ADMIN_GROUPS ?? '')
+        .split(',')
+        .map((x) => x.trim().toLowerCase())
+        .filter(Boolean),
+    },
+    scheduler: {
+      enabled: e.SCHEDULER_ENABLED,
+      pollMs: e.SCHEDULER_POLL_MS,
+      leaseMs: e.SCHEDULER_LEASE_MS,
+      maxFailures: e.SCHEDULE_MAX_FAILURES,
+      minIntervalMinutes: e.SCHEDULE_MIN_INTERVAL_MINUTES,
+      maxRecipients: e.SCHEDULE_MAX_RECIPIENTS,
+      recipientDomains: (e.SCHEDULE_RECIPIENT_DOMAINS ?? '')
+        .split(',')
+        .map((x) => x.trim().toLowerCase().replace(/^@/, ''))
+        .filter(Boolean),
+      defaultTimezone: e.SCHEDULE_DEFAULT_TIMEZONE,
+    },
+    smtp: e.SMTP_HOST
+      ? {
+          host: e.SMTP_HOST,
+          port: e.SMTP_PORT,
+          secure: e.SMTP_SECURE,
+          user: e.SMTP_USER || undefined,
+          password: e.SMTP_PASSWORD || undefined,
+          from: e.SMTP_FROM!,
+          rejectUnauthorized: e.SMTP_REJECT_UNAUTHORIZED,
+          caFile: e.SMTP_CA_FILE,
+        }
+      : undefined,
   };
 }

@@ -15,6 +15,7 @@ import { DataSourcePage } from './pages/DataSourcePage';
 import { LoginPage } from './pages/LoginPage';
 import { ReportEditorPage } from './pages/ReportEditorPage';
 import { SavedReportsPage } from './pages/SavedReportsPage';
+import { SchedulesPage } from './pages/SchedulesPage';
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -46,6 +47,7 @@ export const routes: RouteObject[] = [
       { path: '/reports', element: <SavedReportsPage /> },
       { path: '/reports/new', element: <ReportEditorPage key="new" /> },
       { path: '/reports/:id', element: <ReportEditorPage /> },
+      { path: '/schedules', element: <SchedulesPage /> },
       { path: '/datasource', element: <DataSourcePage /> },
       { path: '/account', element: <AccountPage /> },
       { path: '*', element: <NotFound /> },

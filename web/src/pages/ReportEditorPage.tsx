@@ -1,9 +1,19 @@
 import { Button, InlineLoading, InlineNotification, Loading, Modal, Tag } from '@carbon/react';
-import { Erase, Play, Save, StopFilled } from '@carbon/icons-react';
+import { Erase, Play, Save, Share as ShareIcon, StopFilled, Time } from '@carbon/icons-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
-import type { Report, RunResponse } from '../api/types';
+import type {
+  ParameterDef,
+  ParameterValues,
+  Report,
+  RunResponse,
+  ScheduleSettings,
+} from '../api/types';
+import { ParameterEditor } from '../components/ParameterEditor';
+import { RunParamsModal } from '../components/RunParamsModal';
+import { ScheduleEditorModal } from '../components/ScheduleEditorModal';
+import { ShareModal } from '../components/ShareModal';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
 import { ResultsTable } from '../components/ResultsTable';
@@ -27,13 +37,24 @@ export function ReportEditorPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [defs, setDefs] = useState<ParameterDef[]>([]);
+  const [askParams, setAskParams] = useState(false);
+  const [paramErrors, setParamErrors] = useState<Record<string, string> | null>(null);
+  const [lastValues, setLastValues] = useState<ParameterValues | undefined>(undefined);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [schedSettings, setSchedSettings] = useState<ScheduleSettings | null>(null);
 
-  const dirty = report ? sql !== report.sql : sql.trim().length > 0;
+  const access = report?.access ?? 'OWNER';
+  const canEdit = access !== 'VIEWER';
+  const defsChanged = JSON.stringify(defs) !== JSON.stringify(report?.parameters ?? []);
+  const dirty = canEdit && (report ? sql !== report.sql || defsChanged : sql.trim().length > 0);
 
   useEffect(() => {
     if (!id) {
       setReport(null);
       setSql('');
+      setDefs([]);
       setResult(null);
       setLoading(false);
       return;
@@ -46,6 +67,7 @@ export function ReportEditorPage() {
         if (cancelled) return;
         setReport(r);
         setSql(r.sql);
+        setDefs(r.parameters ?? []);
         setError(null);
       })
       .catch((e) => !cancelled && setError(e))
@@ -55,39 +77,56 @@ export function ReportEditorPage() {
     };
   }, [id]);
 
-  const run = useCallback(async () => {
-    if (runningRef.current || !sql.trim()) return; // duplicate-click guard
-    runningRef.current = true;
-    const execId = newExecutionId();
-    setRunning(execId);
-    setError(null);
-    setNotice(null);
-    try {
-      // A clean saved report is re-executed from its stored definition; otherwise run the editor text.
-      const r =
-        report && !dirty
-          ? await api.executeReport(report.id, execId)
-          : await api.execute(sql, execId);
-      setResult(r);
-      if (report && !dirty)
-        setReport((p) =>
-          p
-            ? {
-                ...p,
-                lastExecutedAt: r.completedAt,
-                lastRowCount: r.rowCount,
-                lastStatus: 'SUCCEEDED',
-              }
-            : p,
-        );
-    } catch (e) {
-      setError(e);
-      if (!(e instanceof ApiError && e.code === 'CANCELLED')) setResult(null);
-    } finally {
-      runningRef.current = false;
-      setRunning(null);
-    }
-  }, [sql, report, dirty]);
+  const runWith = useCallback(
+    async (values?: ParameterValues) => {
+      if (runningRef.current || !sql.trim()) return; // duplicate-click guard
+      runningRef.current = true;
+      setParamErrors(null);
+      const execId = newExecutionId();
+      setRunning(execId);
+      setError(null);
+      setNotice(null);
+      try {
+        // A clean saved report is re-executed from its stored definition; otherwise run the editor text.
+        const r =
+          report && !dirty
+            ? await api.executeReport(report.id, execId, undefined, values)
+            : await api.execute(sql, execId, undefined, { parameters: defs, values: values ?? {} });
+        setResult(r);
+        setAskParams(false);
+        setLastValues(values);
+        if (report && !dirty)
+          setReport((p) =>
+            p
+              ? {
+                  ...p,
+                  lastExecutedAt: r.completedAt,
+                  lastRowCount: r.rowCount,
+                  lastStatus: 'SUCCEEDED',
+                }
+              : p,
+          );
+      } catch (e) {
+        if (askParams && e instanceof ApiError && e.fields) {
+          setParamErrors(e.fields);
+          return;
+        }
+        setAskParams(false);
+        setError(e);
+        if (!(e instanceof ApiError && e.code === 'CANCELLED')) setResult(null);
+      } finally {
+        runningRef.current = false;
+        setRunning(null);
+      }
+    },
+    [sql, report, dirty, defs, askParams],
+  );
+
+  // Parameterized reports show the Carbon run form first.
+  const run = useCallback(() => {
+    if (defs.length > 0) setAskParams(true);
+    else void runWith();
+  }, [defs, runWith]);
 
   // Auto-run when opened from a dashboard "Run" action.
   useEffect(() => {
@@ -130,12 +169,14 @@ export function ReportEditorPage() {
         description: v.description || null,
         category: v.category || null,
         sql,
+        parameters: defs,
       };
       const saved = report
         ? await api.updateReport(report.id, { ...input, version: report.version })
         : await api.createReport(input);
       setReport(saved);
       setSql(saved.sql);
+      setDefs(saved.parameters ?? []);
       setSaveOpen(false);
       setNotice(`Saved "${saved.name}".`);
       if (!report) nav(`/reports/${saved.id}`, { replace: true });
@@ -155,6 +196,12 @@ export function ReportEditorPage() {
         <div>
           <h1 id="editor-title">{report ? report.name : 'New Report'}</h1>
           <p>
+            {report && access !== 'OWNER' && (
+              <Tag size="sm" type="purple">
+                Shared with you · {access === 'EDITOR' ? 'Editor' : 'Viewer'}
+                {report.ownerName ? ` · owner ${report.ownerName}` : ''}
+              </Tag>
+            )}{' '}
             {report?.description ?? 'Write a single read-only SELECT, WITH or VALUES statement.'}
             {dirty && (
               <span className="qf-dirty">
@@ -172,8 +219,19 @@ export function ReportEditorPage() {
         value={sql}
         onChange={setSql}
         onRun={run}
-        readOnly={Boolean(running)}
+        readOnly={Boolean(running) || !canEdit}
       />
+      {(canEdit || defs.length > 0) && (
+        <details className="qf-params-panel" open={defs.length > 0}>
+          <summary>Parameters{defs.length ? ` (${defs.length})` : ''}</summary>
+          <ParameterEditor
+            sql={sql}
+            value={defs}
+            onChange={setDefs}
+            readOnly={!canEdit || Boolean(running)}
+          />
+        </details>
+      )}
       <div className="qf-editor-actions">
         <Button renderIcon={Play} onClick={run} disabled={Boolean(running) || !sql.trim()}>
           Run
@@ -186,18 +244,38 @@ export function ReportEditorPage() {
             </Button>
           </>
         )}
-        <Button
-          kind="secondary"
-          renderIcon={Save}
-          onClick={() => setSaveOpen(true)}
-          disabled={!sql.trim() || Boolean(running)}
-        >
-          {report ? 'Save' : 'Save as report'}
-        </Button>
+        {canEdit && (
+          <Button
+            kind="secondary"
+            renderIcon={Save}
+            onClick={() => setSaveOpen(true)}
+            disabled={!sql.trim() || Boolean(running)}
+          >
+            {report ? 'Save' : 'Save as report'}
+          </Button>
+        )}
+        {report && access === 'OWNER' && (
+          <Button kind="tertiary" renderIcon={ShareIcon} onClick={() => setShareOpen(true)}>
+            Share
+          </Button>
+        )}
+        {report && canEdit && (
+          <Button
+            kind="tertiary"
+            renderIcon={Time}
+            disabled={dirty}
+            onClick={async () => {
+              setSchedSettings(await api.scheduleSettings().catch(() => null));
+              setSchedOpen(true);
+            }}
+          >
+            Schedule
+          </Button>
+        )}
         <Button
           kind="ghost"
           renderIcon={Erase}
-          disabled={Boolean(running)}
+          disabled={Boolean(running) || !canEdit}
           onClick={() => {
             setSql('');
             setResult(null);
@@ -227,8 +305,12 @@ export function ReportEditorPage() {
               <ExportButton
                 source={
                   report && !dirty
-                    ? { reportId: report.id }
-                    : { sql, name: report?.name ?? 'Query results' }
+                    ? { reportId: report.id, values: lastValues }
+                    : {
+                        sql,
+                        name: report?.name ?? 'Query results',
+                        ...(defs.length ? { parameters: defs, values: lastValues ?? {} } : {}),
+                      }
                 }
                 disabled={Boolean(running)}
                 onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
@@ -257,6 +339,28 @@ export function ReportEditorPage() {
           setSaveError(null);
         }}
         onSave={save}
+      />
+      <RunParamsModal
+        open={askParams}
+        title={`Run ${report?.name ?? 'query'}`}
+        parameters={defs}
+        initial={lastValues}
+        serverErrors={paramErrors}
+        primaryText={running ? 'Running…' : 'Run'}
+        onClose={() => setAskParams(false)}
+        onSubmit={(v) => void runWith(v)}
+      />
+      {shareOpen && report && <ShareModal report={report} onClose={() => setShareOpen(false)} />}
+      <ScheduleEditorModal
+        open={schedOpen}
+        schedule={null}
+        report={report}
+        settings={schedSettings}
+        onClose={() => setSchedOpen(false)}
+        onSaved={() => {
+          setSchedOpen(false);
+          setNotice('Schedule saved. Manage it on the Schedules page.');
+        }}
       />
       <Modal
         open={blocker.state === 'blocked'}

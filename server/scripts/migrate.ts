@@ -123,7 +123,7 @@ async function main() {
         },
       );
     }
-    for (const table of [T.users, T.reports, T.executions, T.version]) {
+    for (const table of Object.values(T)) {
       await job
         .execute(`REVOKE ALL ON ${schema}.${table} FROM PUBLIC`)
         .catch((e) => console.warn(`REVOKE ${table}: ${e.message}`));

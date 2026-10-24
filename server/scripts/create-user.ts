@@ -1,6 +1,7 @@
 /**
  * Create or reset an application user (stored in <META_SCHEMA>.QF_USERS, bcrypt hash).
- *   npm run user:create -- --username jdoe --name "Jane Doe" [--admin]
+ *   npm run user:create -- --username jdoe --name "Jane Doe" [--admin] [--groups finance,ops]
+ * --groups replaces the user's LOCAL group memberships (lower case: a-z 0-9 . _ -).
  * The password is read from QF_NEW_PASSWORD or prompted on stdin (not echoed).
  */
 import 'dotenv/config';
@@ -8,6 +9,7 @@ import { createInterface } from 'node:readline';
 import { loadConfig } from '../src/config/config.js';
 import { MapepireMetadataDb } from '../src/db/mapepire.js';
 import { UserRepository } from '../src/auth/users.js';
+import { GROUP_NAME_RE, GroupRepository } from '../src/sharing/groups.js';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -30,6 +32,17 @@ async function readPassword(): Promise<string> {
 async function main() {
   const username = arg('username');
   if (!username) throw new Error('--username is required');
+  const groupsArg = arg('groups');
+  const groups =
+    groupsArg === undefined
+      ? undefined
+      : groupsArg
+          .split(',')
+          .map((g) => g.trim())
+          .filter(Boolean);
+  const bad = (groups ?? []).filter((g) => !GROUP_NAME_RE.test(g));
+  if (bad.length)
+    throw new Error(`Invalid group name(s): ${bad.join(', ')} (use lower case a-z 0-9 . _ -)`);
   const cfg = loadConfig();
   const db = new MapepireMetadataDb(cfg);
   try {
@@ -41,7 +54,10 @@ async function main() {
       password,
       role: process.argv.includes('--admin') ? 'ADMIN' : 'USER',
     });
-    console.log(`User ${u.username} (${u.id}) saved.`);
+    if (groups) await new GroupRepository(db, cfg.metadata.schema).sync(u.id, 'LOCAL', groups);
+    console.log(
+      `User ${u.username} (${u.id}) saved.${groups ? ` Groups: ${groups.join(', ') || '(none)'}` : ''}`,
+    );
   } finally {
     await db.close();
   }

@@ -3,13 +3,28 @@ import type { MetadataDb } from '../db/types.js';
 import { NOW_UTC, T, q } from '../db/schema.js';
 import { dbTimestampToIso } from '../util/time.js';
 
+export type ExecKind = 'RUN' | 'EXPORT' | 'SCHEDULE';
+export interface ExecContext {
+  id: string;
+  userId: string;
+  reportId?: string | null;
+  /** Owner of the report; LAST_* columns are only updated through the owner-scoped statement. */
+  reportOwnerId?: string | null;
+  kind: ExecKind;
+  sql: string;
+  parameters?: Record<string, string | number | null> | null;
+  scheduleId?: string | null;
+}
+
 export type RunStatus = 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT' | 'CANCELLED';
 
 export interface ExecutionRecord {
   id: string;
   reportId: string | null;
-  kind: 'RUN' | 'EXPORT';
+  kind: ExecKind;
   status: RunStatus;
+  parameters: Record<string, string | number | null> | null;
+  scheduleId: string | null;
   startedAt: string | null;
   completedAt: string | null;
   elapsedMs: number | null;
@@ -45,31 +60,35 @@ export class HistoryRepository {
     this.reports = q(schema, T.reports);
   }
 
-  async start(e: {
-    id: string;
-    userId: string;
-    reportId?: string | null;
-    kind: 'RUN' | 'EXPORT';
-    sql: string;
-  }) {
+  async start(e: ExecContext) {
     const hash = createHash('sha256').update(e.sql).digest('hex');
     await this.db.transaction(async (tx) => {
       await tx.update(
-        `INSERT INTO ${this.table} (EXECUTION_ID, REPORT_ID, USER_ID, KIND, STATUS, STARTED_AT, TRUNCATED, SQL_SHA256)
-         VALUES (?, ?, ?, ?, 'RUNNING', ${NOW_UTC}, 0, ?)`,
-        [e.id, e.reportId ?? null, e.userId, e.kind, hash],
+        `INSERT INTO ${this.table} (EXECUTION_ID, REPORT_ID, USER_ID, KIND, STATUS, STARTED_AT, TRUNCATED, SQL_SHA256, PARAMS_JSON, SCHEDULE_ID)
+         VALUES (?, ?, ?, ?, 'RUNNING', ${NOW_UTC}, 0, ?, ?, ?)`,
+        [
+          e.id,
+          e.reportId ?? null,
+          e.userId,
+          e.kind,
+          hash,
+          e.parameters && Object.keys(e.parameters).length
+            ? JSON.stringify(e.parameters).slice(0, 8000)
+            : null,
+          e.scheduleId ?? null,
+        ],
       );
-      if (e.reportId && e.kind === 'RUN') {
+      if (e.reportId && e.kind !== 'EXPORT') {
         await tx.update(
           `UPDATE ${this.reports} SET LAST_STATUS = 'RUNNING' WHERE REPORT_ID = ? AND OWNER_ID = ?`,
-          [e.reportId, e.userId],
+          [e.reportId, e.reportOwnerId ?? e.userId],
         );
       }
     });
   }
 
   async finish(
-    e: { id: string; userId: string; reportId?: string | null; kind: 'RUN' | 'EXPORT' },
+    e: Pick<ExecContext, 'id' | 'userId' | 'reportId' | 'reportOwnerId' | 'kind'>,
     f: FinishInfo,
   ) {
     await this.db.transaction(async (tx) => {
@@ -90,12 +109,18 @@ export class HistoryRepository {
           e.userId,
         ],
       );
-      if (e.reportId && e.kind === 'RUN') {
+      if (e.reportId && e.kind !== 'EXPORT') {
         await tx.update(
           `UPDATE ${this.reports}
               SET LAST_EXECUTED_AT = ${NOW_UTC}, LAST_STATUS = ?, LAST_ROW_COUNT = ?, LAST_DURATION_MS = ?
             WHERE REPORT_ID = ? AND OWNER_ID = ?`,
-          [f.status, f.rowCount ?? null, Math.round(f.elapsedMs), e.reportId, e.userId],
+          [
+            f.status,
+            f.rowCount ?? null,
+            Math.round(f.elapsedMs),
+            e.reportId,
+            e.reportOwnerId ?? e.userId,
+          ],
         );
       }
     });
@@ -113,14 +138,17 @@ export class HistoryRepository {
       params.push(opts.reportId);
     }
     const rows = await this.db.query<Record<string, unknown>>(
-      `SELECT EXECUTION_ID, REPORT_ID, KIND, STATUS, STARTED_AT, COMPLETED_AT, ELAPSED_MS, ROW_COUNT, TRUNCATED, SQL_STATE, ERROR_MESSAGE
+      `SELECT EXECUTION_ID, REPORT_ID, KIND, STATUS, STARTED_AT, COMPLETED_AT, ELAPSED_MS, ROW_COUNT, TRUNCATED, SQL_STATE, ERROR_MESSAGE,
+              PARAMS_JSON, SCHEDULE_ID
          FROM ${this.table} WHERE ${where} ORDER BY STARTED_AT DESC FETCH FIRST ${limit} ROWS ONLY`,
       params,
     );
     return rows.map((r) => ({
       id: String(r.EXECUTION_ID),
       reportId: (r.REPORT_ID as string) ?? null,
-      kind: r.KIND as 'RUN' | 'EXPORT',
+      kind: r.KIND as ExecKind,
+      parameters: parseJsonObject(r.PARAMS_JSON),
+      scheduleId: (r.SCHEDULE_ID as string) ?? null,
       status: r.STATUS as RunStatus,
       startedAt: dbTimestampToIso(r.STARTED_AT),
       completedAt: dbTimestampToIso(r.COMPLETED_AT),
@@ -130,5 +158,15 @@ export class HistoryRepository {
       sqlState: (r.SQL_STATE as string)?.trim() || null,
       errorMessage: (r.ERROR_MESSAGE as string) ?? null,
     }));
+  }
+}
+
+function parseJsonObject(v: unknown): Record<string, string | number | null> | null {
+  if (v === null || v === undefined || v === '') return null;
+  try {
+    const o = JSON.parse(String(v));
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
+  } catch {
+    return null;
   }
 }

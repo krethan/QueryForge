@@ -9,7 +9,8 @@ import {
   Tag,
   Tile,
 } from '@carbon/react';
-import { Add, Edit, Play, TrashCan } from '@carbon/icons-react';
+import { Add, Edit, Play, Share as ShareIcon, TrashCan, View } from '@carbon/icons-react';
+import { ShareModal } from '../components/ShareModal';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
@@ -19,21 +20,25 @@ import { formatDateTime, formatDuration, statusLabel, statusTagType } from '../u
 
 export function useReports(search: string, sort: string) {
   const [reports, setReports] = useState<Report[] | null>(null);
+  const [shared, setShared] = useState<Report[]>([]);
   const [error, setError] = useState<unknown>(null);
   const load = useCallback(async () => {
     try {
       setError(null);
-      setReports(await api.listReports({ search, sort }));
+      const r = await api.listAllReports({ search, sort });
+      setReports(r.owned);
+      setShared(r.shared);
     } catch (e) {
       setError(e);
       setReports([]);
+      setShared([]);
     }
   }, [search, sort]);
   useEffect(() => {
     const t = setTimeout(() => void load(), search ? 250 : 0);
     return () => clearTimeout(t);
   }, [load, search]);
-  return { reports, error, reload: load, setError };
+  return { reports, shared, error, reload: load, setError };
 }
 
 export function DeleteReportModal({
@@ -82,12 +87,92 @@ export function DeleteReportModal({
   );
 }
 
+function ReportTile({
+  r,
+  onDelete,
+  onShare,
+}: {
+  r: Report;
+  onDelete(r: Report): void;
+  onShare(r: Report): void;
+}) {
+  const nav = useNavigate();
+  return (
+    <Tile className="qf-tile" data-testid="report-tile">
+      <h3>{r.name}</h3>
+      {r.access && r.access !== 'OWNER' && (
+        <p className="qf-tile__owner">
+          Shared by {r.ownerName ?? 'another user'} ·{' '}
+          <Tag size="sm" type="purple">
+            {r.access === 'EDITOR' ? 'Editor' : 'Viewer'}
+          </Tag>
+        </p>
+      )}
+      {r.category && (
+        <div>
+          <Tag size="sm" type="cool-gray">
+            {r.category}
+          </Tag>
+        </div>
+      )}
+      <p className="qf-tile__desc">{r.description ?? 'No description'}</p>
+      <div className="qf-tile__meta">
+        <div>
+          Last run: {formatDateTime(r.lastExecutedAt)}{' '}
+          <Tag size="sm" type={statusTagType(r.lastStatus) as 'gray'}>
+            {statusLabel[r.lastStatus]}
+          </Tag>
+        </div>
+        {r.lastRowCount !== null && (
+          <div>
+            {r.lastRowCount.toLocaleString()} rows · {formatDuration(r.lastDurationMs)}
+          </div>
+        )}
+      </div>
+      <div className="qf-tile__actions">
+        <Button size="sm" renderIcon={Play} onClick={() => nav(`/reports/${r.id}?run=1`)}>
+          Run
+        </Button>
+        <Button
+          size="sm"
+          kind="ghost"
+          renderIcon={r.access === 'VIEWER' ? View : Edit}
+          onClick={() => nav(`/reports/${r.id}`)}
+        >
+          {r.access === 'VIEWER' ? 'Open' : 'Edit'}
+        </Button>
+        {(!r.access || r.access === 'OWNER') && (
+          <>
+            <Button
+              size="sm"
+              kind="ghost"
+              hasIconOnly
+              iconDescription={`Share ${r.name}`}
+              renderIcon={ShareIcon}
+              onClick={() => onShare(r)}
+            />
+            <Button
+              size="sm"
+              kind="ghost"
+              hasIconOnly
+              iconDescription={`Delete ${r.name}`}
+              renderIcon={TrashCan}
+              onClick={() => onDelete(r)}
+            />
+          </>
+        )}
+      </div>
+    </Tile>
+  );
+}
+
 export function DashboardPage() {
   const nav = useNavigate();
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState('name');
-  const { reports, error, reload, setError } = useReports(search, sort);
+  const { reports, shared, error, reload, setError } = useReports(search, sort);
   const [toDelete, setToDelete] = useState<Report | null>(null);
+  const [toShare, setToShare] = useState<Report | null>(null);
 
   return (
     <>
@@ -150,54 +235,23 @@ export function DashboardPage() {
       ) : (
         <div className="qf-tiles">
           {reports.map((r) => (
-            <Tile key={r.id} className="qf-tile" data-testid="report-tile">
-              <h3>{r.name}</h3>
-              {r.category && (
-                <div>
-                  <Tag size="sm" type="cool-gray">
-                    {r.category}
-                  </Tag>
-                </div>
-              )}
-              <p className="qf-tile__desc">{r.description ?? 'No description'}</p>
-              <div className="qf-tile__meta">
-                <div>
-                  Last run: {formatDateTime(r.lastExecutedAt)}{' '}
-                  <Tag size="sm" type={statusTagType(r.lastStatus) as 'gray'}>
-                    {statusLabel[r.lastStatus]}
-                  </Tag>
-                </div>
-                {r.lastRowCount !== null && (
-                  <div>
-                    {r.lastRowCount.toLocaleString()} rows · {formatDuration(r.lastDurationMs)}
-                  </div>
-                )}
-              </div>
-              <div className="qf-tile__actions">
-                <Button size="sm" renderIcon={Play} onClick={() => nav(`/reports/${r.id}?run=1`)}>
-                  Run
-                </Button>
-                <Button
-                  size="sm"
-                  kind="ghost"
-                  renderIcon={Edit}
-                  onClick={() => nav(`/reports/${r.id}`)}
-                >
-                  Edit
-                </Button>
-                <Button
-                  size="sm"
-                  kind="ghost"
-                  hasIconOnly
-                  iconDescription={`Delete ${r.name}`}
-                  renderIcon={TrashCan}
-                  onClick={() => setToDelete(r)}
-                />
-              </div>
-            </Tile>
+            <ReportTile key={r.id} r={r} onDelete={setToDelete} onShare={setToShare} />
           ))}
         </div>
       )}
+      {shared.length > 0 && (
+        <section className="qf-section" aria-labelledby="shared-heading">
+          <h2 id="shared-heading" className="qf-section__title">
+            Shared with me
+          </h2>
+          <div className="qf-tiles">
+            {shared.map((r) => (
+              <ReportTile key={r.id} r={r} onDelete={setToDelete} onShare={setToShare} />
+            ))}
+          </div>
+        </section>
+      )}
+      {toShare && <ShareModal report={toShare} onClose={() => setToShare(null)} />}
       <DeleteReportModal
         report={toDelete}
         onClose={() => setToDelete(null)}

@@ -1,5 +1,13 @@
 import type {
+  AuthProviders,
   DataSourceInfo,
+  ParameterDef,
+  ParameterValues,
+  Schedule,
+  ScheduleInput,
+  ScheduleSettings,
+  Share,
+  UserSummary,
   ExecutionRecord,
   Report,
   ReportInput,
@@ -15,6 +23,7 @@ export class ApiError extends Error {
     public sqlState?: string,
     public sqlCode?: number,
     public position?: number,
+    public fields?: Record<string, string>,
   ) {
     super(message);
   }
@@ -63,6 +72,7 @@ async function raw(
       sqlState?: string;
       sqlCode?: number;
       position?: number;
+      fields?: Record<string, string>;
     } = {};
     try {
       err = ((await res.json()) as { error?: typeof err }).error ?? {};
@@ -77,6 +87,7 @@ async function raw(
       err.sqlState,
       err.sqlCode,
       err.position,
+      err.fields,
     );
   }
   return res;
@@ -101,10 +112,11 @@ function filenameFrom(res: Response, fallback: string) {
 }
 
 export const api = {
-  login: (username: string, password: string) =>
-    json<{ user: User; expiresAt: string }>('POST', '/auth/login', { username, password }),
+  login: (username: string, password: string, method: 'local' | 'ldap' = 'local') =>
+    json<{ user: User; expiresAt: string }>('POST', '/auth/login', { username, password, method }),
   logout: () => json<void>('POST', '/auth/logout'),
-  me: () => json<{ user: User; expiresAt: string }>('GET', '/auth/me'),
+  me: () => json<{ user: User; groups: string[]; expiresAt: string }>('GET', '/auth/me'),
+  providers: () => json<AuthProviders>('GET', '/auth/providers'),
 
   listReports: (params: { search?: string; sort?: string } = {}) => {
     const q = new URLSearchParams(
@@ -113,6 +125,16 @@ export const api = {
     return json<{ reports: Report[] }>('GET', `/reports${q.size ? `?${q}` : ''}`).then(
       (r) => r.reports,
     );
+  },
+  /** Owned reports plus reports shared with the caller (directly or through a group). */
+  listAllReports: (params: { search?: string; sort?: string } = {}) => {
+    const q = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v) as [string, string][],
+    );
+    return json<{ reports: Report[]; shared?: Report[] }>(
+      'GET',
+      `/reports${q.size ? `?${q}` : ''}`,
+    ).then((r) => ({ owned: r.reports, shared: r.shared ?? [] }));
   },
   getReport: (id: string) =>
     json<{ report: Report }>('GET', `/reports/${id}`).then((r) => r.report),
@@ -128,10 +150,67 @@ export const api = {
   history: () =>
     json<{ executions: ExecutionRecord[] }>('GET', '/history').then((r) => r.executions),
 
-  execute: (sql: string, executionId: string, signal?: AbortSignal) =>
-    json<RunResponse>('POST', '/query/execute', { sql, executionId }, signal),
-  executeReport: (id: string, executionId: string, signal?: AbortSignal) =>
-    json<RunResponse>('POST', `/reports/${id}/execute`, { executionId }, signal),
+  execute: (
+    sql: string,
+    executionId: string,
+    signal?: AbortSignal,
+    params?: { parameters: ParameterDef[]; values: ParameterValues },
+  ) =>
+    json<RunResponse>(
+      'POST',
+      '/query/execute',
+      params?.parameters.length ? { sql, executionId, ...params } : { sql, executionId },
+      signal,
+    ),
+  executeReport: (
+    id: string,
+    executionId: string,
+    signal?: AbortSignal,
+    values?: ParameterValues,
+  ) =>
+    json<RunResponse>(
+      'POST',
+      `/reports/${id}/execute`,
+      values ? { executionId, values } : { executionId },
+      signal,
+    ),
+
+  getShares: (id: string) =>
+    json<{ shares: Share[] }>('GET', `/reports/${id}/shares`).then((r) => r.shares),
+  putShares: (id: string, shares: Share[]) =>
+    json<{ shares: Share[] }>('PUT', `/reports/${id}/shares`, {
+      shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
+    }).then((r) => r.shares),
+  searchUsers: (search: string) =>
+    json<{ users: UserSummary[] }>('GET', `/users?search=${encodeURIComponent(search)}`).then(
+      (r) => r.users,
+    ),
+  groups: () => json<{ groups: string[] }>('GET', '/groups').then((r) => r.groups),
+
+  scheduleSettings: () => json<ScheduleSettings>('GET', '/schedules/settings'),
+  previewSchedule: (cron: string, timezone: string) =>
+    json<{ upcoming: string[] }>('POST', '/schedules/preview', { cron, timezone }).then(
+      (r) => r.upcoming,
+    ),
+  listSchedules: () =>
+    json<{ schedules: Schedule[]; settings: ScheduleSettings }>('GET', '/schedules'),
+  reportSchedules: (reportId: string) =>
+    json<{ schedules: Schedule[]; settings: ScheduleSettings }>(
+      'GET',
+      `/reports/${reportId}/schedules`,
+    ),
+  createSchedule: (reportId: string, input: ScheduleInput) =>
+    json<{ schedule: Schedule }>('POST', `/reports/${reportId}/schedules`, input).then(
+      (r) => r.schedule,
+    ),
+  updateSchedule: (id: string, input: ScheduleInput) =>
+    json<{ schedule: Schedule }>('PUT', `/schedules/${id}`, input).then((r) => r.schedule),
+  deleteSchedule: (id: string) => json<void>('DELETE', `/schedules/${id}`),
+  runScheduleNow: (id: string) =>
+    json<{ result: { status: 'SUCCEEDED' | 'FAILED'; error?: string | null }; schedule: Schedule }>(
+      'POST',
+      `/schedules/${id}/run`,
+    ),
   cancel: (executionId: string) =>
     json<{ cancelled: boolean }>('POST', `/query/${executionId}/cancel`),
 
@@ -139,7 +218,13 @@ export const api = {
     json<DataSourceInfo>('GET', `/datasource${check ? '?check=1' : ''}`),
 
   /** Downloads a server-generated XLSX file. */
-  async exportXlsx(src: { sql?: string; reportId?: string; name?: string }) {
+  async exportXlsx(src: {
+    sql?: string;
+    reportId?: string;
+    name?: string;
+    parameters?: ParameterDef[];
+    values?: ParameterValues;
+  }) {
     const res = await raw('POST', '/export', src);
     const blob = await res.blob();
     const name = filenameFrom(res, 'report.xlsx');

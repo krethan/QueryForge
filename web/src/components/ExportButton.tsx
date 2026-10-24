@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { api } from '../api/client';
 
 interface Props {
-  source: { sql?: string; reportId?: string; name?: string };
+  source: Parameters<typeof api.exportXlsx>[0];
   disabled?: boolean;
   onError(msg: string): void;
   onDone?(info: { filename: string; rowCount: number; truncated: boolean }): void;

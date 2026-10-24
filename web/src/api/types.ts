@@ -44,7 +44,10 @@ export interface RunResponse {
     category: string | null;
     sql: string;
     version: number;
+    parameters?: ParameterDef[];
   };
+  /** Parameter values actually bound (after defaults). */
+  parameters?: ParameterValues;
 }
 
 export type ExecutionStatus =
@@ -63,12 +66,19 @@ export interface Report {
   lastStatus: ExecutionStatus;
   lastRowCount: number | null;
   lastDurationMs: number | null;
+  parameters?: ParameterDef[];
+  ownerId?: string;
+  ownerName?: string;
+  /** The caller's access to this report. */
+  access?: AccessRole;
 }
 
 export interface ExecutionRecord {
   id: string;
   reportId: string | null;
-  kind: 'RUN' | 'EXPORT';
+  kind: 'RUN' | 'EXPORT' | 'SCHEDULE';
+  parameters?: ParameterValues | null;
+  scheduleId?: string | null;
   status: Exclude<ExecutionStatus, 'NEVER'>;
   startedAt: string | null;
   completedAt: string | null;
@@ -84,6 +94,7 @@ export interface User {
   username: string;
   displayName: string;
   role: 'USER' | 'ADMIN';
+  authSource?: AuthSource;
 }
 
 export interface DataSourceInfo {
@@ -107,5 +118,74 @@ export interface ReportInput {
   description?: string | null;
   category?: string | null;
   sql: string;
+  parameters?: ParameterDef[];
   version?: number;
+}
+
+export type AuthSource = 'LOCAL' | 'OIDC' | 'LDAP';
+export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
+
+export type ParameterType = 'string' | 'integer' | 'decimal' | 'date' | 'list';
+export interface ParameterDef {
+  name: string;
+  label: string;
+  type: ParameterType;
+  required: boolean;
+  defaultValue: string | null;
+  options?: { value: string; label?: string }[];
+}
+export type ParameterValues = Record<string, string | number | null>;
+
+export interface AuthProviders {
+  local: boolean;
+  oidc: { label: string; startUrl: string } | null;
+  ldap: { label: string } | null;
+}
+
+export interface Share {
+  type: 'USER' | 'GROUP';
+  id: string;
+  role: 'VIEWER' | 'EDITOR';
+  displayName?: string;
+}
+export interface UserSummary {
+  id: string;
+  username: string;
+  displayName: string;
+}
+
+export type ScheduleStatus = 'NEVER' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+export interface Schedule {
+  id: string;
+  reportId: string;
+  reportName?: string;
+  createdBy: string;
+  cron: string;
+  timezone: string;
+  recipients: string[];
+  parameters: ParameterValues;
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastStatus: ScheduleStatus;
+  lastError: string | null;
+  failureCount: number;
+  version: number;
+}
+export interface ScheduleInput {
+  cron: string;
+  timezone: string;
+  recipients: string[];
+  parameters: ParameterValues;
+  enabled: boolean;
+  version?: number;
+}
+export interface ScheduleSettings {
+  enabled: boolean;
+  mailConfigured: boolean;
+  recipientDomains: string[];
+  maxRecipients: number;
+  minIntervalMinutes: number;
+  defaultTimezone: string;
+  maxFailures: number;
 }

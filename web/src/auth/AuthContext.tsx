@@ -14,7 +14,7 @@ interface AuthState {
   user: User | null;
   loading: boolean;
   sessionExpired: boolean;
-  login(username: string, password: string): Promise<void>;
+  login(username: string, password: string, method?: 'local' | 'ldap'): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -46,11 +46,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t);
   }, [user]);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const r = await api.login(username, password);
-    setExpired(false);
-    setUser(r.user);
-  }, []);
+  const login = useCallback(
+    async (username: string, password: string, method: 'local' | 'ldap' = 'local') => {
+      const r = await api.login(username, password, method);
+      setExpired(false);
+      setUser(r.user);
+    },
+    [],
+  );
 
   const logout = useCallback(async () => {
     await api.logout().catch(() => undefined);

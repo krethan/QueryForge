@@ -32,6 +32,8 @@ export class FakeJob implements SqlJobLike {
   connectedWith?: DaemonServer;
   closed = false;
   queries: string[] = [];
+  /** QueryOptions passed alongside each query (parameters are bound, never inlined). */
+  queryOptions: ({ isTerseResults?: boolean; parameters?: unknown[] } | undefined)[] = [];
   fetchSizes: number[] = [];
   constructor(
     public options: JDBCOptions,
@@ -43,8 +45,9 @@ export class FakeJob implements SqlJobLike {
     if (s.connectError) throw new Error(s.connectError);
     return { job: 'QZDASOINIT/QUSER/123456', success: true };
   }
-  query<T>(sql: string): QueryLike<T> {
+  query<T>(sql: string, opts?: { isTerseResults?: boolean; parameters?: unknown[] }): QueryLike<T> {
     this.queries.push(sql);
+    this.queryOptions.push(opts);
     const s = this.script(sql);
     let pos = 0;
     const page = async (n: number): Promise<QueryResult<T>> => {

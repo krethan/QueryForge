@@ -51,6 +51,7 @@ export class SessionService {
       name: user.displayName,
       usr: user.username,
       role: user.role,
+      src: user.authSource ?? 'LOCAL',
       csrf,
     })
       .setProtectedHeader({ alg: 'HS256' })
@@ -85,6 +86,7 @@ export class SessionService {
           username: String(payload.usr),
           displayName: String(payload.name),
           role: payload.role === 'ADMIN' ? 'ADMIN' : 'USER',
+          authSource: payload.src === 'OIDC' || payload.src === 'LDAP' ? payload.src : 'LOCAL',
         },
         csrf: payload.csrf,
         expiresAt: (payload.exp ?? 0) * 1000,

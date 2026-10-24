@@ -55,6 +55,8 @@ export class QueryExecutor {
       maxLength: this.cfg.limits.maxQueryLength,
       protectedSchemas: this.cfg.protectedSchemas,
       protectedObjects: PROTECTED_METADATA_OBJECTS,
+      // markers are only ever bound as values; resolveParameters() checks count/types first
+      allowParameterMarkers: true,
     });
     if (!v.ok) throw new AppError(400, v.code, v.message, { position: v.position });
     return v.sql;
@@ -75,7 +77,7 @@ export class QueryExecutor {
   async run(
     sql: string,
     ownerId: string,
-    opts: { executionId?: string; maxRows?: number } = {},
+    opts: { executionId?: string; maxRows?: number; parameters?: (string | number | null)[] } = {},
   ): Promise<ExecutionOutcome> {
     const rows: Cell[][] = [];
     let columns: ResultColumn[] = [];
@@ -92,6 +94,7 @@ export class QueryExecutor {
         },
       },
       opts.executionId,
+      opts.parameters,
     );
     return { ...meta, columns, rows };
   }
@@ -106,6 +109,7 @@ export class QueryExecutor {
     maxRows: number,
     handlers: StreamHandlers,
     executionId: string = randomUUID(),
+    parameters?: (string | number | null)[],
   ): Promise<Omit<ExecutionOutcome, 'columns' | 'rows'>> {
     const sql = this.validate(rawSql);
     const release = await this.gate.acquire();
@@ -149,7 +153,12 @@ export class QueryExecutor {
       );
       entry.job = job;
       if (entry.cancelled || timedOut) await job.close();
-      query = job.query<unknown>(sql, { isTerseResults: true });
+      // Values are bound to `?` markers via Mapepire's prepared execution
+      // (QueryOptions.parameters -> "prepare_sql_execute"); they never become SQL text.
+      query = job.query<unknown>(
+        sql,
+        parameters?.length ? { isTerseResults: true, parameters } : { isTerseResults: true },
+      );
       const batch = this.cfg.limits.fetchBatchSize;
       const want = () => Math.max(1, Math.min(batch, maxRows + 1 - rowCount));
       let res: QueryResult<unknown> = await guarded(query.execute(want()));

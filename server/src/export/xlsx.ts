@@ -104,6 +104,9 @@ export interface WorkbookMeta {
   truncated?: boolean;
   maxRows: number;
   columnsOmitted?: number;
+  /** Parameter label -> value used for this run. */
+  parameters?: { label: string; value: string | number | null }[];
+  trigger?: string;
 }
 
 /**
@@ -171,6 +174,14 @@ export class XlsxResultWriter {
       ['Data source', meta.dataSource],
       ['Executed at (UTC)', meta.executedAt],
       ['Executed by', meta.executedBy],
+      ...(meta.trigger ? ([['Trigger', meta.trigger]] as [string, string][]) : []),
+      ...(meta.parameters ?? []).map(
+        (p) =>
+          [`Parameter: ${p.label}`, p.value === null ? '(none)' : p.value] as [
+            string,
+            string | number,
+          ],
+      ),
       ['Rows exported', this.rowsWritten],
       ['Complete result', meta.truncated ? `No - limited to ${meta.maxRows} rows` : 'Yes'],
       ...(this.columnsOmitted
