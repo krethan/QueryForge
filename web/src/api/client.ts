@@ -9,6 +9,8 @@ import type {
   Share,
   UserSummary,
   ExecutionRecord,
+  PageResponse,
+  ReportAccess,
   Report,
   ReportInput,
   RunResponse,
@@ -174,6 +176,12 @@ export const api = {
       values ? { executionId, values } : { executionId },
       signal,
     ),
+
+  nextPage: (cursorId: string, signal?: AbortSignal) =>
+    json<PageResponse>('POST', `/results/${encodeURIComponent(cursorId)}/next`, {}, signal),
+  closeCursor: (cursorId: string) =>
+    json<void>('DELETE', `/results/${encodeURIComponent(cursorId)}`).catch(() => undefined),
+  getAccess: (id: string) => json<ReportAccess>('GET', `/reports/${id}/access`),
 
   getShares: (id: string) =>
     json<{ shares: Share[] }>('GET', `/reports/${id}/shares`).then((r) => r.shares),

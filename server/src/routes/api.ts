@@ -325,6 +325,22 @@ export function apiRouter(d: ApiDeps): Router {
     }),
   );
 
+  // ---- server-side result paging (cursor owned by the caller, short TTL) ----
+  r.post(
+    '/results/:cursorId/next',
+    limiter(cfg.limits.rateLimitMax),
+    h(async (req, res) => {
+      res.json(await d.execution.fetchPage(req.session!.user, uuid.parse(req.params.cursorId)));
+    }),
+  );
+  r.delete(
+    '/results/:cursorId',
+    h(async (req, res) => {
+      const ok = await d.execution.closeCursor(req.session!.user, uuid.parse(req.params.cursorId));
+      res.status(ok ? 204 : 404).end();
+    }),
+  );
+
   r.post(
     '/export',
     execLimiter,
@@ -476,6 +492,23 @@ export function apiRouter(d: ApiDeps): Router {
         Boolean(await d.users.findById(id)),
       );
       res.json({ shares: out });
+    }),
+  );
+  r.get(
+    '/reports/:id/access',
+    h(async (req, res) => {
+      // owner-only: who can reach the report now, and how that changed over time
+      const { report } = await d.access.require(user(req), reportId(req), 'OWNER');
+      const limit = Number(req.query.limit) || 100;
+      const [shares, events] = await Promise.all([
+        d.access.listShares(report.id),
+        d.access.listAudit(report.id, limit),
+      ]);
+      res.json({
+        owner: { id: report.ownerId, displayName: user(req).displayName },
+        shares,
+        events,
+      });
     }),
   );
   r.get(

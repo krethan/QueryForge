@@ -16,6 +16,7 @@ export class FakeMetadataDb implements MetadataDb {
   /** key `${userId}|${group}` */
   userGroups = new Map<string, Row>();
   shares: Row[] = [];
+  shareAudit: Row[] = [];
   schedules = new Map<string, Row>();
   locks = new Map<string, Row>();
   statements: { sql: string; params: P }[] = [];
@@ -146,6 +147,24 @@ export class FakeMetadataDb implements MetadataDb {
             `${b.PRINCIPAL_TYPE}${b.PRINCIPAL_ID}`,
           ),
         ) as T[];
+    }
+    if (
+      /FROM \w+\.QF_SHARE_AUDIT A .* WHERE A\.REPORT_ID = \? ORDER BY A\.OCCURRED_AT DESC/.test(s)
+    ) {
+      const n = Number(/FETCH FIRST (\d+) ROWS ONLY/.exec(s)?.[1] ?? 100);
+      return this.shareAudit
+        .filter((x) => x.REPORT_ID === params[0])
+        .map((x, i) => ({ x, i }))
+        .sort((a, b) => b.i - a.i)
+        .slice(0, n)
+        .map(({ x }) => ({
+          ...x,
+          ACTOR_NAME: this.users.get(String(x.ACTOR_ID))?.DISPLAY_NAME ?? null,
+          PRINCIPAL_NAME:
+            x.PRINCIPAL_TYPE === 'USER'
+              ? (this.users.get(String(x.PRINCIPAL_ID))?.DISPLAY_NAME ?? null)
+              : null,
+        })) as T[];
     }
     if (
       /FROM \w+\.QF_REPORTS R JOIN \w+\.QF_REPORT_SHARES S .* WHERE R\.OWNER_ID <> \? AND/.test(s)
@@ -408,6 +427,28 @@ export class FakeMetadataDb implements MetadataDb {
       this.userGroups.set(k, { USER_ID: uid, GROUP_NAME: g, SOURCE: source });
       return 1;
     }
+    // ---- share audit ----
+    if (
+      /^INSERT INTO \w+\.QF_SHARE_AUDIT \(AUDIT_ID, REPORT_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT\)/.test(
+        s,
+      )
+    ) {
+      const [id, rid, action, type, pid, oldRole, newRole, actor] = params;
+      if (!['GRANT', 'CHANGE', 'REVOKE'].includes(String(action)))
+        throw new DbError('Check constraint violation.', '23513', -545);
+      this.shareAudit.push({
+        AUDIT_ID: id,
+        REPORT_ID: rid,
+        ACTION: action,
+        PRINCIPAL_TYPE: type,
+        PRINCIPAL_ID: pid,
+        OLD_ROLE: oldRole,
+        NEW_ROLE: newRole,
+        ACTOR_ID: actor,
+        OCCURRED_AT: this.now(),
+      });
+      return 1;
+    }
     // ---- shares ----
     if (/^DELETE FROM \w+\.QF_REPORT_SHARES WHERE REPORT_ID = \?$/.test(s)) {
       const before = this.shares.length;
@@ -550,6 +591,7 @@ export class FakeMetadataDb implements MetadataDb {
       users: new Map([...this.users].map(([k, v]) => [k, { ...v }])),
       userGroups: new Map([...this.userGroups].map(([k, v]) => [k, { ...v }])),
       shares: this.shares.map((x) => ({ ...x })),
+      shareAudit: this.shareAudit.map((x) => ({ ...x })),
       schedules: new Map([...this.schedules].map(([k, v]) => [k, { ...v }])),
       locks: new Map([...this.locks].map(([k, v]) => [k, { ...v }])),
     };
@@ -561,6 +603,7 @@ export class FakeMetadataDb implements MetadataDb {
       this.users = snapshot.users;
       this.userGroups = snapshot.userGroups;
       this.shares = snapshot.shares;
+      this.shareAudit = snapshot.shareAudit;
       this.schedules = snapshot.schedules;
       this.locks = snapshot.locks;
       throw e;

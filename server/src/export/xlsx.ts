@@ -63,33 +63,76 @@ export function numFmtFor(col: ResultColumn): string | undefined {
   }
 }
 
+/** Canonical form of a plain decimal string ("+001.500" -> "1.5"), or null if it is not one. */
+export function canonicalDecimal(text: string): string | null {
+  const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(text.trim());
+  if (!m || (!m[2] && !m[3])) return null;
+  const int = m[2].replace(/^0+(?=\d)/, '') || '0';
+  const frac = (m[3] ?? '').replace(/0+$/, '');
+  const body = frac ? `${int}.${frac}` : int;
+  return body === '0' ? '0' : `${m[1] === '-' ? '-' : ''}${body}`;
+}
+
+/**
+ * An exact numeric string may become an Excel number only when a double holds it
+ * exactly enough to round-trip: at most 15 significant digits (DBL_DIG) and
+ * String(Number(v)) reproduces the same decimal value.
+ */
+export function safeExcelNumber(text: string): number | null {
+  const canon = canonicalDecimal(text);
+  if (canon === null) return null;
+  const digits = canon.replace(/[-.]/g, '').replace(/^0+/, '').length;
+  if (digits > 15) return null;
+  const n = Number(canon);
+  if (!Number.isFinite(n)) return null;
+  return canonicalDecimal(String(n)) === canon ? n : null;
+}
+
+export const TEXT_NUMBER_NOTE =
+  'Exact value kept as text: it has more significant digits than an Excel number (15) can hold.';
+
 /** Convert a normalised result cell into an ExcelJS value. Never returns a formula. */
 export function toExcelValue(
   v: Cell,
   col: ResultColumn,
   mode: 'prefix' | 'none',
 ): ExcelJS.CellValue {
-  if (v === null) return null;
-  if (typeof v === 'object') return `[binary${v.size !== null ? `: ${v.size} bytes` : ''}]`;
-  if (typeof v === 'boolean') return v;
-  if (typeof v === 'number') return Number.isFinite(v) ? v : String(v);
+  return toExcel(v, col, mode).value;
+}
+
+/** Like toExcelValue, also reporting whether an exact numeric value had to be written as text. */
+export function toExcel(
+  v: Cell,
+  col: ResultColumn,
+  mode: 'prefix' | 'none',
+): { value: ExcelJS.CellValue; numericAsText: boolean } {
+  const plain = (value: ExcelJS.CellValue) => ({ value, numericAsText: false });
+  if (v === null) return plain(null);
+  if (typeof v === 'object') return plain(`[binary${v.size !== null ? `: ${v.size} bytes` : ''}]`);
+  if (typeof v === 'boolean') return plain(v);
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) return plain(String(v));
+    if ((col.kind === 'integer' || col.kind === 'decimal') && safeExcelNumber(String(v)) === null)
+      return { value: String(v), numericAsText: true };
+    return plain(v);
+  }
   switch (col.kind) {
     case 'decimal':
     case 'integer': {
-      // Excel holds 15 significant digits; keep larger values exact as text.
-      const digits = v.replace(/[-+.]/g, '').replace(/^0+/, '').length;
-      const n = Number(v);
-      return digits <= 15 && Number.isFinite(n) ? n : v;
+      const n = safeExcelNumber(v);
+      if (n !== null) return plain(n);
+      // not representable (or not a plain decimal, e.g. DECFLOAT 'Infinity'): exact text
+      return { value: escapeFormula(v, mode), numericAsText: canonicalDecimal(v) !== null };
     }
     case 'float': {
       const n = Number(v);
-      return Number.isFinite(n) ? n : v;
+      return plain(Number.isFinite(n) ? n : v);
     }
     case 'date':
     case 'timestamp':
-      return parseDate(v, col.kind) ?? escapeFormula(v, mode);
+      return plain(parseDate(v, col.kind) ?? escapeFormula(v, mode));
     default:
-      return escapeFormula(v, mode);
+      return plain(escapeFormula(v, mode));
   }
 }
 
@@ -119,6 +162,11 @@ export class XlsxResultWriter {
   private cols: ResultColumn[] = [];
   rowsWritten = 0;
   columnsOmitted = 0;
+  /** Exact numeric cells written as text because Excel could not hold them. */
+  numericAsText = 0;
+  private textColumns = new Set<number>();
+  /** Per-cell notes are capped so huge exports stay small; the header note always explains. */
+  static readonly MAX_CELL_NOTES = 500;
 
   constructor(
     filename: string,
@@ -148,13 +196,30 @@ export class XlsxResultWriter {
     }));
     const header = this.sheet.getRow(1);
     header.font = { bold: true };
+    this.cols.forEach((c, i) => {
+      const wide =
+        c.type.toUpperCase() === 'BIGINT' ||
+        (c.kind === 'decimal' && (c.precision > 15 || !c.precision));
+      if (wide)
+        header.getCell(i + 1).note =
+          'Values with more than 15 significant digits are written as exact text (marked with a note); the rest are numbers.';
+    });
     header.commit();
   }
 
   addRows(rows: Cell[][]) {
     for (const r of rows) {
       if (this.rowsWritten >= EXCEL_MAX_ROWS - 1) return;
-      this.sheet.addRow(this.cols.map((c, i) => toExcelValue(r[i], c, this.mode))).commit();
+      const cells = this.cols.map((c, i) => toExcel(r[i], c, this.mode));
+      const row = this.sheet.addRow(cells.map((x) => x.value));
+      cells.forEach((x, i) => {
+        if (!x.numericAsText) return;
+        this.numericAsText++;
+        this.textColumns.add(i);
+        if (this.numericAsText <= XlsxResultWriter.MAX_CELL_NOTES)
+          row.getCell(i + 1).note = TEXT_NUMBER_NOTE;
+      });
+      row.commit();
       this.rowsWritten++;
     }
   }
@@ -183,6 +248,14 @@ export class XlsxResultWriter {
           ],
       ),
       ['Rows exported', this.rowsWritten],
+      ...(this.numericAsText
+        ? ([
+            [
+              'Numbers kept as text',
+              `${this.numericAsText} value(s) in ${[...this.textColumns].map((i) => this.cols[i].label).join(', ')} exceed Excel's 15-digit precision and were written as exact text.`,
+            ],
+          ] as [string, string][])
+        : []),
       ['Complete result', meta.truncated ? `No - limited to ${meta.maxRows} rows` : 'Yes'],
       ...(this.columnsOmitted
         ? ([['Columns omitted', `${this.columnsOmitted} (Excel column limit)`]] as [

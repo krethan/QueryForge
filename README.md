@@ -21,7 +21,7 @@ PLAN.md   Design plan
 
 ## Requirements
 
-Node.js ≥ 20.19 (22+ recommended; some Carbon packages declare `>=22`), npm 10+, and a
+Node.js ≥ 20.19 (**22+ strongly recommended**: exact DECIMAL/BIGINT values need `JSON.parse` source-text access, and some Carbon packages declare `>=22`), npm 10+, and a
 Mapepire server on IBM i for real use.
 
 ## Quick start (development)
@@ -64,29 +64,32 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 
 ## Environment variables (`server/.env`)
 
-| Variable                                                                                      | Default               | Purpose                                    |
-| --------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------ |
-| `NODE_ENV`                                                                                    | development           |                                            |
-| `PORT` / `HOST`                                                                               | 3001 / 127.0.0.1      | Listen address                             |
-| `APP_ORIGIN`                                                                                  | http://localhost:5173 | Allowed browser origin (CSRF/Origin check) |
-| `TRUST_PROXY`                                                                                 | false                 | Express trust proxy                        |
-| `MAPEPIRE_HOST` / `MAPEPIRE_PORT`                                                             | — / 8076              | Mapepire server                            |
-| `MAPEPIRE_REJECT_UNAUTHORIZED`                                                                | true                  | TLS verification                           |
-| `MAPEPIRE_CA_FILE`                                                                            | —                     | PEM CA/cert for self-signed servers        |
-| `IBMI_DISPLAY_NAME`                                                                           | host                  | Name shown in UI                           |
-| `REPORT_DB_USER` / `REPORT_DB_PASSWORD`                                                       | —                     | Read-only reporting profile                |
-| `REPORT_DEFAULT_SCHEMA` / `REPORT_LIBRARIES` / `REPORT_NAMING`                                | — / — / sql           | Job defaults                               |
-| `META_DB_USER` / `META_DB_PASSWORD`                                                           | —                     | Metadata profile                           |
-| `META_SCHEMA` / `META_POOL_SIZE`                                                              | QFMETA / 2            | Metadata schema and pool                   |
-| `QUERY_TIMEOUT_MS` / `CONNECT_TIMEOUT_MS`                                                     | 60000 / 15000         | Timeouts                                   |
-| `MAX_RESULT_ROWS` / `MAX_EXPORT_ROWS`                                                         | 5000 / 100000         | Row caps                                   |
-| `FETCH_BATCH_SIZE`                                                                            | 500                   | Rows per Mapepire fetch                    |
-| `MAX_CONCURRENT_EXECUTIONS` / `MAX_QUERY_LENGTH`                                              | 4 / 32000             |                                            |
-| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` / `EXECUTE_RATE_LIMIT_MAX` / `LOGIN_RATE_LIMIT_MAX` | 60000 / 120 / 30 / 10 |                                            |
-| `SESSION_SECRET`                                                                              | —                     | ≥ 32 chars, random                         |
-| `SESSION_TTL_MINUTES` / `COOKIE_SECURE`                                                       | 480 / true in prod    |                                            |
-| `PROTECTED_SCHEMAS`                                                                           | —                     | Extra schemas blocked from user SQL        |
-| `XLSX_FORMULA_ESCAPE`                                                                         | prefix                | Escape `= + - @` etc. in exported text     |
+| Variable                                                                                      | Default               | Purpose                                                                                         |
+| --------------------------------------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------- |
+| `NODE_ENV`                                                                                    | development           |                                                                                                 |
+| `PORT` / `HOST`                                                                               | 3001 / 127.0.0.1      | Listen address                                                                                  |
+| `APP_ORIGIN`                                                                                  | http://localhost:5173 | Allowed browser origin (CSRF/Origin check)                                                      |
+| `TRUST_PROXY`                                                                                 | false                 | Express trust proxy                                                                             |
+| `MAPEPIRE_HOST` / `MAPEPIRE_PORT`                                                             | — / 8076              | Mapepire server                                                                                 |
+| `MAPEPIRE_REJECT_UNAUTHORIZED`                                                                | true                  | TLS verification                                                                                |
+| `MAPEPIRE_CA_FILE`                                                                            | —                     | PEM CA/cert for self-signed servers                                                             |
+| `IBMI_DISPLAY_NAME`                                                                           | host                  | Name shown in UI                                                                                |
+| `REPORT_DB_USER` / `REPORT_DB_PASSWORD`                                                       | —                     | Read-only reporting profile                                                                     |
+| `REPORT_DEFAULT_SCHEMA` / `REPORT_LIBRARIES` / `REPORT_NAMING`                                | — / — / sql           | Job defaults                                                                                    |
+| `META_DB_USER` / `META_DB_PASSWORD`                                                           | —                     | Metadata profile                                                                                |
+| `META_SCHEMA` / `META_POOL_SIZE`                                                              | QFMETA / 2            | Metadata schema and pool                                                                        |
+| `QUERY_TIMEOUT_MS` / `CONNECT_TIMEOUT_MS`                                                     | 60000 / 15000         | Timeouts                                                                                        |
+| `MAX_RESULT_ROWS` / `MAX_EXPORT_ROWS`                                                         | 50000 / 100000        | Row caps                                                                                        |
+| `RESULT_PAGE_SIZE`                                                                            | 500                   | Rows per page shown in the browser (first page + each "Load next"); capped at `MAX_RESULT_ROWS` |
+| `CURSOR_IDLE_TTL_MS` / `CURSOR_MAX_LIFETIME_MS`                                               | 120000 / 600000       | A paged result's Mapepire job is closed after this idle time / absolute lifetime                |
+| `MAX_OPEN_CURSORS` / `MAX_OPEN_CURSORS_PER_USER`                                              | 8 / 2                 | Open paged results (each holds one Mapepire job). A user's oldest is closed at their limit      |
+| `FETCH_BATCH_SIZE`                                                                            | 500                   | Rows per Mapepire fetch                                                                         |
+| `MAX_CONCURRENT_EXECUTIONS` / `MAX_QUERY_LENGTH`                                              | 4 / 32000             |                                                                                                 |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` / `EXECUTE_RATE_LIMIT_MAX` / `LOGIN_RATE_LIMIT_MAX` | 60000 / 120 / 30 / 10 |                                                                                                 |
+| `SESSION_SECRET`                                                                              | —                     | ≥ 32 chars, random                                                                              |
+| `SESSION_TTL_MINUTES` / `COOKIE_SECURE`                                                       | 480 / true in prod    |                                                                                                 |
+| `PROTECTED_SCHEMAS`                                                                           | —                     | Extra schemas blocked from user SQL                                                             |
+| `XLSX_FORMULA_ESCAPE`                                                                         | prefix                | Escape `= + - @` etc. in exported text                                                          |
 
 ### Sign-in (local, OIDC, LDAP)
 
@@ -122,6 +125,46 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 | `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | —               | Credentials and sender                                                                                                                                                                          |
 | `SMTP_REJECT_UNAUTHORIZED` / `SMTP_CA_FILE` | true / —        | TLS verification                                                                                                                                                                                |
 
+## Exact numbers
+
+DECIMAL/NUMERIC and BIGINT values are kept as **strings** from the Mapepire job through the API and the
+results grid (which sorts them with an exact decimal comparison). `@ibm/mapepire-js` 1.0.2 parses every
+message with a `JSON.parse` reviver that returns a number's original source text when it does not
+round-trip as a double; that works on Node.js 22+. On Node 20 those values are rounded before QueryForge
+sees them: the server logs a warning at start-up and wide columns (BIGINT, DECIMAL with precision > 15) are
+flagged `precisionAtRisk` and shown with a warning icon in the grid.
+
+In XLSX exports a value is written as an Excel number only when it has ≤ 15 significant digits and
+round-trips exactly; otherwise it is written as text with a cell note ("Exact value kept as text…", up
+to 500 notes per sheet), wide columns get a header note, and the Report Info sheet counts the values kept
+as text.
+
+## Paging large results
+
+A run returns the first `RESULT_PAGE_SIZE` rows. If more exist, the server keeps that Mapepire job open as a
+short-lived **result cursor** owned by the signed-in user, and the grid shows **"More rows are available —
+Load next N rows"**, which calls `POST /api/results/:id/next` (`Query.fetchMore`). Cursors:
+
+- are visible only to their owner (others get 404); an unknown or expired one returns `410 CURSOR_EXPIRED`
+  and the UI asks you to re-run;
+- slide their expiry on each page, but never beyond `CURSOR_MAX_LIFETIME_MS`; a sweeper closes expired ones and
+  their job, so no connection is held past the TTL;
+- close automatically at the end of the result or at `MAX_RESULT_ROWS` (then marked "Results limited"), when the
+  grid is replaced/unmounted (`DELETE /api/results/:id`), and on server shutdown;
+- are limited per user (oldest evicted) and globally; at the global limit the first page is returned with
+  `pagingUnavailable` and the UI explains that more rows exist. The execution history row is updated with the
+  final row count when the cursor closes.
+
+Client-side sort and filter apply to the rows loaded so far.
+
+## Sharing audit
+
+Every share grant, role change and revoke is written to `QFMETA.QF_SHARE_AUDIT` (migration 003) in the same
+transaction as the share change. Owners open **Saved Reports → ⋯ → Access and audit** to see current access and
+the history (`GET /api/reports/:id/access`, owner only). The audit table has no foreign key to reports, so the
+trail survives report deletion. Saved Reports lists reports you own and reports shared with you, filterable by
+owner and by your access (Owner / Editor / Viewer).
+
 ## Security model
 
 - Session JWT in HttpOnly SameSite=Strict cookie; double-submit CSRF token + Origin check; login lockout.
@@ -147,8 +190,10 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 
 - Not yet validated against a live IBM i / Mapepire server.
 - Mapepire 1.0.2 has no statement cancel API; cancel/timeout close the job.
-- DECIMAL > 15 digits and BIGINT may lose precision as JSON numbers before reaching the server.
-- Result display is capped (`MAX_RESULT_ROWS`); no server-side paging of huge result sets.
+- On Node.js 20, DECIMAL > 15 digits and BIGINT are rounded inside mapepire-js before reaching the server
+  (flagged in the UI); use Node.js 22+. The exact-value path has been tested with fakes only.
+- Paged results are capped at `MAX_RESULT_ROWS`; each open cursor holds one Mapepire job until it completes,
+  is closed, or expires. Sort/filter only cover loaded rows. Paging has been tested with a fake Mapepire job only.
 - OIDC, LDAP and SMTP are implemented against their standard protocols but have **only been tested with
   in-process fakes** — not with a real IdP, directory or mail server.
 - Schedule times are computed with the server runtime's ICU time-zone data. Alberta moved to permanent
@@ -157,5 +202,6 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 - Schedules use 5-field cron; one scheduler runner at a time (DB lease). Missed runs while stopped are not
   back-filled; the next future time is used.
 - Attachments are capped by `MAX_EXPORT_ROWS`; very large exports may exceed mail-server size limits.
-- Sharing has no expiry and no audit view in the UI yet (changes are logged server-side).
+- Sharing has no expiry. The audit records changes made through QueryForge only (not direct SQL edits), and
+  is not written for shares removed by report deletion.
 - Saved Reports page lists owned reports; shared reports appear under “Shared with me” on the dashboard.

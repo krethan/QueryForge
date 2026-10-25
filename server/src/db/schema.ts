@@ -8,6 +8,7 @@ export const T = {
   shares: 'QF_REPORT_SHARES',
   schedules: 'QF_SCHEDULES',
   locks: 'QF_LOCKS',
+  shareAudit: 'QF_SHARE_AUDIT',
 } as const;
 
 /** Unqualified metadata object names that reporting SQL may never mention. */

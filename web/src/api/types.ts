@@ -21,6 +21,8 @@ export interface ResultColumn {
   precision: number;
   scale: number;
   nullable: boolean;
+  /** Server runtime could not guarantee exact digits for this column (Node < 22). */
+  precisionAtRisk?: boolean;
 }
 
 export type BinaryCell = { $binary: true; size: number | null };
@@ -37,6 +39,11 @@ export interface RunResponse {
   completedAt: string;
   durationMs: number;
   dataSource: string;
+  /** More rows can be fetched through `cursor`. */
+  hasMore?: boolean;
+  cursor?: { id: string; expiresAt: string; pageSize: number };
+  /** More rows exist but the server could not keep a cursor open (limit reached). */
+  pagingUnavailable?: boolean;
   report?: {
     id: string;
     name: string;
@@ -188,4 +195,32 @@ export interface ScheduleSettings {
   minIntervalMinutes: number;
   defaultTimezone: string;
   maxFailures: number;
+}
+
+export interface PageResponse {
+  cursorId: string;
+  rows: Cell[][];
+  rowCount: number;
+  hasMore: boolean;
+  truncated: boolean;
+  expiresAt?: string;
+}
+
+export interface ShareAuditEvent {
+  id: string;
+  reportId: string;
+  action: 'GRANT' | 'CHANGE' | 'REVOKE';
+  principalType: 'USER' | 'GROUP';
+  principalId: string;
+  principalName?: string;
+  oldRole: 'VIEWER' | 'EDITOR' | null;
+  newRole: 'VIEWER' | 'EDITOR' | null;
+  actorId: string;
+  actorName?: string;
+  occurredAt: string;
+}
+export interface ReportAccess {
+  owner: { id: string; displayName: string };
+  shares: Share[];
+  events: ShareAuditEvent[];
 }

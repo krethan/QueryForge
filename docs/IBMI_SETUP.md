@@ -60,6 +60,23 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON QFMETA.QF_USER_GROUPS, QFMETA.QF_REPORT_
 `QFREPORT` still needs no authority to `QFMETA`. Scheduled runs use the same `QFREPORT` read-only job as
 interactive runs, so no extra IBM i authority is needed for scheduling. SMTP, OIDC and LDAP traffic
 originates from the QueryForge server, not from IBM i.
+
+### Migration 003 — sharing audit
+
+`server/migrations/003_share_audit.sql` adds the table `QF_SHARE_AUDIT` (one row per share grant, role
+change or revoke, written in the same transaction as the share change) and the index
+`QF_SAUD_IX_REPORT`. It is additive and has no foreign key to `QF_REPORTS`, so the trail is kept when a
+report is deleted. The application profile only inserts and reads it; if a DBA applies the migration, grant:
+
+```
+GRANT SELECT, INSERT ON QFMETA.QF_SHARE_AUDIT TO QFAPP;
+```
+
+(Withholding `UPDATE`/`DELETE` keeps the trail append-only for the application; purge old rows as a DBA task.)
+As with 002, apply it to a non-production system first and save `QFMETA` beforehand.
+
+Paged results keep one `QFREPORT` Mapepire job per open cursor for at most `CURSOR_MAX_LIFETIME_MS`
+(default 10 minutes); size `MAX_OPEN_CURSORS` with the Mapepire server's job limits in mind.
 `QFREPORT` should have **no** authority to `QFMETA` (it is also blocked by the validator).
 
 ## 4. Reporting authorities
