@@ -46,7 +46,12 @@ const schema = z.object({
   // Limits
   QUERY_TIMEOUT_MS: int(60000),
   CONNECT_TIMEOUT_MS: int(15000),
-  MAX_RESULT_ROWS: int(5000),
+  MAX_RESULT_ROWS: int(50000),
+  RESULT_PAGE_SIZE: int(500),
+  CURSOR_IDLE_TTL_MS: int(120000),
+  CURSOR_MAX_LIFETIME_MS: int(600000),
+  MAX_OPEN_CURSORS: int(8),
+  MAX_OPEN_CURSORS_PER_USER: int(2),
   MAX_EXPORT_ROWS: int(100000),
   FETCH_BATCH_SIZE: int(500),
   MAX_CONCURRENT_EXECUTIONS: int(4),
@@ -131,6 +136,12 @@ export interface AppConfig {
     queryTimeoutMs: number;
     connectTimeoutMs: number;
     maxResultRows: number;
+    /** Rows per interactive page fetched through a server-side cursor. */
+    resultPageSize: number;
+    cursorIdleTtlMs: number;
+    cursorMaxLifetimeMs: number;
+    maxOpenCursors: number;
+    maxOpenCursorsPerUser: number;
     maxExportRows: number;
     fetchBatchSize: number;
     maxConcurrentExecutions: number;
@@ -290,6 +301,11 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       queryTimeoutMs: e.QUERY_TIMEOUT_MS,
       connectTimeoutMs: e.CONNECT_TIMEOUT_MS,
       maxResultRows: e.MAX_RESULT_ROWS,
+      resultPageSize: Math.min(e.RESULT_PAGE_SIZE, e.MAX_RESULT_ROWS),
+      cursorIdleTtlMs: e.CURSOR_IDLE_TTL_MS,
+      cursorMaxLifetimeMs: Math.max(e.CURSOR_MAX_LIFETIME_MS, e.CURSOR_IDLE_TTL_MS),
+      maxOpenCursors: e.MAX_OPEN_CURSORS,
+      maxOpenCursorsPerUser: Math.min(e.MAX_OPEN_CURSORS_PER_USER, e.MAX_OPEN_CURSORS),
       maxExportRows: Math.min(e.MAX_EXPORT_ROWS, 1_048_575),
       fetchBatchSize: e.FETCH_BATCH_SIZE,
       maxConcurrentExecutions: e.MAX_CONCURRENT_EXECUTIONS,

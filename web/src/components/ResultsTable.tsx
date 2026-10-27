@@ -1,4 +1,5 @@
 import {
+  Button,
   InlineNotification,
   Pagination,
   Table,
@@ -11,7 +12,9 @@ import {
   TableToolbarContent,
   TableToolbarSearch,
 } from '@carbon/react';
-import { useMemo, useState, type ReactNode } from 'react';
+import { WarningAlt } from '@carbon/icons-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ApiError, api } from '../api/client';
 import type { Cell, RunResponse } from '../api/types';
 import {
   NUMERIC_KINDS,
@@ -29,13 +32,78 @@ interface Props {
   toolbar?: ReactNode;
 }
 
+interface Loaded {
+  executionId: string;
+  rows: Cell[][];
+  hasMore: boolean;
+  truncated: boolean;
+  cursorId?: string;
+  expired: boolean;
+  error?: string;
+}
+
+const initial = (r: RunResponse): Loaded => ({
+  executionId: r.executionId,
+  rows: r.rows,
+  hasMore: !!r.hasMore && !!r.cursor,
+  truncated: r.truncated,
+  cursorId: r.cursor?.id,
+  expired: false,
+});
+
 /**
  * Interactive results grid: client-side sort / filter / pagination over the
- * rows returned by the server (which are capped at MAX_RESULT_ROWS). NULL is
- * rendered as a distinct, styled marker so it never looks like an empty string.
+ * rows loaded so far. The server returns the first page and, when more rows
+ * exist, a short-lived cursor; "Load next" appends the next page (bounded by
+ * MAX_RESULT_ROWS). NULL is rendered as a distinct, styled marker so it never
+ * looks like an empty string.
  */
 export function ResultsTable({ result, toolbar }: Props) {
-  const { columns, rows } = result;
+  const { columns } = result;
+  const [loaded, setLoaded] = useState<Loaded>(() => initial(result));
+  const [loading, setLoading] = useState(false);
+  // a new result replaces the loaded rows (derived-state reset during render)
+  const current = loaded.executionId === result.executionId ? loaded : initial(result);
+  if (current !== loaded) setLoaded(current);
+  const rows = current.rows;
+
+  // release an abandoned server cursor when the result is replaced or the grid unmounts
+  const open = useRef<string | undefined>(undefined);
+  open.current = current.hasMore ? current.cursorId : undefined;
+  useEffect(() => {
+    return () => {
+      if (open.current) void api.closeCursor(open.current);
+    };
+  }, [result.executionId]);
+
+  const loadMore = async () => {
+    if (!current.cursorId || loading) return;
+    setLoading(true);
+    try {
+      const p = await api.nextPage(current.cursorId);
+      setLoaded((l) =>
+        l.executionId !== result.executionId
+          ? l
+          : {
+              ...l,
+              rows: [...l.rows, ...p.rows],
+              hasMore: p.hasMore,
+              truncated: p.truncated,
+              error: undefined,
+            },
+      );
+    } catch (e) {
+      const expired = e instanceof ApiError && e.status === 410;
+      setLoaded((l) => ({
+        ...l,
+        hasMore: expired ? false : l.hasMore,
+        expired,
+        error: expired ? undefined : (e as Error).message,
+      }));
+    } finally {
+      setLoading(false);
+    }
+  };
   const [sort, setSort] = useState<{ idx: number; dir: Dir }>({ idx: -1, dir: 'NONE' });
   const [filter, setFilter] = useState('');
   const [page, setPage] = useState(1);
@@ -85,21 +153,43 @@ export function ResultsTable({ result, toolbar }: Props) {
     <div>
       <div className="qf-results-meta" aria-live="polite">
         <span>
-          <strong>{result.rowCount.toLocaleString()}</strong>{' '}
-          {result.rowCount === 1 ? 'row' : 'rows'}
+          <strong>{rows.length.toLocaleString()}</strong> {rows.length === 1 ? 'row' : 'rows'}
+          {current.hasMore ? ' loaded · more available' : ''}
         </span>
         <span>{columns.length} columns</span>
         <span>Duration: {formatDuration(result.durationMs)}</span>
         <span>Executed: {formatDateTime(result.completedAt)}</span>
         <span>Source: {result.dataSource}</span>
       </div>
-      {result.truncated && (
+      {current.truncated && (
         <InlineNotification
           kind="warning"
           lowContrast
           hideCloseButton
           title="Results limited."
-          subtitle={`Only the first ${result.maxRows.toLocaleString()} rows are shown. Refine the query or export to Excel for a larger result set.`}
+          subtitle={
+            result.pagingUnavailable && rows.length < result.maxRows
+              ? `More rows exist, but the server has too many open result cursors right now, so only the first ${rows.length.toLocaleString()} rows are shown. Run the query again later or export to Excel for the full result.`
+              : `Only the first ${result.maxRows.toLocaleString()} rows are shown. Refine the query or export to Excel for a larger result set.`
+          }
+        />
+      )}
+      {current.expired && (
+        <InlineNotification
+          kind="info"
+          lowContrast
+          hideCloseButton
+          title="Result cursor expired."
+          subtitle="The server released this result after a period of inactivity. Run the query again to load more rows."
+        />
+      )}
+      {current.error && (
+        <InlineNotification
+          kind="error"
+          lowContrast
+          hideCloseButton
+          title="Could not load more rows."
+          subtitle={current.error}
         />
       )}
       <TableContainer title={undefined}>
@@ -137,6 +227,16 @@ export function ResultsTable({ result, toolbar }: Props) {
                       title={`${c.name} · ${c.type}${c.precision ? `(${c.precision}${c.scale ? `,${c.scale}` : ''})` : ''}${c.nullable ? ' · nullable' : ''}`}
                     >
                       {c.label}
+                      {c.precisionAtRisk && (
+                        <span
+                          className="qf-precision-risk"
+                          role="img"
+                          aria-label="Precision may be reduced"
+                          title="This server runtime cannot guarantee exact digits for this column (run the server on Node.js 22 or later). Export to Excel keeps values as received."
+                        >
+                          <WarningAlt size={14} />
+                        </span>
+                      )}
                     </TableHeader>
                   ))}
                 </TableRow>
@@ -156,6 +256,16 @@ export function ResultsTable({ result, toolbar }: Props) {
                 ))}
               </tbody>
             </Table>
+          </div>
+        )}
+        {current.hasMore && (
+          <div className="qf-more-rows" role="status">
+            <span>More rows are available on the server.</span>
+            <Button size="sm" kind="tertiary" disabled={loading} onClick={() => void loadMore()}>
+              {loading
+                ? 'Loading…'
+                : `Load next ${(result.cursor?.pageSize ?? 0).toLocaleString()} rows`}
+            </Button>
           </div>
         )}
         {rows.length > 0 && (

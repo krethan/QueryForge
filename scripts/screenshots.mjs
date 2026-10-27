@@ -96,5 +96,50 @@ await page.goto(`${base}/schedules`);
 await page.getByRole('button', { name: 'Edit schedule' }).first().click();
 await page.getByText(/Next runs/).waitFor();
 await shot('v2-schedule-editor');
+await page.keyboard.press('Escape');
+
+// ---- v3: exact decimals, server paging, shared-with-me filters, sharing audit ----
+const runSaved = async (name) => {
+  await page.goto(`${base}/reports`);
+  await page.getByRole('link', { name }).click();
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
+  await page.getByRole('table', { name: 'Query results' }).waitFor();
+};
+await runSaved('GL Balances (exact decimals)');
+await page.getByRole('table', { name: 'Query results' }).scrollIntoViewIfNeeded();
+await shot('v3-exact-decimals');
+
+await runSaved('All Order Lines (1,200 rows)');
+const more = page.getByRole('button', { name: /Load next/ });
+await more.scrollIntoViewIfNeeded();
+await shot('v3-more-rows');
+await more.click();
+await page.getByText(/1,000/).first().waitFor();
+await page.getByRole('button', { name: /Load next/ }).scrollIntoViewIfNeeded();
+await shot('v3-more-rows-loaded');
+
+await page.goto(`${base}/reports`);
+await page.getByText('Inventory Watchlist (Pat)').waitFor();
+await shot('v3-saved-reports-shared');
+await page.getByLabel('My access').selectOption('VIEWER');
+await shot('v3-saved-reports-filter-viewer');
+await page.getByLabel('My access').selectOption('all');
+
+await page
+  .getByRole('row', { name: /Customer Credit Limits/ })
+  .getByRole('button')
+  .last()
+  .click();
+await page.getByRole('menuitem', { name: 'Access and audit' }).click();
+await page
+  .getByRole('dialog')
+  .getByText(/Sharing history/)
+  .waitFor();
+await page
+  .getByRole('dialog')
+  .getByText(/revoked/)
+  .first()
+  .waitFor();
+await shot('v3-access-audit');
 
 await browser.close();

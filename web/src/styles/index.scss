@@ -299,3 +299,33 @@ body {
   margin-top: 1rem;
   font-size: 0.875rem;
 }
+
+.qf-precision-risk {
+  display: inline-flex;
+  margin-left: 0.25rem;
+  vertical-align: middle;
+  color: var(--cds-support-warning, #f1c21b);
+}
+.qf-more-rows {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  background: var(--cds-layer-01, #f4f4f4);
+  border-top: 1px solid var(--cds-border-subtle-01, #c6c6c6);
+}
+.qf-audit-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  li {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--cds-border-subtle-01, #e0e0e0);
+  }
+  time {
+    display: block;
+    color: var(--cds-text-secondary, #525252);
+    font-size: 0.75rem;
+  }
+}

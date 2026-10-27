@@ -15,9 +15,9 @@ import {
 import type { AccessService } from '../sharing/access.js';
 import { AppError, DbError, sanitizeErrorMessage } from '../util/errors.js';
 import { XlsxResultWriter, sanitizeFileName } from '../export/xlsx.js';
-import type { ExecutionOutcome, QueryExecutor } from './executor.js';
+import type { PagedOutcome, PageOutcome, QueryExecutor } from './executor.js';
 
-export interface RunResponse extends ExecutionOutcome {
+export interface RunResponse extends PagedOutcome {
   report?: Pick<
     Report,
     'id' | 'name' | 'description' | 'category' | 'sql' | 'version' | 'parameters'
@@ -101,9 +101,9 @@ export class ExecutionService {
   ): Promise<RunResponse> {
     this.executor.validate(sql);
     const p = resolveParameters(sql, params.definitions ?? [], params.values ?? {});
-    const out = await this.tracked(
+    const out = await this.paged(
       { id: executionId, userId: user.id, kind: 'RUN', sql, parameters: p.used },
-      () => this.executor.run(sql, user.id, { executionId, parameters: p.bound }),
+      p.bound,
     );
     return { ...out, parameters: p.used, dataSource: this.cfg.mapepire.displayName };
   }
@@ -117,7 +117,7 @@ export class ExecutionService {
     const { report } = await this.access.require(user, reportId, 'VIEW'); // fresh SQL from Db2 for i
     this.executor.validate(report.sql);
     const p = resolveParameters(report.sql, report.parameters, values);
-    const out = await this.tracked(
+    const out = await this.paged(
       {
         id: executionId,
         userId: user.id,
@@ -127,7 +127,7 @@ export class ExecutionService {
         sql: report.sql,
         parameters: p.used,
       },
-      () => this.executor.run(report.sql, user.id, { executionId, parameters: p.bound }),
+      p.bound,
     );
     const { id, name, description, category, sql, version, parameters } = report;
     return {
@@ -136,6 +136,37 @@ export class ExecutionService {
       parameters: p.used,
       dataSource: this.cfg.mapepire.displayName,
     };
+  }
+
+  /**
+   * Interactive run through a paging cursor. History is finished after the first
+   * page and updated again with the final row count when the cursor closes.
+   */
+  private paged(ctx: ExecContext, bound: (string | number | null)[]): Promise<PagedOutcome> {
+    const t0 = Date.now();
+    return this.tracked(ctx, () =>
+      this.executor.openPaged(ctx.sql, ctx.userId, {
+        executionId: ctx.id,
+        parameters: bound,
+        onClose: (info) =>
+          this.history
+            .finish(ctx, {
+              status: 'SUCCEEDED',
+              elapsedMs: Date.now() - t0,
+              rowCount: info.rowCount,
+              truncated: info.truncated,
+            })
+            .catch((e) => console.error('history.finish failed', sanitizeErrorMessage(e))),
+      }),
+    );
+  }
+
+  fetchPage(user: AppUser, cursorId: string): Promise<PageOutcome> {
+    return this.executor.fetchPage(cursorId, user.id);
+  }
+
+  closeCursor(user: AppUser, cursorId: string): Promise<boolean> {
+    return this.executor.closeCursor(cursorId, user.id);
   }
 
   cancel(user: AppUser, executionId: string): boolean {

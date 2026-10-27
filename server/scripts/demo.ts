@@ -101,6 +101,45 @@ function script(sql: string): Scripted {
       ]),
     };
   }
+  if (s.includes('.LEDGER')) {
+    // DECIMAL(31,2) and BIGINT values beyond 2^53, delivered as exact strings the way
+    // @ibm/mapepire-js 1.0.2 does on Node.js 22+ (JSON.parse source-text access).
+    return {
+      columns: [
+        col('ENTRY_ID', 'BIGINT', 19),
+        col('ACCOUNT', 'CHAR', 6),
+        col('BALANCE', 'DECIMAL', 31, 2),
+        col('FX_RATE', 'DECIMAL', 9, 6),
+      ],
+      rows: Array.from({ length: 8 }, (_, i) => [
+        `90071992547409${String(91 + i * 3).padStart(2, '0')}`,
+        `GL${String(1000 + i * 10)}`,
+        i % 3 === 0
+          ? `${i % 2 ? '-' : ''}1234567890123456789${i}.${String(i * 7).padStart(2, '0')}`
+          : `${(i + 1) * 1050}.25`,
+        (1 + i / 8).toFixed(6),
+      ]),
+    };
+  }
+  if (s.includes('.ORDER_LINES')) {
+    return {
+      columns: [
+        col('LINE_ID', 'INTEGER'),
+        col('ORDER_ID', 'INTEGER'),
+        col('ITEM', 'CHAR', 8),
+        col('QTY', 'INTEGER'),
+        col('EXTENDED', 'DECIMAL', 13, 2),
+      ],
+      rows: Array.from({ length: 1200 }, (_, i) => [
+        i + 1,
+        50001 + (i % 64),
+        `SKU-${String((i % 12) + 1).padStart(4, '0')}`,
+        (i % 9) + 1,
+        (((i * 131) % 9000) / 3 + 5).toFixed(2),
+      ]),
+      delayMs: 60,
+    };
+  }
   // Default: fake orders
   return {
     columns: [
@@ -162,6 +201,20 @@ async function main() {
       sql: "SELECT ORDER_ID, CUSTOMER, REGION, ORDER_DATE, AMOUNT, STATUS, NOTE\nFROM DEMOLIB.ORDERS\nWHERE ORDER_DATE >= DATE('2026-10-01')",
     },
   ];
+  seed.push(
+    {
+      name: 'GL Balances (exact decimals)',
+      category: 'Finance',
+      description: 'DECIMAL(31,2) and BIGINT values kept exact end to end',
+      sql: 'SELECT ENTRY_ID, ACCOUNT, BALANCE, FX_RATE\nFROM DEMOLIB.LEDGER\nORDER BY ENTRY_ID',
+    },
+    {
+      name: 'All Order Lines (1,200 rows)',
+      category: 'Operations',
+      description: 'Large result: loaded page by page from a server cursor',
+      sql: 'SELECT LINE_ID, ORDER_ID, ITEM, QTY, EXTENDED\nFROM DEMOLIB.ORDER_LINES\nORDER BY LINE_ID',
+    },
+  );
   const created = [];
   for (const r of seed) created.push(await reports.create(user.id, r));
   const parameterized = await reports.create(user.id, {
@@ -260,6 +313,26 @@ async function main() {
     [
       { type: 'GROUP', id: 'finance', role: 'VIEWER' },
       { type: 'USER', id: 'u-pat', role: 'EDITOR' },
+    ],
+    exists,
+  );
+  // a little sharing history for the audit panel
+  await access.replaceShares(
+    created[1],
+    'u-demo',
+    [
+      { type: 'GROUP', id: 'finance', role: 'VIEWER' },
+      { type: 'USER', id: 'u-pat', role: 'VIEWER' },
+      { type: 'USER', id: 'u-sam', role: 'EDITOR' },
+    ],
+    exists,
+  );
+  await access.replaceShares(
+    created[1],
+    'u-demo',
+    [
+      { type: 'GROUP', id: 'finance', role: 'VIEWER' },
+      { type: 'USER', id: 'u-pat', role: 'VIEWER' },
     ],
     exists,
   );
