@@ -1,5 +1,7 @@
 # QueryForge — IBM i Query Reports
 
+[![CI](https://github.com/krethan/QueryForge/actions/workflows/ci.yml/badge.svg)](https://github.com/krethan/QueryForge/actions/workflows/ci.yml)
+
 Write read-only SQL against **IBM Db2 for i**, view results in an interactive IBM Carbon table,
 save reports to a dashboard, re-run them, export to Excel, and review execution history.
 Database access is exclusively through **Mapepire** (`@ibm/mapepire-js` 1.0.2); report metadata is
