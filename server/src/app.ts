@@ -10,6 +10,7 @@ import { HistoryRepository } from './history/history.js';
 import { ReportRepository } from './reports/reports.js';
 import { ExecutionService } from './sql/execution-service.js';
 import { QueryExecutor } from './sql/executor.js';
+import { CatalogService } from './catalog/catalog.js';
 import type { JobFactory, MetadataDb } from './db/types.js';
 import { apiRouter, errorHandler } from './routes/api.js';
 import { OpenIdClientProvider, type OidcProvider } from './auth/oidc.js';
@@ -37,6 +38,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
   const reports = new ReportRepository(metadataDb, cfg.metadata.schema);
   const history = new HistoryRepository(metadataDb, cfg.metadata.schema);
   const executor = new QueryExecutor(cfg, jobFactory);
+  const catalog = new CatalogService(cfg, executor);
   const groups = new GroupRepository(metadataDb, cfg.metadata.schema);
   const access = new AccessService(metadataDb, cfg.metadata.schema, reports, groups);
   const execution = new ExecutionService(cfg, executor, access, history);
@@ -86,6 +88,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       history,
       execution,
       executor,
+      catalog,
       metadataDb,
       access,
       groups,
@@ -108,6 +111,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
   return {
     app,
     executor,
+    catalog,
     execution,
     reports,
     history,
