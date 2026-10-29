@@ -28,7 +28,12 @@ export function LoginPage() {
   const from = (loc.state as { from?: string } | null)?.from ?? '/';
   const [providers, setProviders] = useState<AuthProviders | null>(null);
   const [method, setMethod] = useState<'local' | 'ldap'>('local');
+
   const ssoError = new URLSearchParams(loc.search).get('sso_error');
+
+  useEffect(() => {
+    document.title = 'Sign in — Uncle Bob';
+  }, []);
 
   useEffect(() => {
     api
@@ -61,7 +66,8 @@ export function LoginPage() {
 
   return (
     <main className="qf-login">
-      <h1>IBM i Query Reports</h1>
+      <h1>Uncle Bob</h1>
+      <p className="qf-login-tagline">Bob's your uncle — SQL reporting for IBM i</p>
       <p style={{ marginBottom: '1.5rem', color: 'var(--cds-text-secondary)' }}>
         Sign in to run and manage Db2 for i reports.
       </p>

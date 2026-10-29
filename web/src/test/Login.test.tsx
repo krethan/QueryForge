@@ -20,6 +20,19 @@ describe('LoginPage', () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
+  it('shows the product name and the tagline', async () => {
+    vi.spyOn(api, 'providers').mockResolvedValue({
+      local: true,
+      oidc: null,
+      ldap: null,
+    });
+    renderAt();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Uncle Bob');
+    expect(screen.getByText("Bob's your uncle \u2014 SQL reporting for IBM i")).toBeInTheDocument();
+    expect(screen.getByText('Sign in to run and manage Db2 for i reports.')).toBeInTheDocument();
+    expect(document.title).toBe('Sign in — Uncle Bob');
+  });
+
   it('offers SSO and the directory switch when configured', async () => {
     vi.spyOn(api, 'providers').mockResolvedValue({
       local: true,

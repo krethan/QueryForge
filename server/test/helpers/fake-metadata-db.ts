@@ -6,7 +6,7 @@ type Row = Record<string, unknown>;
 
 /**
  * In-memory stand-in for the Db2 for i metadata tables, used only by tests.
- * It understands exactly the parameterised statements QueryForge issues and
+ * It understands exactly the parameterised statements Uncle Bob issues and
  * asserts that no user-supplied value ever appears inside SQL text.
  */
 export class FakeMetadataDb implements MetadataDb {

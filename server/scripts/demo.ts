@@ -1,7 +1,7 @@
 /**
  * DEV-ONLY DEMO MODE — `npm run demo` (from the repo root).
  *
- * Starts QueryForge entirely in memory: the metadata store and the Mapepire SQL job are the
+ * Starts Uncle Bob entirely in memory: the metadata store and the Mapepire SQL job are the
  * test fakes from test/helpers, so it never opens a network connection to any IBM i system.
  * All data is obviously fictional. It ignores .env, refuses NODE_ENV=production, and binds to
  * 127.0.0.1 only. It is never enabled by `npm start` or `npm run dev`.
@@ -554,7 +554,7 @@ async function main() {
 
   app.listen(PORT, '127.0.0.1', () => {
     console.log(
-      `QueryForge DEMO (in-memory, no IBM i) on ${origin}  — login: demo / demo-password-123 (LDAP fake: dave / directory-pass; SSO button signs in a fake user)`,
+      `Uncle Bob DEMO (in-memory, no IBM i) on ${origin}  — login: demo / demo-password-123 (LDAP fake: dave / directory-pass; SSO button signs in a fake user)`,
     );
   });
 }

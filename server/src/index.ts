@@ -15,7 +15,7 @@ const { app, scheduler, executor } = createApp({ cfg, metadataDb, staticDir });
 
 const server = app.listen(cfg.port, cfg.host, () => {
   console.log(
-    `IBM i Query Reports API listening on http://${cfg.host}:${cfg.port} (Mapepire ${cfg.mapepire.host}:${cfg.mapepire.port})`,
+    `Uncle Bob API listening on http://${cfg.host}:${cfg.port} (Mapepire ${cfg.mapepire.host}:${cfg.mapepire.port})`,
   );
 });
 

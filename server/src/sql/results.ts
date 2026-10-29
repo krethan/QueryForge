@@ -40,7 +40,7 @@ export interface ResultColumn {
  * text access: Node.js 22+), any JSON number that would not round-trip through a
  * double (e.g. 12345678901234567890 or 1.50) is delivered as its exact source
  * string, so no SQL CAST is needed. On older runtimes the context is absent and
- * wide numbers are rounded before QueryForge ever sees them.
+ * wide numbers are rounded before Uncle Bob ever sees them.
  */
 export const JSON_SOURCE_TEXT_SUPPORTED: boolean = (() => {
   let ok = false;

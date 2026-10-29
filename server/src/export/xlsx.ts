@@ -178,7 +178,8 @@ export class XlsxResultWriter {
       useStyles: true,
       useSharedStrings: false,
     });
-    this.wb.creator = 'IBM i Query Reports';
+    this.wb.creator = 'Uncle Bob';
+    this.wb.lastModifiedBy = 'Uncle Bob';
     this.wb.created = new Date();
   }
 
@@ -226,6 +227,8 @@ export class XlsxResultWriter {
 
   async finish(meta: WorkbookMeta) {
     if (!this.sheet) this.setColumns([]);
+    this.wb.title = meta.title;
+    this.wb.subject = 'SQL reporting for IBM i';
     this.sheet.commit();
     const info = this.wb.addWorksheet('Report Info');
     info.columns = [

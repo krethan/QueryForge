@@ -299,7 +299,7 @@ export function ReportBuilderPage() {
           <h1>Report Builder</h1>
           <p>
             Choose a table the reporting profile can read, pick the fields, set the sort order, and
-            QueryForge builds the read-only SELECT for you.
+            Uncle Bob builds the read-only SELECT for you.
           </p>
         </div>
         <Tag size="sm" type="gray" renderIcon={TableSplit}>
