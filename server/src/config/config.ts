@@ -56,6 +56,8 @@ const schema = z.object({
   FETCH_BATCH_SIZE: int(500),
   MAX_CONCURRENT_EXECUTIONS: int(4),
   MAX_QUERY_LENGTH: int(32000),
+  /** How long QSYS2 catalog (SYSTABLES / SYSCOLUMNS) results stay cached for the Report Builder. */
+  CATALOG_CACHE_TTL_MS: int(60000, 0),
   RATE_LIMIT_WINDOW_MS: int(60000),
   RATE_LIMIT_MAX: int(120),
   EXECUTE_RATE_LIMIT_MAX: int(30),
@@ -146,6 +148,8 @@ export interface AppConfig {
     fetchBatchSize: number;
     maxConcurrentExecutions: number;
     maxQueryLength: number;
+    /** Report Builder catalog cache TTL (ms); 0 disables caching. */
+    catalogCacheTtlMs: number;
     rateLimitWindowMs: number;
     rateLimitMax: number;
     executeRateLimitMax: number;
@@ -310,6 +314,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       fetchBatchSize: e.FETCH_BATCH_SIZE,
       maxConcurrentExecutions: e.MAX_CONCURRENT_EXECUTIONS,
       maxQueryLength: e.MAX_QUERY_LENGTH,
+      catalogCacheTtlMs: e.CATALOG_CACHE_TTL_MS,
       rateLimitWindowMs: e.RATE_LIMIT_WINDOW_MS,
       rateLimitMax: e.RATE_LIMIT_MAX,
       executeRateLimitMax: e.EXECUTE_RATE_LIMIT_MAX,
