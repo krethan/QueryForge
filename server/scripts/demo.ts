@@ -63,10 +63,187 @@ const customers = [
 ];
 const regions = ['North', 'South', 'East', 'West'];
 
-function script(sql: string): Scripted {
+/** Fake QSYS2 catalog content for the Report Builder (DEMOLIB has no real catalog). */
+const catalogTables = [
+  {
+    schema: 'DEMOLIB',
+    name: 'ORDERS',
+    type: 'T',
+    text: 'Customer orders (fake)',
+    columns: [
+      ['ORDER_ID', 'INTEGER', 4, 10, 0, 'N', 'Order number'],
+      ['CUSTOMER', 'VARCHAR', 40, null, null, 'Y', 'Customer name'],
+      ['REGION', 'CHAR', 5, null, null, 'Y', 'Sales region'],
+      ['ORDER_DATE', 'DATE', 4, null, null, 'Y', 'Order date'],
+      ['AMOUNT', 'DECIMAL', 11, 11, 2, 'Y', 'Order total'],
+      ['STATUS', 'VARCHAR', 10, null, null, 'Y', 'OPEN, SHIPPED or BILLED'],
+      ['NOTE', 'VARCHAR', 60, null, null, 'Y', 'Free-text note'],
+    ],
+  },
+  {
+    schema: 'DEMOLIB',
+    name: 'CUSTOMERS',
+    type: 'T',
+    text: 'Sample customers (fake)',
+    columns: [
+      ['CUSTNO', 'INTEGER', 4, 10, 0, 'N', 'Customer number'],
+      ['NAME', 'VARCHAR', 40, null, null, 'Y', 'Customer name'],
+      ['REGION', 'CHAR', 5, null, null, 'Y', 'Sales region'],
+      ['CREDIT_LIMIT', 'DECIMAL', 11, 11, 2, 'Y', 'Credit limit'],
+      ['LAST_ORDER', 'DATE', 4, null, null, 'Y', 'Date of last order'],
+    ],
+  },
+  {
+    schema: 'DEMOLIB',
+    name: 'INVENTORY',
+    type: 'P',
+    text: 'Stock on hand (legacy physical file, fake)',
+    columns: [
+      ['ITEM', 'CHAR', 8, null, null, 'N', 'Item code'],
+      ['DESCRIPTION', 'VARCHAR', 40, null, null, 'Y', 'Item description'],
+      ['ON_HAND', 'INTEGER', 4, 10, 0, 'Y', 'Units on hand'],
+      ['REORDER_POINT', 'INTEGER', 4, 10, 1, 'Y', 'Reorder threshold'],
+    ],
+  },
+  {
+    schema: 'DEMOLIB',
+    name: 'OPEN_ORDERS',
+    type: 'V',
+    text: 'Orders not yet shipped (view, fake)',
+    columns: [
+      ['ORDER_ID', 'INTEGER', 4, 10, 0, 'N', 'Order number'],
+      ['CUSTOMER', 'VARCHAR', 40, null, null, 'Y', 'Customer name'],
+      ['AMOUNT', 'DECIMAL', 11, 11, 2, 'Y', 'Order total'],
+    ],
+  },
+  {
+    schema: 'DEMOLIB',
+    name: 'LEDGER',
+    type: 'T',
+    text: 'General ledger (fake)',
+    columns: [
+      ['ENTRY_ID', 'BIGINT', 8, 19, 0, 'N', 'Ledger entry'],
+      ['ACCOUNT', 'CHAR', 6, null, null, 'N', 'Account code'],
+      ['BALANCE', 'DECIMAL', 16, 31, 2, 'Y', 'Balance'],
+      ['FX_RATE', 'DECIMAL', 8, 9, 6, 'Y', 'Exchange rate'],
+    ],
+  },
+  {
+    schema: 'DEMOLIB',
+    name: 'ORDER_LINES',
+    type: 'T',
+    text: 'Order detail lines (fake)',
+    columns: [
+      ['LINE_ID', 'INTEGER', 4, 10, 0, 'N', 'Line number'],
+      ['ORDER_ID', 'INTEGER', 4, 10, 0, 'N', 'Order number'],
+      ['ITEM', 'CHAR', 8, null, null, 'N', 'Item code'],
+      ['QTY', 'INTEGER', 4, 10, 0, 'Y', 'Quantity'],
+      ['EXTENDED', 'DECIMAL', 13, 13, 2, 'Y', 'Extended price'],
+    ],
+  },
+];
+
+function catalogScript(s: string, parameters?: unknown[]): Scripted | null {
+  if (!s.includes('QSYS2.SYSTABLES') && !s.includes('QSYS2.SYSCOLUMNS')) return null;
+  // The fake job does not evaluate predicates, so apply the bound values here.
+  const bound = (parameters ?? []).map((p) => String(p ?? '').toUpperCase());
+  if (s.includes('QSYS2.SYSCOLUMNS')) {
+    const wanted = catalogTables.find((t) => t.schema === bound[0] && t.name === bound[1]);
+    return {
+      columns: [
+        col('COLUMN_NAME', 'VARCHAR', 128),
+        col('DATA_TYPE', 'VARCHAR', 8),
+        col('LENGTH', 'INTEGER'),
+        col('NUMERIC_PRECISION', 'INTEGER'),
+        col('NUMERIC_SCALE', 'INTEGER'),
+        col('IS_NULLABLE', 'CHAR', 1),
+        col('COLUMN_TEXT', 'VARCHAR', 50),
+        col('ORDINAL_POSITION', 'INTEGER'),
+      ],
+      rows: (wanted ? [wanted] : catalogTables).flatMap((t) =>
+        t.columns.map((c, i) => [c[0], c[1], c[2], c[3], c[4], c[5], c[6], i + 1]),
+      ),
+    };
+  }
+  return {
+    columns: [
+      col('TABLE_SCHEMA', 'VARCHAR', 128),
+      col('TABLE_NAME', 'VARCHAR', 128),
+      col('TABLE_TYPE', 'CHAR', 1),
+      col('TABLE_TEXT', 'VARCHAR', 50),
+      col('TABLE_OWNER', 'VARCHAR', 128),
+    ],
+    rows: catalogTables
+      .filter((t) => {
+        const exact = bound.filter((p) => p === t.schema || p === t.name);
+        const like = bound
+          .filter((p) => p.startsWith('%') && p.endsWith('%'))
+          .map((p) => p.slice(1, -1));
+        if (exact.length && !exact.includes(t.schema) && !exact.includes(t.name)) return false;
+        if (like.length && !like.some((n) => t.name.includes(n) || t.schema.includes(n)))
+          return false;
+        return true;
+      })
+      .map((t) => [t.schema, t.name, t.type, t.text, 'DEMOUSER']),
+  };
+}
+
+/** Column names in a `SELECT "A", "B"\nFROM …` list, in order (empty for other statements). */
+function selectList(sql: string): string[] {
+  const m = /^SELECT\s+([\s\S]+?)\s*\nFROM\s/i.exec(sql);
+  if (!m) return [];
+  return [...m[1].matchAll(/"((?:[^"]|"")*)"/g)].map((x) => x[1].replace(/""/g, '"'));
+}
+
+/**
+ * The fake job does not parse SQL, so apply the parts of a Report Builder statement
+ * that matter for a believable demo: the SELECT list and the ORDER BY direction.
+ */
+function shaped(s: Scripted, sql: string): Scripted {
+  const names = selectList(sql);
+  if (!names.length) return s;
+  const idx = names.map((n) => s.columns.findIndex((c) => c.name === n));
+  if (idx.some((i) => i < 0)) return s;
+  let rows = s.rows.map((r) => idx.map((i) => r[i]));
+  const order = /\nORDER BY\s+([\s\S]+)$/i.exec(sql);
+  if (order) {
+    const keys = [...order[1].matchAll(/"((?:[^"]|"")*)"\s+(ASC|DESC)/gi)].map((x) => ({
+      index: names.indexOf(x[1].replace(/""/g, '"')),
+      dir: x[2].toUpperCase() === 'DESC' ? -1 : 1,
+    }));
+    const usable = keys.filter((k) => k.index >= 0);
+    if (usable.length)
+      rows = [...rows].sort((a, b) => {
+        for (const k of usable) {
+          const x = a[k.index];
+          const y = b[k.index];
+          if (x === y) continue;
+          // NULLs last in both directions, like Db2 for i's default
+          if (x === null || x === undefined) return 1;
+          if (y === null || y === undefined) return -1;
+          const c =
+            typeof x === 'number' && typeof y === 'number'
+              ? x - y
+              : String(x).localeCompare(String(y));
+          if (c) return c * k.dir;
+        }
+        return 0;
+      });
+  }
+  return { ...s, columns: idx.map((i) => s.columns[i]), rows };
+}
+
+function script(sql: string, parameters?: unknown[]): Scripted {
   const s = sql.toUpperCase();
   if (s === '__CONNECT__' || s.includes('SYSIBM.SYSDUMMY1'))
     return { columns: [col('X', 'INTEGER')], rows: [[1]] };
+  const catalog = catalogScript(s, parameters);
+  if (catalog) return catalog;
+  return shaped(dataScript(sql), sql);
+}
+
+function dataScript(sql: string): Scripted {
+  const s = sql.toUpperCase();
   if (s.includes('.CUSTOMERS')) {
     return {
       columns: [

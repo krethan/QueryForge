@@ -84,6 +84,7 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 | `MAX_RESULT_ROWS` / `MAX_EXPORT_ROWS`                                                         | 50000 / 100000        | Row caps                                                                                        |
 | `RESULT_PAGE_SIZE`                                                                            | 500                   | Rows per page shown in the browser (first page + each "Load next"); capped at `MAX_RESULT_ROWS` |
 | `CURSOR_IDLE_TTL_MS` / `CURSOR_MAX_LIFETIME_MS`                                               | 120000 / 600000       | A paged result's Mapepire job is closed after this idle time / absolute lifetime                |
+| `CATALOG_CACHE_TTL_MS`                                                                        | 60000                 | How long the Report Builder caches `QSYS2` catalog reads in memory (`0` disables the cache)     |
 | `MAX_OPEN_CURSORS` / `MAX_OPEN_CURSORS_PER_USER`                                              | 8 / 2                 | Open paged results (each holds one Mapepire job). A user's oldest is closed at their limit      |
 | `FETCH_BATCH_SIZE`                                                                            | 500                   | Rows per Mapepire fetch                                                                         |
 | `MAX_CONCURRENT_EXECUTIONS` / `MAX_QUERY_LENGTH`                                              | 4 / 32000             |                                                                                                 |
@@ -159,6 +160,44 @@ Load next N rows"**, which calls `POST /api/results/:id/next` (`Query.fetchMore`
 
 Client-side sort and filter apply to the rows loaded so far.
 
+## Report Builder
+
+**Report Builder** (nav item next to _New Report_) builds a report from a table instead of from typed SQL.
+You search the Db2 for i catalog, pick a table, tick the columns you want (in the order you want them),
+add one or more sort keys with ASC/DESC, and QueryForge generates and runs the `SELECT`.
+
+```
+GET  /api/schema/tables                                 ?search=…&limit=…
+GET  /api/schema/tables/:schema/:table/columns
+POST /api/schema/sql                                    { schema, table, columns, sort }
+POST /api/schema/run                                    { schema, table, columns, sort, executionId }
+```
+
+- The list comes from `QSYS2.SYSTABLES` (`TABLE_TYPE` in `T`, `P`, `V`, `L`, `A`, `M`, `SYSTEM_TABLE = 'N'`) and
+  is filtered with `QSYS2.SQL_CHECK_AUTHORITY(library, file) = 1`, i.e. it shows what the read-only reporting
+  profile can actually read (directly, via a group profile, `*PUBLIC` or an authorization list). Columns come
+  from `QSYS2.SYSCOLUMNS`. When `REPORT_LIBRARIES` is set only those libraries are listed, otherwise everything
+  except the system catalogs and `PROTECTED_SCHEMAS`. Results are bounded (500 tables / 1000 columns per read,
+  100 tables per page) and cached in memory for `CATALOG_CACHE_TTL_MS`.
+- Search terms, schema and table names are always **bound as `?` parameters**; they are never interpolated into
+  the catalog SQL. The list runs through the same validator, read-only job and rate limits as an ad-hoc query.
+- The browser **never sends SQL**. It sends a schema, a table, column names and sort directions; the server
+  resolves each name against its cached catalog metadata (rejecting anything that is not an exact catalogue
+  entry, and rejecting ambiguous case-insensitive matches), then emits the statement with Db2 for i delimited
+  identifiers (`"NAME"`, embedded quotes doubled), always schema-qualified. `ORDER BY` only accepts `ASC`/`DESC`
+  literals chosen from the UI. Preview (`POST /api/schema/sql`) and Run (`POST /api/schema/run`) build the same
+  statement; the built SQL is validated once more before execution.
+- **Save as report** creates a normal saved report from the generated SQL (no parameters) and opens its editor,
+  so it shows up in _Saved Reports_, can be shared, scheduled and exported like any other report.
+
+Limitations: one table per report (no joins, filters, aggregates or expressions); views, logical files, aliases
+and MQTs are listed alongside physical tables, and whether they are read-only depends on the object itself;
+LOB/XML/DATALINK/ROWID columns are listed but may be awkward to display; the table list is cached for
+`CATALOG_CACHE_TTL_MS`, so new objects/grants appear after that; mixed-case or system-named objects are emitted
+with the catalog's spelling (`SYSTEM_TABLE_NAME`/`SYSTEM_TABLE_SCHEMA` are used for the authority check), and a
+name that differs only by case from another object is treated as ambiguous. Like the rest of the app, this has
+been tested with fakes only — not against a live IBM i.
+
 ## Sharing audit
 
 Every share grant, role change and revoke is written to `QFMETA.QF_SHARE_AUDIT` (migration 003) in the same
@@ -190,7 +229,8 @@ owner and by your access (Owner / Editor / Viewer).
 
 ## Known limitations
 
-- Not yet validated against a live IBM i / Mapepire server.
+- Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
+  `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).
 - Mapepire 1.0.2 has no statement cancel API; cancel/timeout close the job.
 - On Node.js 20, DECIMAL > 15 digits and BIGINT are rounded inside mapepire-js before reaching the server
   (flagged in the UI); use Node.js 22+. The exact-value path has been tested with fakes only.
