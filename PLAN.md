@@ -1,4 +1,4 @@
-# PLAN — IBM i Query Reports
+# PLAN — Uncle Bob
 
 ## Goal
 

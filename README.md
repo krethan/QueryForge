@@ -1,4 +1,11 @@
-# QueryForge — IBM i Query Reports
+# Uncle Bob
+
+**Bob's your uncle** — Uncle Bob is a browser-based SQL reporting tool for IBM i (IBM Db2 for i).
+
+> The GitHub repository is still named **QueryForge** ([`krethan/QueryForge`](https://github.com/krethan/QueryForge)); only the product/display name changed. Internal
+> identifiers are unchanged too — `QF_*` environment variables, the `QFMETA` Db2 schema and
+> `QF_*` tables, the session cookie name, and `qf-*` CSS classes — so existing installs keep
+> working.
 
 [![CI](https://github.com/krethan/QueryForge/actions/workflows/ci.yml/badge.svg)](https://github.com/krethan/QueryForge/actions/workflows/ci.yml)
 
@@ -133,7 +140,7 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 DECIMAL/NUMERIC and BIGINT values are kept as **strings** from the Mapepire job through the API and the
 results grid (which sorts them with an exact decimal comparison). `@ibm/mapepire-js` 1.0.2 parses every
 message with a `JSON.parse` reviver that returns a number's original source text when it does not
-round-trip as a double; that works on Node.js 22+. On Node 20 those values are rounded before QueryForge
+round-trip as a double; that works on Node.js 22+. On Node 20 those values are rounded before Uncle Bob
 sees them: the server logs a warning at start-up and wide columns (BIGINT, DECIMAL with precision > 15) are
 flagged `precisionAtRisk` and shown with a warning icon in the grid.
 
@@ -164,7 +171,7 @@ Client-side sort and filter apply to the rows loaded so far.
 
 **Report Builder** (nav item next to _New Report_) builds a report from a table instead of from typed SQL.
 You search the Db2 for i catalog, pick a table, tick the columns you want (in the order you want them),
-add one or more sort keys with ASC/DESC, and QueryForge generates and runs the `SELECT`.
+add one or more sort keys with ASC/DESC, and Uncle Bob generates and runs the `SELECT`.
 
 ```
 GET  /api/schema/tables                                 ?search=…&limit=…
@@ -244,6 +251,6 @@ owner and by your access (Owner / Editor / Viewer).
 - Schedules use 5-field cron; one scheduler runner at a time (DB lease). Missed runs while stopped are not
   back-filled; the next future time is used.
 - Attachments are capped by `MAX_EXPORT_ROWS`; very large exports may exceed mail-server size limits.
-- Sharing has no expiry. The audit records changes made through QueryForge only (not direct SQL edits), and
+- Sharing has no expiry. The audit records changes made through Uncle Bob only (not direct SQL edits), and
   is not written for shares removed by report deletion.
 - Saved Reports page lists owned reports; shared reports appear under “Shared with me” on the dashboard.
