@@ -12,8 +12,13 @@ import type {
   PageResponse,
   ReportAccess,
   Report,
+  ReportBuilderRun,
   ReportInput,
+  ReportSpec,
+  ReportSqlPreview,
   RunResponse,
+  SchemaColumnsResponse,
+  SchemaTablesResponse,
   User,
 } from './types';
 
@@ -221,6 +226,26 @@ export const api = {
     ),
   cancel: (executionId: string) =>
     json<{ cancelled: boolean }>('POST', `/query/${executionId}/cancel`),
+
+  /** Report Builder: bounded, searchable list of tables/views the reporting profile can read. */
+  schemaTables: (search = '', limit?: number) => {
+    const q = new URLSearchParams();
+    if (search.trim()) q.set('search', search.trim());
+    if (limit) q.set('limit', String(limit));
+    return json<SchemaTablesResponse>('GET', `/schema/tables${q.size ? `?${q}` : ''}`);
+  },
+  /** Report Builder: column metadata for one catalogued table. */
+  schemaColumns: (schema: string, table: string) =>
+    json<SchemaColumnsResponse>(
+      'GET',
+      `/schema/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/columns`,
+    ),
+  /** Report Builder: the SELECT the server built for this selection (no execution). */
+  previewReportSql: (spec: ReportSpec, signal?: AbortSignal) =>
+    json<ReportSqlPreview>('POST', '/schema/sql', spec, signal),
+  /** Report Builder: build + execute server-side, returning the standard paged result. */
+  runReportBuilder: (spec: ReportSpec, executionId: string, signal?: AbortSignal) =>
+    json<ReportBuilderRun>('POST', '/schema/run', { ...spec, executionId }, signal),
 
   dataSource: (check = false) =>
     json<DataSourceInfo>('GET', `/datasource${check ? '?check=1' : ''}`),

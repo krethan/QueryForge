@@ -32,6 +32,8 @@ import {
   type SortKey,
 } from '../reports/reports.js';
 import type { ExecutionService } from '../sql/execution-service.js';
+import { MAX_TABLES, displayType, type CatalogService } from '../catalog/catalog.js';
+import { buildReportSql, suggestReportName, type ReportSpec } from '../catalog/sql-builder.js';
 import type { QueryExecutor } from '../sql/executor.js';
 import type { MetadataDb } from '../db/types.js';
 import { AppError, DbError, sanitizeErrorMessage } from '../util/errors.js';
@@ -44,6 +46,7 @@ export interface ApiDeps {
   history: HistoryRepository;
   execution: ExecutionService;
   executor: QueryExecutor;
+  catalog: CatalogService;
   metadataDb: MetadataDb;
   access: AccessService;
   groups: GroupRepository;
@@ -69,6 +72,30 @@ const executeSchema = z.object({
   parameters: parameterListSchema.optional(),
   values: parameterValuesSchema.optional(),
 });
+/**
+ * Report Builder input: object/column names and sort directions only. The server
+ * resolves every name against the cached QSYS2 catalog and builds the SELECT itself
+ * (see catalog/sql-builder.ts), so no SQL text is ever accepted from the client.
+ */
+const reportSpecSchema = z.object({
+  schema: z.string().min(1).max(128),
+  table: z.string().min(1).max(128),
+  columns: z.array(z.string().min(1).max(128)).min(1).max(400),
+  sort: z
+    .array(z.object({ column: z.string().min(1).max(128), direction: z.enum(['ASC', 'DESC']) }))
+    .max(50)
+    .optional(),
+});
+const builderQuerySchema = reportSpecSchema.extend({ executionId: uuid.optional() });
+
+/** Shared by preview and run: resolve the table, validate every name, build the SELECT. */
+async function buildQuery(d: ApiDeps, ownerId: string, spec: ReportSpec) {
+  const resolved = await d.catalog.resolveTable(ownerId, spec.schema, spec.table);
+  const sql = buildReportSql(spec, resolved.table, resolved.columns);
+  d.executor.validate(sql); // defence in depth: the built statement must pass the validator
+  return { sql, name: suggestReportName(spec), table: resolved.table, columns: resolved.columns };
+}
+
 const exportSchema = z.object({
   sql: z.string().optional(),
   reportId: uuid.optional(),
@@ -322,6 +349,85 @@ export function apiRouter(d: ApiDeps): Router {
     h(async (req, res) => {
       const ok = d.execution.cancel(req.session!.user, uuid.parse(req.params.executionId));
       res.status(ok ? 202 : 404).json({ cancelled: ok });
+    }),
+  );
+
+  // ---- Report Builder: catalog browsing + server-built SELECT (read-only) ----
+  r.get(
+    '/schema/tables',
+    h(async (req, res) => {
+      const search =
+        typeof req.query.search === 'string' ? req.query.search.slice(0, 128) : undefined;
+      const rawLimit = Number.parseInt(String(req.query.limit ?? ''), 10);
+      const limit = Number.isFinite(rawLimit) ? rawLimit : undefined;
+      const result = await d.catalog.listTables(req.session!.user.id, { search, limit });
+      res.json({
+        tables: result.tables.map((t) => ({
+          schema: t.schema,
+          name: t.name,
+          type: t.type,
+          typeLabel: t.typeLabel,
+          text: t.text,
+        })),
+        truncated: result.truncated,
+        cachedAt: result.cachedAt,
+        maxTables: MAX_TABLES,
+      });
+    }),
+  );
+  r.get(
+    '/schema/tables/:schema/:table/columns',
+    h(async (req, res) => {
+      const schema = String(req.params.schema ?? '').slice(0, 128);
+      const table = String(req.params.table ?? '').slice(0, 128);
+      const resolved = await d.catalog.resolveTable(req.session!.user.id, schema, table);
+      res.json({
+        schema: resolved.table.schema,
+        table: resolved.table.name,
+        type: resolved.table.type,
+        text: resolved.table.text,
+        cachedAt: resolved.cachedAt,
+        columns: resolved.columns.map((c) => ({
+          name: c.name,
+          type: c.type,
+          displayType: displayType(c),
+          length: c.length,
+          precision: c.precision,
+          scale: c.scale,
+          nullable: c.nullable,
+          text: c.text,
+          ordinal: c.ordinal,
+        })),
+      });
+    }),
+  );
+  // Preview: validates the selection and returns the exact SELECT that Run would execute.
+  r.post(
+    '/schema/sql',
+    h(async (req, res) => {
+      const spec = reportSpecSchema.parse(req.body);
+      const built = await buildQuery(d, req.session!.user.id, spec);
+      res.json({
+        sql: built.sql,
+        name: built.name,
+        schema: built.table.schema,
+        table: built.table.name,
+      });
+    }),
+  );
+  // Run: builds the SELECT server-side and executes it through the normal read-only path.
+  r.post(
+    '/schema/run',
+    execLimiter,
+    h(async (req, res) => {
+      const body = builderQuerySchema.parse(req.body);
+      const built = await buildQuery(d, req.session!.user.id, body);
+      const out = await d.execution.runAdhoc(
+        req.session!.user,
+        built.sql,
+        body.executionId ?? randomUUID(),
+      );
+      res.json({ ...out, builder: { name: built.name, sql: built.sql } });
     }),
   );
 

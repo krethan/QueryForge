@@ -90,6 +90,30 @@ GRANT SELECT ON MYLIB.ORDERS TO QFREPORT;
 
 Database authority is the real security boundary; the SQL validator and read-only job are defence in depth.
 
+### Report Builder catalog access
+
+The **Report Builder** page lists tables by reading `QSYS2.SYSTABLES` / `QSYS2.SYSCOLUMNS` as `QFREPORT`
+and asking `QSYS2.SQL_CHECK_AUTHORITY(library, file) = 1` for each object, so `QFREPORT` needs:
+
+```
+GRTOBJAUT OBJ(QSYS2) OBJTYPE(*LIB) USER(QFREPORT) AUT(*USE)
+-- the SQL catalog views themselves are normally PUBLIC *USE / *OBJOPR on IBM i:
+GRTOBJAUT OBJ(QSYS2/SYSTABLES) OBJTYPE(*FILE) USER(QFREPORT) AUT(*USE)
+GRTOBJAUT OBJ(QSYS2/SYSCOLUMNS) OBJTYPE(*FILE) USER(QFREPORT) AUT(*USE)
+```
+
+Notes:
+
+- `SQL_CHECK_AUTHORITY` returns 1 only for objects `QFREPORT` can read directly (or through a group profile,
+  `*PUBLIC` authority or an authorization list). If a library is not in `REPORT_LIBRARIES` and not
+  `REPORT_DEFAULT_SCHEMA`, `QSYS`, `QSYS2`, `SYSIBM`, `SYSIBMADM`, `SYSCAT`, `SYSSTAT` and the other
+  `PROTECTED_SCHEMAS` are hidden from the picker; when `REPORT_LIBRARIES` is set, only those libraries are listed.
+- `SQL_CHECK_AUTHORITY` is _not_ a substitute for real object authority: it can miss adopted-authority cases and
+  it only answers for the profile that runs it. The reporting profile still cannot read anything Db2 does not
+  let it read, and the page only ever issues `SELECT`s.
+- The catalog list is cached in memory for `CATALOG_CACHE_TTL_MS` (default 60 s); a newly created table or a new
+  grant appears after that TTL (or a server restart), not immediately.
+
 ## 5. Verify (non-production)
 
 ```

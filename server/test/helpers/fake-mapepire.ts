@@ -37,7 +37,8 @@ export class FakeJob implements SqlJobLike {
   fetchSizes: number[] = [];
   constructor(
     public options: JDBCOptions,
-    private script: (sql: string) => Scripted,
+    /** Second argument is the bound parameters, for scripts that care (the demo catalog does). */
+    private script: (sql: string, parameters?: unknown[]) => Scripted,
   ) {}
   async connect(server: DaemonServer) {
     this.connectedWith = server;
@@ -48,7 +49,7 @@ export class FakeJob implements SqlJobLike {
   query<T>(sql: string, opts?: { isTerseResults?: boolean; parameters?: unknown[] }): QueryLike<T> {
     this.queries.push(sql);
     this.queryOptions.push(opts);
-    const s = this.script(sql);
+    const s = this.script(sql, opts?.parameters);
     let pos = 0;
     const page = async (n: number): Promise<QueryResult<T>> => {
       if (this.closed) throw new Error('websocket closed');
@@ -90,7 +91,7 @@ export class FakeJob implements SqlJobLike {
   }
 }
 
-export function fakeFactory(script: (sql: string) => Scripted) {
+export function fakeFactory(script: (sql: string, parameters?: unknown[]) => Scripted) {
   const jobs: FakeJob[] = [];
   const factory: JobFactory = (opts) => {
     const j = new FakeJob(opts, script);
