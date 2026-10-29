@@ -29,6 +29,9 @@ const ReportEditorPage = lazy(() =>
 const SavedReportsPage = lazy(() =>
   import('./pages/SavedReportsPage').then((m) => ({ default: m.SavedReportsPage })),
 );
+const ReportBuilderPage = lazy(() =>
+  import('./pages/ReportBuilderPage').then((m) => ({ default: m.ReportBuilderPage })),
+);
 const SchedulesPage = lazy(() =>
   import('./pages/SchedulesPage').then((m) => ({ default: m.SchedulesPage })),
 );
@@ -65,6 +68,7 @@ export const routes: RouteObject[] = [
       { path: '/reports', element: <SavedReportsPage /> },
       { path: '/reports/new', element: <ReportEditorPage key="new" /> },
       { path: '/reports/:id', element: <ReportEditorPage /> },
+      { path: '/report-builder', element: <ReportBuilderPage /> },
       { path: '/schedules', element: <SchedulesPage /> },
       { path: '/datasource', element: <DataSourcePage /> },
       { path: '/account', element: <AccountPage /> },

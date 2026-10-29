@@ -224,3 +224,66 @@ export interface ReportAccess {
   shares: Share[];
   events: ShareAuditEvent[];
 }
+
+// ---- Report Builder (catalog-driven SELECT) ----
+export type CatalogTableType = 'T' | 'P' | 'V' | 'L' | 'A' | 'M' | string;
+
+export interface SchemaTable {
+  schema: string;
+  name: string;
+  /** QSYS2.SYSTABLES.TABLE_TYPE: T table, P physical file, V view, L logical file, A alias, M MQT. */
+  type: CatalogTableType;
+  typeLabel: string;
+  text: string | null;
+}
+
+export interface SchemaTablesResponse {
+  tables: SchemaTable[];
+  /** More matches exist than the server returned for this page. */
+  truncated: boolean;
+  cachedAt: string;
+  maxTables: number;
+}
+
+export interface SchemaColumn {
+  name: string;
+  type: string;
+  /** e.g. VARCHAR(40), DECIMAL(11, 2) — display only. */
+  displayType: string;
+  length: number | null;
+  precision: number | null;
+  scale: number | null;
+  nullable: boolean;
+  text: string | null;
+  ordinal: number;
+}
+
+export interface SchemaColumnsResponse {
+  schema: string;
+  table: string;
+  type: CatalogTableType;
+  text: string | null;
+  cachedAt: string;
+  columns: SchemaColumn[];
+}
+
+export type SortDirection = 'ASC' | 'DESC';
+
+/** Report Builder input: names only — the server builds and validates the SQL. */
+export interface ReportSpec {
+  schema: string;
+  table: string;
+  columns: string[];
+  sort?: { column: string; direction: SortDirection }[];
+}
+
+export interface ReportSqlPreview {
+  sql: string;
+  name: string;
+  schema: string;
+  table: string;
+}
+
+export interface ReportBuilderRun extends RunResponse {
+  builder?: { name: string; sql: string };
+}

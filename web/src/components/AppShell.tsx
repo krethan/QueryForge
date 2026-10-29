@@ -18,6 +18,7 @@ import {
   DataBase,
   DocumentMultiple_01,
   Logout,
+  TableSplit,
   Time,
   UserAvatar,
 } from '@carbon/icons-react';
@@ -28,6 +29,7 @@ import { useAuth } from '../auth/AuthContext';
 const NAV: { to: string; label: string; icon: ComponentType }[] = [
   { to: '/', label: 'Dashboard', icon: Dashboard },
   { to: '/reports/new', label: 'New Report', icon: Add },
+  { to: '/report-builder', label: 'Report Builder', icon: TableSplit },
   { to: '/reports', label: 'Saved Reports', icon: DocumentMultiple_01 },
   { to: '/schedules', label: 'Schedules', icon: Time },
   { to: '/datasource', label: 'Data Source', icon: DataBase },
@@ -95,7 +97,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <SideNavItems>
                 {NAV.map((n, i) => (
                   <span key={n.to}>
-                    {i === 4 && <SideNavDivider />}
+                    {i === 5 && <SideNavDivider />}
                     <SideNavLink as={Link} to={n.to} renderIcon={n.icon} isActive={isActive(n.to)}>
                       {n.label}
                     </SideNavLink>
