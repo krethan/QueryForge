@@ -75,6 +75,17 @@ GRANT SELECT, INSERT ON QFMETA.QF_SHARE_AUDIT TO QFAPP;
 (Withholding `UPDATE`/`DELETE` keeps the trail append-only for the application; purge old rows as a DBA task.)
 As with 002, apply it to a non-production system first and save `QFMETA` beforehand.
 
+### Migration 004 — Report Builder definitions
+
+`server/migrations/004_report_builder_def.sql` adds one nullable column, `QF_REPORTS.BUILDER_DEF`
+(`CLOB(1M) CCSID 1208`), holding the versioned Report Builder definition (`{"version":1,"spec":{...}}`) of
+reports saved from the builder, so "Open in Report Builder" can reopen them. Existing rows get NULL and
+reports written as SQL keep working unchanged. The server re-validates the definition against the catalog
+on save and on load and regenerates `SQL_TEXT` / `PARAMETERS_JSON` from it, so the stored SQL is still the
+only thing executed. **No new GRANT is needed**: the existing `SELECT, INSERT, UPDATE, DELETE` on
+`QF_REPORTS` covers the column. A DBA applying the migration needs `*OBJALTER` (or ownership) on
+`QF_REPORTS` for the `ALTER TABLE`; save `QFMETA` and try it on a non-production system first, as with 002.
+
 Paged results keep one `QFREPORT` Mapepire job per open cursor for at most `CURSOR_MAX_LIFETIME_MS`
 (default 10 minutes); size `MAX_OPEN_CURSORS` with the Mapepire server's job limits in mind.
 `QFREPORT` should have **no** authority to `QFMETA` (it is also blocked by the validator).
