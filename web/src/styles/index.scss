@@ -519,7 +519,7 @@ body {
 }
 .qf-filter-row {
   display: grid;
-  grid-template-columns: minmax(9rem, 1fr) 11rem minmax(10rem, 1.4fr) auto auto;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
   gap: 0.5rem;
   align-items: end;
   margin-bottom: 0.75rem;
