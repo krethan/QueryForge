@@ -12,6 +12,7 @@ import type {
   PageResponse,
   ReportAccess,
   Report,
+  JoinSuggestion,
   ReportBuilderRun,
   ReportInput,
   ReportSpec,
@@ -243,6 +244,17 @@ export const api = {
   /** Report Builder: the SELECT the server built for this selection (no execution). */
   previewReportSql: (spec: ReportSpec, signal?: AbortSignal) =>
     json<ReportSqlPreview>('POST', '/schema/sql', spec, signal),
+  /** Report Builder: suggested ON conditions for joining a table to the ones already added. */
+  joinSuggestions: (
+    tables: { alias: string; schema: string; table: string }[],
+    schema: string,
+    table: string,
+  ) =>
+    json<{ suggestions: JoinSuggestion[] }>('POST', '/schema/join-suggestions', {
+      tables,
+      schema,
+      table,
+    }),
   /** Report Builder: build + execute server-side, returning the standard paged result. */
   runReportBuilder: (spec: ReportSpec, executionId: string, signal?: AbortSignal) =>
     json<ReportBuilderRun>('POST', '/schema/run', { ...spec, executionId }, signal),

@@ -269,12 +269,44 @@ export interface SchemaColumnsResponse {
 
 export type SortDirection = 'ASC' | 'DESC';
 
+export type JoinType = 'INNER' | 'LEFT' | 'RIGHT' | 'FULL';
+
+/** `left` is a table already in the report (by alias); `right` is a column of the joined table. */
+export interface JoinCondition {
+  left: { table: string; column: string };
+  right: { column: string };
+}
+
+export interface ReportJoin {
+  schema: string;
+  table: string;
+  /** Omitted: the server uses the position (T2, T3, …). */
+  alias?: string;
+  type: JoinType;
+  on: JoinCondition[];
+}
+
+/** A column of any table in the report; no `table` means the base table. */
+export interface ReportColumnRef {
+  table?: string;
+  column: string;
+}
+
 /** Report Builder input: names only — the server builds and validates the SQL. */
 export interface ReportSpec {
   schema: string;
   table: string;
-  columns: string[];
-  sort?: { column: string; direction: SortDirection }[];
+  alias?: string;
+  joins?: ReportJoin[];
+  columns: (string | ReportColumnRef)[];
+  sort?: { table?: string; column: string; direction: SortDirection }[];
+}
+
+export interface JoinSuggestion {
+  source: 'foreign-key' | 'column-name';
+  constraint?: string;
+  label: string;
+  on: JoinCondition[];
 }
 
 export interface ReportSqlPreview {
@@ -282,6 +314,9 @@ export interface ReportSqlPreview {
   name: string;
   schema: string;
   table: string;
+  /** Joined reports only: final aliases (base first) and type warnings. */
+  aliases?: string[];
+  warnings?: string[];
 }
 
 export interface ReportBuilderRun extends RunResponse {
