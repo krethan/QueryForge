@@ -69,7 +69,7 @@ async function raw(
     throw new ApiError(
       0,
       'NETWORK_ERROR',
-      'Cannot reach the QueryForge server. Check your network connection.',
+      'Cannot reach the Uncle Bob server. Check your network connection.',
     );
   }
   if (!res.ok) {

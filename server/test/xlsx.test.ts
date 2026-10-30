@@ -74,4 +74,29 @@ describe('XLSX workbook generation', () => {
     expect(vals).toContain('PROD400');
     expect(vals).toContain("'=SELECT");
   });
+
+  it('stamps the product name and the report title into the workbook metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'qf-xlsx-'));
+    dirs.push(dir);
+    const file = join(dir, 'meta.xlsx');
+    const w = new XlsxResultWriter(file, 'Sales Report', 'prefix');
+    w.setColumns(toColumns([col('ID', 'INTEGER')] as ColumnMetaData[]));
+    w.addRows([[1]]);
+    await w.finish({
+      title: 'Open Orders',
+      dataSource: 'PROD400',
+      executedAt: '2026-10-23T10:00:00Z',
+      executedBy: 'alice',
+      sql: 'SELECT ID FROM ORDERS',
+      truncated: false,
+      maxRows: 10,
+    });
+
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.readFile(file);
+    expect(wb.creator).toBe('Uncle Bob');
+    expect(wb.lastModifiedBy).toBe('Uncle Bob');
+    expect(wb.title).toBe('Open Orders');
+    expect(wb.subject).toBe('SQL reporting for IBM i');
+  });
 });

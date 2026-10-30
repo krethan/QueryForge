@@ -8,7 +8,7 @@ import type {
 
 /**
  * Minimal structural view of the @ibm/mapepire-js SQLJob / Query API (v1.0.2)
- * that QueryForge relies on. Keeping it structural lets unit tests inject fakes
+ * that Uncle Bob relies on. Keeping it structural lets unit tests inject fakes
  * without touching a real IBM i system.
  */
 export interface QueryLike<T = unknown> {

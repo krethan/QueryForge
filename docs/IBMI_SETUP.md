@@ -59,7 +59,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON QFMETA.QF_USER_GROUPS, QFMETA.QF_REPORT_
 
 `QFREPORT` still needs no authority to `QFMETA`. Scheduled runs use the same `QFREPORT` read-only job as
 interactive runs, so no extra IBM i authority is needed for scheduling. SMTP, OIDC and LDAP traffic
-originates from the QueryForge server, not from IBM i.
+originates from the Uncle Bob server, not from IBM i.
 
 ### Migration 003 — sharing audit
 

@@ -31,6 +31,10 @@ export function AccountPage() {
           Sign out
         </Button>
       </div>
+      <div className="qf-section">
+        <h2>About Uncle Bob</h2>
+        <p>Bob's your uncle — Uncle Bob is a browser-based SQL reporting tool for IBM i.</p>
+      </div>
       <StructuredListWrapper aria-label="Account details">
         <StructuredListBody>
           <StructuredListRow>

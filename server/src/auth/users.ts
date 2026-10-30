@@ -147,7 +147,7 @@ export class UserRepository {
     );
     if (existing[0]) {
       if (Number(existing[0].IS_ACTIVE) !== 1)
-        throw new AppError(403, 'ACCOUNT_DISABLED', 'Your QueryForge account is disabled.');
+        throw new AppError(403, 'ACCOUNT_DISABLED', 'Your Uncle Bob account is disabled.');
       await this.db.update(
         `UPDATE ${this.table} SET DISPLAY_NAME = ?, EMAIL = ?, ROLE = ?, LAST_LOGIN_AT = ${NOW_UTC}, UPDATED_AT = ${NOW_UTC}
           WHERE USER_ID = ?`,

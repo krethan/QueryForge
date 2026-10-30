@@ -37,7 +37,7 @@ const schema = z.object({
   REPORT_LIBRARIES: z.string().optional(),
   REPORT_NAMING: z.enum(['sql', 'system']).default('sql'),
 
-  // Metadata identity: CRUD on QueryForge metadata tables only
+  // Metadata identity: CRUD on Uncle Bob metadata tables only
   META_DB_USER: z.string().min(1),
   META_DB_PASSWORD: z.string().min(1),
   META_SCHEMA: identifier.default('QFMETA'),

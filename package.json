@@ -1,8 +1,8 @@
 {
-  "name": "queryforge",
+  "name": "uncle-bob",
   "private": true,
   "version": "0.1.0",
-  "description": "IBM i Query Reports - SQL reporting for IBM Db2 for i over Mapepire",
+  "description": "Bob's your uncle - Uncle Bob is a browser-based SQL reporting tool for IBM i (IBM Db2 for i), over Mapepire",
   "workspaces": [
     "server",
     "web"

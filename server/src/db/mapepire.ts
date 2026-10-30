@@ -6,7 +6,7 @@ import type { AppConfig, DbIdentity } from '../config/config.js';
 import { AppError, toDbError } from '../util/errors.js';
 import type { DaemonServer, JDBCOptions, JobFactory, MetadataDb, SqlJobLike } from './types.js';
 
-export const APPLICATION_NAME = 'IBM i Query Reports';
+export const APPLICATION_NAME = 'Uncle Bob';
 
 export const defaultJobFactory: JobFactory = (options) =>
   new SQLJob(options) as unknown as SqlJobLike;
