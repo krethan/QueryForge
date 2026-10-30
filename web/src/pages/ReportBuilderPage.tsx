@@ -36,6 +36,7 @@ import type {
   JoinType,
   ParameterDef,
   ParameterValues,
+  Cell,
   Report,
   ReportColumnRef,
   ReportSpec,
@@ -47,6 +48,8 @@ import type {
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
 import { ResultsTable } from '../components/ResultsTable';
+import { ChartPanel } from '../components/charts/ChartPanel';
+import { cleanChartDef, type ChartDef, type ChartView } from '../utils/chartData';
 import { SaveReportModal, type SaveValues } from '../components/SaveReportModal';
 import { BuilderFilters, type ColumnChoice } from '../components/BuilderFilters';
 import { BuilderGrouping, type GroupRow } from '../components/BuilderGrouping';
@@ -309,6 +312,8 @@ export function ReportBuilderPage() {
       const h = await hydrate(report.builderDef.spec);
       if (cancelled) return;
       setSource(report);
+      setChart(report.chartDef ?? null);
+      setChartView(report.chartDef ? (report.chartDef.view ?? 'both') : 'table');
       hydration.current = h;
       setSelected(h.table);
     })().catch((e) => {
@@ -332,6 +337,12 @@ export function ReportBuilderPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const [saveOpen, setSaveOpen] = useState(false);
+  const [chart, setChart] = useState<ChartDef | null>(null);
+  const [chartView, setChartView] = useState<ChartView>('table');
+  const [loadedRows, setLoadedRows] = useState<{ rows: Cell[][]; hasMore: boolean }>({
+    rows: [],
+    hasMore: false,
+  });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -807,10 +818,16 @@ export function ReportBuilderPage() {
         parameters: previewParams,
         builderDef: { version: 1 as const, spec },
       };
-      const report =
-        saveMode === 'update' && source
-          ? await api.updateReport(source.id, { ...input, version: source.version })
-          : await api.createReport(input);
+      // a chart is saved with the report only when it is shown (Chart or Both)
+      const chartDef =
+        chart && chartView !== 'table' ? cleanChartDef({ ...chart, view: chartView }) : null;
+      let report: Report;
+      if (saveMode === 'update' && source) {
+        report = await api.updateReport(source.id, { ...input, version: source.version });
+        const before = JSON.stringify(source.chartDef ? cleanChartDef(source.chartDef) : null);
+        if (JSON.stringify(chartDef) !== before && (chartDef || chartView === 'table'))
+          report = await api.setReportChart(report.id, chartDef);
+      } else report = await api.createReport({ ...input, chartDef });
       setSaveOpen(false);
       nav(`/reports/${report.id}`);
     } catch (e) {
@@ -1570,23 +1587,43 @@ export function ReportBuilderPage() {
       <ErrorNotice error={error} onClose={() => setError(null)} />
       {result && (
         <section className="qf-section" aria-label="Results">
-          <ResultsTable
-            result={result}
-            toolbar={
-              <ExportButton
-                source={{
-                  sql,
-                  name: suggestedName || selected?.name || 'Report',
-                  ...(previewParams.length
-                    ? { parameters: previewParams, values: lastValues }
-                    : {}),
-                }}
-                disabled={Boolean(running)}
-                onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
-                onDone={(i) =>
-                  setNotice(
-                    `Exported ${i.rowCount.toLocaleString()} rows to ${i.filename}${i.truncated ? ' (limited)' : ''}.`,
-                  )
+          <ChartPanel
+            columns={result.columns}
+            rows={loadedRows.rows}
+            hasMore={loadedRows.hasMore}
+            def={chart}
+            onChange={setChart}
+            view={chartView}
+            onViewChange={setChartView}
+            storedError={source?.chartError}
+            dashboardOptions
+            saveHint="The chart is saved with the report when you save it (Chart or Both view)."
+            table={
+              <ResultsTable
+                result={result}
+                onRowsChange={(rows, hasMore) => setLoadedRows({ rows, hasMore })}
+                toolbar={
+                  <ExportButton
+                    source={{
+                      sql,
+                      ...(chart && chartView !== 'table'
+                        ? { chart: { ...chart, view: chartView } }
+                        : {}),
+                      name: suggestedName || selected?.name || 'Report',
+                      ...(previewParams.length
+                        ? { parameters: previewParams, values: lastValues }
+                        : {}),
+                    }}
+                    disabled={Boolean(running)}
+                    onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
+                    onDone={(i) =>
+                      setNotice(
+                        `Exported ${i.rowCount.toLocaleString()} rows to ${i.filename}${i.truncated ? ' (limited)' : ''}.` +
+                          (i.chart?.included ? ' The chart is on the Chart sheet.' : '') +
+                          (i.chart?.note ? ` Chart not included: ${i.chart.note}` : ''),
+                      )
+                    }
+                  />
                 }
               />
             }

@@ -30,6 +30,8 @@ const PAGE_SIZES = [25, 50, 100, 250];
 interface Props {
   result: RunResponse;
   toolbar?: ReactNode;
+  /** Called with every loaded row (first page plus "Load next" pages) — used by charts. */
+  onRowsChange?(rows: Cell[][], hasMore: boolean): void;
 }
 
 interface Loaded {
@@ -58,7 +60,7 @@ const initial = (r: RunResponse): Loaded => ({
  * MAX_RESULT_ROWS). NULL is rendered as a distinct, styled marker so it never
  * looks like an empty string.
  */
-export function ResultsTable({ result, toolbar }: Props) {
+export function ResultsTable({ result, toolbar, onRowsChange }: Props) {
   const { columns } = result;
   const [loaded, setLoaded] = useState<Loaded>(() => initial(result));
   const [loading, setLoading] = useState(false);
@@ -66,6 +68,11 @@ export function ResultsTable({ result, toolbar }: Props) {
   const current = loaded.executionId === result.executionId ? loaded : initial(result);
   if (current !== loaded) setLoaded(current);
   const rows = current.rows;
+  const notify = useRef(onRowsChange);
+  notify.current = onRowsChange;
+  useEffect(() => {
+    notify.current?.(current.rows, current.hasMore);
+  }, [current.rows, current.hasMore]);
 
   // release an abandoned server cursor when the result is replaced or the grid unmounts
   const open = useRef<string | undefined>(undefined);

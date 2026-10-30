@@ -7,7 +7,7 @@ interface Props {
   source: Parameters<typeof api.exportXlsx>[0];
   disabled?: boolean;
   onError(msg: string): void;
-  onDone?(info: { filename: string; rowCount: number; truncated: boolean }): void;
+  onDone?(info: Awaited<ReturnType<typeof api.exportXlsx>>): void;
 }
 
 /** Requests a server-generated XLSX (the query is re-executed by the server). */
