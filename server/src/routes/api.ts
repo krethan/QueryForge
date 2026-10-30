@@ -56,6 +56,7 @@ import {
 import type { QueryExecutor } from '../sql/executor.js';
 import type { MetadataDb } from '../db/types.js';
 import { AppError, DbError, sanitizeErrorMessage } from '../util/errors.js';
+import { chartDefSchema } from '../charts/chart-def.js';
 
 export interface ApiDeps {
   cfg: AppConfig;
@@ -288,7 +289,23 @@ async function rebuildFromDef(d: ApiDeps, ownerId: string, raw: unknown) {
   return { def: parsed.data, ...built };
 }
 
+/** Chart settings in a request body: validated strictly; null clears / disables. */
+const chartInput = z
+  .unknown()
+  .optional()
+  .transform((v, ctx) => {
+    if (v === undefined || v === null) return v as null | undefined;
+    const p = chartDefSchema.safeParse(v);
+    if (p.success) return p.data;
+    ctx.addIssue({
+      code: 'custom',
+      message: `Invalid chart settings: ${p.error.issues.map((i) => `${i.path.join('.') || 'chart'}: ${i.message}`).join('; ')}`,
+    });
+    return z.NEVER;
+  });
+
 const exportSchema = z.object({
+  chart: chartInput,
   sql: z.string().optional(),
   reportId: uuid.optional(),
   name: z.string().max(128).optional(),
@@ -673,10 +690,14 @@ export function apiRouter(d: ApiDeps): Router {
         definitions: body.parameters,
       });
       res.setHeader('X-QF-Row-Count', String(file.rowCount));
+      res.setHeader(
+        'X-QF-Chart',
+        file.chart ? 'included' : file.chartNote ? encodeURIComponent(file.chartNote) : 'none',
+      );
       res.setHeader('X-QF-Truncated', String(file.truncated));
       res.setHeader(
         'Access-Control-Expose-Headers',
-        'X-QF-Row-Count, X-QF-Truncated, Content-Disposition',
+        'X-QF-Row-Count, X-QF-Truncated, X-QF-Chart, Content-Disposition',
       );
       res.setHeader('Cache-Control', 'no-store');
       await new Promise<void>((resolve, reject) =>
@@ -746,7 +767,12 @@ export function apiRouter(d: ApiDeps): Router {
       const { body, builderDef } = await withBuilderDef(req);
       const input = reportInputSchema.parse(body);
       checkLength(input.sql);
-      const created = await d.reports.create(user(req).id, { ...input, builderDef });
+      const { chartDef } = z.object({ chartDef: chartInput }).parse(body);
+      const created = await d.reports.create(user(req).id, {
+        ...input,
+        builderDef,
+        chartDef: chartDef ?? null,
+      });
       res.status(201).json({ report: { ...created, access: 'OWNER' } });
     }),
   );
@@ -790,6 +816,20 @@ export function apiRouter(d: ApiDeps): Router {
         ...input,
         builderDef: def,
       });
+      res.json({ report: { ...updated, access } });
+    }),
+  );
+  r.put(
+    '/reports/:id/chart',
+    h(async (req, res) => {
+      const { chartDef } = z
+        .object({ chartDef: chartInput })
+        .strict()
+        .parse(req.body ?? {});
+      if (chartDef === undefined)
+        throw new AppError(400, 'BAD_REQUEST', 'Provide chartDef (or null to remove the chart).');
+      const { report, access } = await d.access.require(user(req), reportId(req), 'EDIT');
+      const updated = await d.reports.setChart(report.ownerId, report.id, chartDef);
       res.json({ report: { ...updated, access } });
     }),
   );
