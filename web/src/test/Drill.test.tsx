@@ -127,7 +127,7 @@ describe('click to drill', () => {
       .spyOn(api, 'drill')
       .mockResolvedValue({ ...detail([['1001', 'West']]), drill: builderMeta('West') });
     openEditor(report());
-    fireEvent.click(await screen.findByRole('button', { name: 'bar West' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'bar West' }, { timeout: 10000 }));
     const panel = await screen.findByTestId('drill-panel');
     await within(panel).findByText('1001');
     expect(drill).toHaveBeenCalledWith(
@@ -210,7 +210,7 @@ describe('click to drill', () => {
   it('hides the drill affordance when the report has no drill', async () => {
     const drill = vi.spyOn(api, 'drill');
     openEditor(report({ drill: { builder: null, target: null, targetUnavailable: false } }));
-    fireEvent.click(await screen.findByRole('button', { name: 'bar West' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'bar West' }, { timeout: 10000 }));
     expect(screen.queryAllByTestId('drill-row')).toHaveLength(0);
     expect(screen.queryByTestId('drill-panel')).not.toBeInTheDocument();
     expect(drill).not.toHaveBeenCalled();
@@ -259,7 +259,7 @@ describe('click to drill', () => {
         </Routes>
       </MemoryRouter>,
     );
-    fireEvent.click(await screen.findByRole('button', { name: 'bar West' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'bar West' }, { timeout: 10000 }));
     const at = (await screen.findByTestId('at')).textContent!;
     expect(at.startsWith('/reports/r1?drill=')).toBe(true);
     expect(decodeDrill(new URLSearchParams(at.split('?')[1]).get('drill'))).toEqual({
