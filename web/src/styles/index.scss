@@ -438,3 +438,69 @@ body {
   gap: 0.5rem;
   align-items: end;
 }
+
+// Report Builder joins
+.qf-builder__joins {
+  border: 1px solid var(--cds-border-subtle);
+  background: var(--cds-layer);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+.qf-builder__diagram {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  > li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.875rem;
+  }
+  > li + li {
+    padding-left: 1rem;
+    border-left: 2px solid var(--cds-border-strong);
+    margin-left: 0.75rem;
+  }
+}
+.qf-builder__join-type {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--cds-text-secondary);
+}
+.qf-builder__join {
+  border-top: 1px solid var(--cds-border-subtle);
+  padding: 0.75rem 0;
+}
+.qf-builder__join-head,
+.qf-builder__cond,
+.qf-builder__add-join,
+.qf-builder__join-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  > .cds--form-item,
+  > .cds--select {
+    flex: 1 1 12rem;
+  }
+}
+.qf-builder__eq {
+  padding-bottom: 0.5rem;
+  font-weight: 600;
+}
+.qf-builder__cond-types {
+  flex-basis: 100%;
+  font-size: 0.75rem;
+}
+.qf-builder__problems {
+  color: var(--cds-text-error);
+  font-size: 0.875rem;
+  margin-top: 0.5rem;
+  padding-left: 1rem;
+  list-style: disc;
+}

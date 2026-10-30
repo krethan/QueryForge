@@ -34,6 +34,14 @@ import {
 import type { ExecutionService } from '../sql/execution-service.js';
 import { MAX_TABLES, displayType, type CatalogService } from '../catalog/catalog.js';
 import { buildReportSql, suggestReportName, type ReportSpec } from '../catalog/sql-builder.js';
+import {
+  JOIN_TYPES,
+  MAX_JOINS,
+  buildJoinedReportSql,
+  suggestJoinConditions,
+  suggestJoinedReportName,
+  type JoinedReportSpec,
+} from '../catalog/join-builder.js';
 import type { QueryExecutor } from '../sql/executor.js';
 import type { MetadataDb } from '../db/types.js';
 import { AppError, DbError, sanitizeErrorMessage } from '../util/errors.js';
@@ -77,23 +85,94 @@ const executeSchema = z.object({
  * resolves every name against the cached QSYS2 catalog and builds the SELECT itself
  * (see catalog/sql-builder.ts), so no SQL text is ever accepted from the client.
  */
+const name128 = z.string().min(1).max(128);
+const alias = z.string().min(1).max(10);
 const reportSpecSchema = z.object({
-  schema: z.string().min(1).max(128),
-  table: z.string().min(1).max(128),
-  columns: z.array(z.string().min(1).max(128)).min(1).max(400),
+  schema: name128,
+  table: name128,
+  /** Correlation name of the base table (generated as T1 when omitted). */
+  alias: alias.optional(),
+  joins: z
+    .array(
+      z.object({
+        schema: name128,
+        table: name128,
+        alias: alias.optional(),
+        type: z.enum(JOIN_TYPES),
+        on: z
+          .array(
+            z.object({
+              left: z.object({ table: alias, column: name128 }),
+              right: z.object({ column: name128 }),
+            }),
+          )
+          .max(16),
+      }),
+    )
+    .max(MAX_JOINS)
+    .optional(),
+  columns: z
+    .array(z.union([name128, z.object({ table: alias.optional(), column: name128 })]))
+    .min(1)
+    .max(400),
   sort: z
-    .array(z.object({ column: z.string().min(1).max(128), direction: z.enum(['ASC', 'DESC']) }))
+    .array(
+      z.object({
+        table: alias.optional(),
+        column: name128,
+        direction: z.enum(['ASC', 'DESC']),
+      }),
+    )
     .max(50)
     .optional(),
 });
 const builderQuerySchema = reportSpecSchema.extend({ executionId: uuid.optional() });
+const joinSuggestSchema = z.object({
+  tables: z
+    .array(z.object({ alias, schema: name128, table: name128 }))
+    .min(1)
+    .max(MAX_JOINS + 1),
+  schema: name128,
+  table: name128,
+});
 
-/** Shared by preview and run: resolve the table, validate every name, build the SELECT. */
-async function buildQuery(d: ApiDeps, ownerId: string, spec: ReportSpec) {
-  const resolved = await d.catalog.resolveTable(ownerId, spec.schema, spec.table);
-  const sql = buildReportSql(spec, resolved.table, resolved.columns);
-  d.executor.validate(sql); // defence in depth: the built statement must pass the validator
-  return { sql, name: suggestReportName(spec), table: resolved.table, columns: resolved.columns };
+type BuilderInput = z.infer<typeof reportSpecSchema>;
+
+/** Single-table selections without aliases keep the original, unqualified SQL. */
+const isSimple = (spec: BuilderInput) =>
+  !spec.joins?.length &&
+  !spec.alias &&
+  spec.columns.every((c) => typeof c === 'string') &&
+  (spec.sort ?? []).every((s) => s.table === undefined);
+
+/** Shared by preview and run: resolve every table, validate every name, build the SELECT. */
+async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
+  if (isSimple(spec)) {
+    const simple = spec as ReportSpec;
+    const resolved = await d.catalog.resolveTable(ownerId, spec.schema, spec.table);
+    const sql = buildReportSql(simple, resolved.table, resolved.columns);
+    d.executor.validate(sql); // defence in depth: the built statement must pass the validator
+    return {
+      sql,
+      name: suggestReportName(simple),
+      table: resolved.table,
+      warnings: [] as string[],
+    };
+  }
+  const joins = spec.joins ?? [];
+  const sources = [];
+  for (const t of [{ schema: spec.schema, table: spec.table }, ...joins])
+    sources.push(await d.catalog.resolveTable(ownerId, t.schema, t.table));
+  const joined = spec as JoinedReportSpec;
+  const built = buildJoinedReportSql(joined, sources);
+  d.executor.validate(built.sql);
+  return {
+    sql: built.sql,
+    name: suggestJoinedReportName(joined, built.columns),
+    table: sources[0].table,
+    warnings: built.warnings,
+    aliases: built.aliases,
+  };
 }
 
 const exportSchema = z.object({
@@ -412,7 +491,26 @@ export function apiRouter(d: ApiDeps): Router {
         name: built.name,
         schema: built.table.schema,
         table: built.table.name,
+        // Joined reports also report their aliases and any type warnings.
+        ...('aliases' in built ? { warnings: built.warnings, aliases: built.aliases } : {}),
       });
+    }),
+  );
+  // Join suggestions: catalog foreign keys first, then same-name, same-type columns.
+  r.post(
+    '/schema/join-suggestions',
+    h(async (req, res) => {
+      const body = joinSuggestSchema.parse(req.body);
+      const owner = req.session!.user.id;
+      const existing = [];
+      for (const t of body.tables)
+        existing.push({
+          alias: t.alias,
+          source: await d.catalog.resolveTable(owner, t.schema, t.table),
+        });
+      const target = await d.catalog.resolveTable(owner, body.schema, body.table);
+      const fks = await d.catalog.listForeignKeys(owner, target.table.schema, target.table.name);
+      res.json({ suggestions: suggestJoinConditions(existing, target, fks) });
     }),
   );
   // Run: builds the SELECT server-side and executes it through the normal read-only path.

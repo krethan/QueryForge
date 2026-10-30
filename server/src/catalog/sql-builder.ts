@@ -76,7 +76,7 @@ export function quoteIdentifier(raw: string): string {
   return `"${raw.replace(/"/g, '""')}"`;
 }
 
-const sameName = (a: string, b: string) => a === b || a.toUpperCase() === b.toUpperCase();
+export const sameName = (a: string, b: string) => a === b || a.toUpperCase() === b.toUpperCase();
 
 /**
  * Find the catalog entry a client-supplied name refers to.
@@ -85,7 +85,7 @@ const sameName = (a: string, b: string) => a === b || a.toUpperCase() === b.toUp
  * only when it identifies exactly one entry - otherwise the name is ambiguous
  * (Db2 for i can hold "Orders" and "ORDERS" side by side) and is rejected.
  */
-function resolveEntry<T>(
+export function resolveEntry<T>(
   items: T[],
   nameOf: (item: T) => string,
   wanted: string,

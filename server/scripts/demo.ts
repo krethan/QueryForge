@@ -78,6 +78,7 @@ const catalogTables = [
       ['AMOUNT', 'DECIMAL', 11, 11, 2, 'Y', 'Order total'],
       ['STATUS', 'VARCHAR', 10, null, null, 'Y', 'OPEN, SHIPPED or BILLED'],
       ['NOTE', 'VARCHAR', 60, null, null, 'Y', 'Free-text note'],
+      ['CUSTNO', 'INTEGER', 4, 10, 0, 'N', 'Customer number'],
     ],
   },
   {
@@ -143,7 +144,39 @@ const catalogTables = [
   },
 ];
 
+/**
+ * Fake referential constraints (QSYS2.SYSREFCST) so the Report Builder can suggest
+ * joins: [constraint, child table, child column, parent table, parent column].
+ */
+const foreignKeys = [
+  ['ORDERS_FK_CUSTOMER', 'ORDERS', 'CUSTNO', 'CUSTOMERS', 'CUSTNO'],
+  ['ORDER_LINES_FK_ORDER', 'ORDER_LINES', 'ORDER_ID', 'ORDERS', 'ORDER_ID'],
+  ['ORDER_LINES_FK_ITEM', 'ORDER_LINES', 'ITEM', 'INVENTORY', 'ITEM'],
+];
+
 function catalogScript(s: string, parameters?: unknown[]): Scripted | null {
+  if (s.includes('QSYS2.SYSREFCST')) {
+    const bound = (parameters ?? []).map((p) => String(p ?? '').toUpperCase());
+    const [schema, table] = bound;
+    return {
+      columns: [
+        col('TABLE_SCHEMA', 'VARCHAR', 128),
+        col('TABLE_NAME', 'VARCHAR', 128),
+        col('COLUMN_NAME', 'VARCHAR', 128),
+        col('TABLE_SCHEMA', 'VARCHAR', 128),
+        col('TABLE_NAME', 'VARCHAR', 128),
+        col('COLUMN_NAME', 'VARCHAR', 128),
+        col('CONSTRAINT_NAME', 'VARCHAR', 128),
+        col('ORDINAL_POSITION', 'INTEGER'),
+      ],
+      rows:
+        schema === 'DEMOLIB'
+          ? foreignKeys
+              .filter((f) => f[1] === table || f[3] === table)
+              .map((f) => ['DEMOLIB', f[1], f[2], 'DEMOLIB', f[3], f[4], f[0], 1])
+          : [],
+    };
+  }
   if (!s.includes('QSYS2.SYSTABLES') && !s.includes('QSYS2.SYSCOLUMNS')) return null;
   // The fake job does not evaluate predicates, so apply the bound values here.
   const bound = (parameters ?? []).map((p) => String(p ?? '').toUpperCase());
@@ -175,6 +208,9 @@ function catalogScript(s: string, parameters?: unknown[]): Scripted | null {
     ],
     rows: catalogTables
       .filter((t) => {
+        // findTable(): the last two bound values are the exact schema and table.
+        if (s.includes('UPPER(TABLE_NAME) = ?'))
+          return t.schema === bound[bound.length - 2] && t.name === bound[bound.length - 1];
         const exact = bound.filter((p) => p === t.schema || p === t.name);
         const like = bound
           .filter((p) => p.startsWith('%') && p.endsWith('%'))
@@ -239,7 +275,110 @@ function script(sql: string, parameters?: unknown[]): Scripted {
     return { columns: [col('X', 'INTEGER')], rows: [[1]] };
   const catalog = catalogScript(s, parameters);
   if (catalog) return catalog;
+  const joined = joinedScript(sql);
+  if (joined) return joined;
   return shaped(dataScript(sql), sql);
+}
+
+const ident = String.raw`"((?:[^"]|"")*)"`;
+const unq = (x: string) => x.replace(/""/g, '"');
+
+/**
+ * Evaluate a Report Builder JOIN statement over the fake tables, so joined demo
+ * results are consistent (ORDERS.CUSTNO really matches CUSTOMERS.CUSTNO, …).
+ * Only the shape the server builds is understood: aliased tables and `a.x = b.y`.
+ */
+function joinedScript(sql: string): Scripted | null {
+  if (!/\n(INNER|LEFT OUTER|RIGHT OUTER|FULL OUTER) JOIN /.test(sql)) return null;
+  const head = new RegExp(String.raw`^SELECT ([\s\S]+?)\nFROM ${ident}\.${ident} AS ${ident}`).exec(
+    sql,
+  );
+  if (!head) return null;
+  type Row = Map<string, unknown>;
+  const load = (table: string, alias: string) => {
+    const d = dataScript(`SELECT * FROM DEMOLIB.${table}`);
+    const rows: Row[] = d.rows.map(
+      (r) => new Map(d.columns.map((c, i) => [`${alias}.${c.name}`, r[i]] as [string, unknown])),
+    );
+    return { rows, cols: d.columns.map((c) => ({ key: `${alias}.${c.name}`, col: c })) };
+  };
+  const first = load(unq(head[3]), unq(head[4]));
+  let rows = first.rows;
+  const allCols = [...first.cols];
+  let leftKeys = first.cols.map((c) => c.key);
+  const joinRe = new RegExp(
+    String.raw`\n(INNER|LEFT OUTER|RIGHT OUTER|FULL OUTER) JOIN ${ident}\.${ident} AS ${ident}\n  ON ([\s\S]+?)(?=\n(?:INNER|LEFT|RIGHT|FULL|ORDER BY)|$)`,
+    'g',
+  );
+  const condRe = new RegExp(String.raw`${ident}\.${ident} = ${ident}\.${ident}`, 'g');
+  for (const m of sql.matchAll(joinRe)) {
+    const kind = m[1];
+    const right = load(unq(m[3]), unq(m[4]));
+    const conds = [...m[5].matchAll(condRe)].map((c) => [
+      `${unq(c[1])}.${unq(c[2])}`,
+      `${unq(c[3])}.${unq(c[4])}`,
+    ]);
+    const matches = (l: Row, r: Row) =>
+      conds.every(([a, b]) => {
+        const x = l.get(a) ?? r.get(a);
+        const y = r.get(b) ?? l.get(b);
+        return x !== null && x !== undefined && String(x).trim() === String(y).trim();
+      });
+    const out: Row[] = [];
+    const usedRight = new Set<number>();
+    for (const l of rows) {
+      let hit = false;
+      right.rows.forEach((r, ri) => {
+        if (matches(l, r)) {
+          hit = true;
+          usedRight.add(ri);
+          out.push(new Map([...l, ...r]));
+        }
+      });
+      if (!hit && (kind === 'LEFT OUTER' || kind === 'FULL OUTER'))
+        out.push(new Map([...l, ...right.cols.map((c) => [c.key, null] as [string, unknown])]));
+    }
+    if (kind === 'RIGHT OUTER' || kind === 'FULL OUTER')
+      right.rows.forEach((r, ri) => {
+        if (!usedRight.has(ri))
+          out.push(new Map([...leftKeys.map((k) => [k, null] as [string, unknown]), ...r]));
+      });
+    rows = out;
+    allCols.push(...right.cols);
+    leftKeys = allCols.map((c) => c.key);
+  }
+  const items = [
+    ...head[1].matchAll(new RegExp(String.raw`${ident}\.${ident}(?: AS ${ident})?`, 'g')),
+  ].map((x) => ({ key: `${unq(x[1])}.${unq(x[2])}`, name: unq(x[3] ?? x[2]) }));
+  const order = /\nORDER BY ([\s\S]+)$/.exec(sql);
+  if (order) {
+    const keys = [
+      ...order[1].matchAll(new RegExp(String.raw`${ident}\.${ident} (ASC|DESC)`, 'g')),
+    ].map((x) => ({ key: `${unq(x[1])}.${unq(x[2])}`, dir: x[3] === 'DESC' ? -1 : 1 }));
+    rows = [...rows].sort((a, b) => {
+      for (const k of keys) {
+        const x = a.get(k.key);
+        const y = b.get(k.key);
+        if (x === y) continue;
+        if (x === null || x === undefined) return 1;
+        if (y === null || y === undefined) return -1;
+        const c =
+          typeof x === 'number' && typeof y === 'number'
+            ? x - y
+            : String(x).localeCompare(String(y));
+        if (c) return c * k.dir;
+      }
+      return 0;
+    });
+  }
+  return {
+    columns: items.map((it) => {
+      const c = allCols.find((a) => a.key === it.key)?.col ?? col(it.name, 'VARCHAR', 40);
+      return { ...c, name: it.name };
+    }),
+    rows: rows.map((r) => items.map((it) => (r.get(it.key) ?? null) as never)),
+    delayMs: 80,
+  };
 }
 
 function dataScript(sql: string): Scripted {
@@ -327,6 +466,7 @@ function dataScript(sql: string): Scripted {
       col('AMOUNT', 'DECIMAL', 11, 2),
       col('STATUS', 'VARCHAR', 10),
       col('NOTE', 'VARCHAR', 60),
+      col('CUSTNO', 'INTEGER'),
     ],
     rows: Array.from({ length: 64 }, (_, i) => [
       50001 + i,
@@ -336,6 +476,7 @@ function dataScript(sql: string): Scripted {
       Math.round((((i * 7919) % 50000) / 7 + 19.99) * 100) / 100,
       ['OPEN', 'SHIPPED', 'BILLED'][i % 3],
       i % 5 === 0 ? null : i % 7 === 0 ? '' : 'Demo data — not real',
+      1000 + (i % customers.length),
     ]),
     delayMs: 150,
   };
