@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import type {
+  Cell,
   ParameterDef,
   ParameterValues,
   Report,
@@ -25,6 +26,8 @@ import { ShareModal } from '../components/ShareModal';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
 import { ResultsTable } from '../components/ResultsTable';
+import { ChartPanel } from '../components/charts/ChartPanel';
+import type { ChartDef, ChartView } from '../utils/chartData';
 import { SaveReportModal, type SaveValues } from '../components/SaveReportModal';
 import { SqlEditor } from '../components/SqlEditor';
 import { newExecutionId } from '../utils/format';
@@ -52,6 +55,12 @@ export function ReportEditorPage() {
   const [shareOpen, setShareOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
   const [schedSettings, setSchedSettings] = useState<ScheduleSettings | null>(null);
+  const [chart, setChart] = useState<ChartDef | null>(null);
+  const [view, setView] = useState<ChartView>('table');
+  const [loadedRows, setLoadedRows] = useState<{ rows: Cell[][]; hasMore: boolean }>({
+    rows: [],
+    hasMore: false,
+  });
 
   const access = report?.access ?? 'OWNER';
   const canEdit = access !== 'VIEWER';
@@ -76,6 +85,8 @@ export function ReportEditorPage() {
         setReport(r);
         setSql(r.sql);
         setDefs(r.parameters ?? []);
+        setChart(r.chartDef ?? null);
+        setView(r.chartDef ? (r.chartDef.view ?? 'both') : 'table');
         setError(null);
       })
       .catch((e) => !cancelled && setError(e))
@@ -194,6 +205,9 @@ export function ReportEditorPage() {
       setSaving(false);
     }
   };
+
+  // the export draws the chart the user is looking at (unsaved edits included)
+  const chartSource = view !== 'table' && chart ? { chart: { ...chart, view } } : {};
 
   if (loading) return <Loading description="Loading report" withOverlay={false} />;
   if (id && !report && error) return <ErrorNotice error={error} />;
@@ -325,25 +339,58 @@ export function ReportEditorPage() {
       <ErrorNotice error={error} onClose={() => setError(null)} />
       {result && (
         <section className="qf-section" aria-label="Results">
-          <ResultsTable
-            result={result}
-            toolbar={
-              <ExportButton
-                source={
-                  report && !dirty
-                    ? { reportId: report.id, values: lastValues }
-                    : {
-                        sql,
-                        name: report?.name ?? 'Query results',
-                        ...(defs.length ? { parameters: defs, values: lastValues ?? {} } : {}),
-                      }
-                }
-                disabled={Boolean(running)}
-                onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
-                onDone={(i) =>
-                  setNotice(
-                    `Exported ${i.rowCount.toLocaleString()} rows to ${i.filename}${i.truncated ? ' (limited)' : ''}.`,
-                  )
+          <ChartPanel
+            columns={result.columns}
+            rows={loadedRows.rows}
+            hasMore={loadedRows.hasMore}
+            def={chart}
+            onChange={setChart}
+            view={view}
+            onViewChange={setView}
+            saved={report?.chartDef ?? null}
+            storedError={report?.chartError}
+            onSave={
+              report && canEdit
+                ? async (def) => {
+                    const r = await api.setReportChart(report.id, def);
+                    setReport((p) =>
+                      p ? { ...p, chartDef: r.chartDef ?? null, chartError: undefined } : p,
+                    );
+                    if (!def) setChart(null);
+                  }
+                : undefined
+            }
+            saveHint={
+              report
+                ? 'You have view access, so the chart is not saved.'
+                : 'Save the report to keep this chart.'
+            }
+            table={
+              <ResultsTable
+                result={result}
+                onRowsChange={(rows, hasMore) => setLoadedRows({ rows, hasMore })}
+                toolbar={
+                  <ExportButton
+                    source={
+                      report && !dirty
+                        ? { reportId: report.id, values: lastValues, ...chartSource }
+                        : {
+                            ...chartSource,
+                            sql,
+                            name: report?.name ?? 'Query results',
+                            ...(defs.length ? { parameters: defs, values: lastValues ?? {} } : {}),
+                          }
+                    }
+                    disabled={Boolean(running)}
+                    onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
+                    onDone={(i) =>
+                      setNotice(
+                        `Exported ${i.rowCount.toLocaleString()} rows to ${i.filename}${i.truncated ? ' (limited)' : ''}.` +
+                          (i.chart?.included ? ' The chart is on the Chart sheet.' : '') +
+                          (i.chart?.note ? ` Chart not included: ${i.chart.note}` : ''),
+                      )
+                    }
+                  />
                 }
               />
             }

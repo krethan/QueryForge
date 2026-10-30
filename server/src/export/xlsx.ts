@@ -150,6 +150,8 @@ export interface WorkbookMeta {
   /** Parameter label -> value used for this run. */
   parameters?: { label: string; value: string | number | null }[];
   trigger?: string;
+  /** Chart status line for the Report Info sheet (when the report has chart settings). */
+  chart?: string;
 }
 
 /**
@@ -266,6 +268,7 @@ export class XlsxResultWriter {
             string,
           ][])
         : []),
+      ...(meta.chart ? ([['Chart', meta.chart]] as [string, string][]) : []),
       ['SQL', meta.sql],
     ];
     for (const [k, v] of rows)
@@ -273,4 +276,39 @@ export class XlsxResultWriter {
     info.commit();
     await this.wb.commit();
   }
+}
+
+/**
+ * Exports larger than this are not re-opened to embed a chart: the streaming writer cannot
+ * place images, so adding the Chart sheet means loading the finished workbook in memory.
+ */
+export const CHART_EMBED_MAX_ROWS = 50_000;
+
+/**
+ * Add a "Chart" sheet holding a rendered PNG to a finished workbook. exceljs cannot create
+ * native Excel charts, so the chart is a picture of the plotted (loaded) rows.
+ */
+export async function addChartSheet(
+  path: string,
+  png: Buffer,
+  info: { title: string; notes: string[] },
+  mode: 'prefix' | 'none',
+): Promise<void> {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(path);
+  const sheet = wb.addWorksheet('Chart');
+  sheet.getColumn(1).width = 120;
+  const head = sheet.getCell('A1');
+  head.value = escapeFormula(info.title, mode);
+  head.font = { bold: true, size: 14 };
+  info.notes.forEach((n, i) => {
+    sheet.getCell(`A${i + 2}`).value = escapeFormula(n, mode);
+  });
+  const imageId = wb.addImage({ buffer: png as unknown as ExcelJS.Buffer, extension: 'png' });
+  sheet.addImage(imageId, {
+    tl: { col: 0, row: info.notes.length + 2 },
+    ext: { width: 960, height: 540 },
+    editAs: 'absolute',
+  });
+  await wb.xlsx.writeFile(path);
 }

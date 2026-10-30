@@ -26,6 +26,13 @@ export default defineConfig({
           if (!id.includes('node_modules')) return undefined;
           if (/[\\/](@codemirror|@lezer|codemirror|@uiw|style-mod|w3c-keyname|crelt)[\\/]/.test(id))
             return 'codemirror';
+          // Carbon Charts + d3 and their helpers: only reached through React.lazy (ChartView)
+          if (
+            /[\\/](@carbon[\\/](charts|charts-react|utils-position|colors)|@ibm[\\/]telemetry-js|d3|d3-[a-z-]+|internmap|delaunator|robust-predicates|lodash-es|date-fns|dompurify|html-to-image|topojson-client|tslib)[\\/]/.test(
+              id,
+            )
+          )
+            return 'charts';
           if (/[\\/]@carbon[\\/]icons-react[\\/]/.test(id)) return 'carbon-icons';
           if (/[\\/](@carbon|@floating-ui|@ibm|downshift|tabbable|focus-trap)[\\/]/.test(id))
             return 'carbon';

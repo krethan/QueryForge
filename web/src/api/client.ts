@@ -1,3 +1,4 @@
+import type { ChartDef } from '../utils/chartData';
 import type {
   AuthProviders,
   DataSourceInfo,
@@ -119,6 +120,17 @@ function filenameFrom(res: Response, fallback: string) {
   return plain ? plain[1] : fallback;
 }
 
+/** X-QF-Chart: 'included' | 'none' | URI-encoded reason the chart was left out. */
+function chartHeader(v: string | null): { included: boolean; note?: string } {
+  if (!v || v === 'none') return { included: false };
+  if (v === 'included') return { included: true };
+  try {
+    return { included: false, note: decodeURIComponent(v) };
+  } catch {
+    return { included: false, note: v };
+  }
+}
+
 export const api = {
   login: (username: string, password: string, method: 'local' | 'ldap' = 'local') =>
     json<{ user: User; expiresAt: string }>('POST', '/auth/login', { username, password, method }),
@@ -150,6 +162,8 @@ export const api = {
     json<{ report: Report }>('POST', '/reports', input).then((r) => r.report),
   updateReport: (id: string, input: ReportInput) =>
     json<{ report: Report }>('PUT', `/reports/${id}`, input).then((r) => r.report),
+  setReportChart: (id: string, chartDef: ChartDef | null) =>
+    json<{ report: Report }>('PUT', `/reports/${id}/chart`, { chartDef }).then((r) => r.report),
   deleteReport: (id: string) => json<void>('DELETE', `/reports/${id}`),
   reportHistory: (id: string) =>
     json<{ executions: ExecutionRecord[] }>('GET', `/reports/${id}/history`).then(
@@ -279,6 +293,8 @@ export const api = {
     name?: string;
     parameters?: ParameterDef[];
     values?: ParameterValues;
+    /** Chart to draw on the workbook's Chart sheet (defaults to the report's saved chart). */
+    chart?: ChartDef | null;
   }) {
     const res = await raw('POST', '/export', src);
     const blob = await res.blob();
@@ -295,6 +311,7 @@ export const api = {
       filename: name,
       rowCount: Number(res.headers.get('X-QF-Row-Count') ?? 0),
       truncated: res.headers.get('X-QF-Truncated') === 'true',
+      chart: chartHeader(res.headers.get('X-QF-Chart')),
     };
   },
 };

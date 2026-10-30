@@ -16,6 +16,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Report } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
+import { DashboardChart } from '../components/charts/DashboardChart';
 import { formatDateTime, formatDuration, statusLabel, statusTagType } from '../utils/format';
 
 export function useReports(search: string, sort: string) {
@@ -116,6 +117,7 @@ function ReportTile({
         </div>
       )}
       <p className="qf-tile__desc">{r.description ?? 'No description'}</p>
+      {r.chartDef?.showOnDashboard && <DashboardChart report={r} />}
       <div className="qf-tile__meta">
         <div>
           Last run: {formatDateTime(r.lastExecutedAt)}{' '}

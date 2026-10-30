@@ -25,12 +25,15 @@
     "vitest": "^2.1.9"
   },
   "dependencies": {
+    "@carbon/charts": "^1.27.25",
+    "@carbon/charts-react": "^1.27.25",
     "@carbon/icons-react": "^11.91.0",
     "@carbon/react": "^1.119.0",
     "@codemirror/lang-sql": "^6.10.0",
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.15",
     "@uiw/react-codemirror": "^4.25.12",
+    "d3": "^7.9.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-router-dom": "^6.30.6"

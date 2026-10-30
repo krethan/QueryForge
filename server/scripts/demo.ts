@@ -11,6 +11,7 @@
  * the directory login accepts dave / directory-pass, and scheduled e-mails are only kept in
  * memory (logged to the console), never sent.
  */
+import type { ChartDef } from '../src/charts/chart-def.js';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config/config.js';
 import bcrypt from 'bcryptjs';
@@ -736,7 +737,13 @@ async function main() {
     hash: await bcrypt.hash('demo-password-123', 10),
   });
   const user = { id: 'u-demo' };
-  const seed = [
+  const seed: Array<{
+    name: string;
+    category: string;
+    description: string;
+    sql: string;
+    chartDef?: ChartDef;
+  }> = [
     {
       name: 'Open Orders by Region',
       category: 'Sales',
@@ -774,6 +781,58 @@ async function main() {
       category: 'Operations',
       description: 'Large result: loaded page by page from a server cursor',
       sql: 'SELECT LINE_ID, ORDER_ID, ITEM, QTY, EXTENDED\nFROM DEMOLIB.ORDER_LINES\nORDER BY LINE_ID',
+    },
+  );
+  // charted reports (Report Builder SQL shape, so the fake DB computes real totals)
+  seed.push(
+    {
+      name: 'Revenue by Region (chart)',
+      category: 'Sales',
+      description: 'Bar chart, shown on the dashboard',
+      sql: 'SELECT "T1"."REGION",\n       SUM("T1"."AMOUNT") AS "REVENUE"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nGROUP BY "T1"."REGION"\nORDER BY "T1"."REGION" ASC',
+      chartDef: {
+        version: 1,
+        type: 'bar',
+        x: 'REGION',
+        y: ['REVENUE'],
+        title: 'Revenue by region',
+        sort: 'valueDesc',
+        view: 'both',
+        showOnDashboard: true,
+        dashboardAutoLoad: true,
+      },
+    },
+    {
+      name: 'Daily Revenue (chart)',
+      category: 'Sales',
+      description: 'Line chart of revenue per order date',
+      sql: 'SELECT "T1"."ORDER_DATE",\n       SUM("T1"."AMOUNT") AS "REVENUE"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nGROUP BY "T1"."ORDER_DATE"\nORDER BY "T1"."ORDER_DATE" ASC',
+      chartDef: {
+        version: 1,
+        type: 'line',
+        x: 'ORDER_DATE',
+        y: ['REVENUE'],
+        title: 'Revenue per day',
+        sort: 'xAsc',
+        view: 'chart',
+        showOnDashboard: true,
+      },
+    },
+    {
+      name: 'Orders by Status (chart)',
+      category: 'Operations',
+      description: 'Donut chart of order counts',
+      sql: 'SELECT "T1"."STATUS",\n       COUNT(*) AS "ORDERS"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nGROUP BY "T1"."STATUS"',
+      chartDef: {
+        version: 1,
+        type: 'donut',
+        x: 'STATUS',
+        y: ['ORDERS'],
+        title: 'Orders by status',
+        view: 'both',
+        showOnDashboard: true,
+        dashboardAutoLoad: true,
+      },
     },
   );
   const created = [];

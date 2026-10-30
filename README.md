@@ -267,6 +267,28 @@ with the catalog's spelling (`SYSTEM_TABLE_NAME`/`SYSTEM_TABLE_SCHEMA` are used 
 name that differs only by case from another object is treated as ambiguous. Like the rest of the app, this has
 been tested with fakes only — not against a live IBM i.
 
+## Charts
+
+Results in the SQL editor and the Report Builder can be shown as a **Table**, a **Chart** or **Both**.
+Chart types: bar, horizontal bar, grouped bar, stacked bar, line, area, pie and donut. Pick an X field,
+one or more value (Y) fields or a series field, and optionally a title, a sort and a top-N limit.
+When you first switch to Chart, a chart is suggested from the column types (text X → bar, date X → line).
+
+- Charting uses `@carbon/charts-react` (d3) loaded lazily in its own `charts` chunk, so pages that
+  never draw a chart do not download it.
+- Charts plot the rows loaded in the browser; a note appears when the server has more rows, and when
+  DECIMAL values are converted to floating point for plotting (the table and Excel stay exact).
+- The chart is saved with the report as versioned JSON (`version: 1`) in `QF_REPORTS.CHART_DEF`
+  (migration 005, `CLOB(64K)`), validated on the server. A saved chart that names a column the query
+  no longer returns is disabled with a message rather than failing.
+- **Dashboard:** tick "Show chart on dashboard" to get a mini chart on the tile. It is fetched fresh with
+  your permissions and the parameters' default values; it loads on click unless "Run automatically when
+  the dashboard opens" is also ticked.
+- **Excel / email:** exports add a **Chart** sheet with a PNG picture of the chart (rendered on the
+  server; omitted above 50,000 rows), and scheduled emails embed and attach the same PNG.
+- The demo includes "Revenue by Region (chart)", "Daily Revenue (chart)" and "Orders by Status (chart)".
+  `node scripts/screenshots-charts.mjs` captures chart screenshots from a running demo.
+
 ## Sharing audit
 
 Every share grant, role change and revoke is written to `QFMETA.QF_SHARE_AUDIT` (migration 003) in the same

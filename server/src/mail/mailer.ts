@@ -6,8 +6,13 @@ export interface MailMessage {
   to: string[];
   subject: string;
   text: string;
-  attachments: { filename: string; path: string }[];
+  /** Optional HTML body (used to show an inline chart image via cid:). */
+  html?: string;
+  attachments: MailAttachment[];
 }
+export type MailAttachment =
+  | { filename: string; path: string; cid?: undefined; content?: undefined }
+  | { filename: string; content: Buffer; contentType: string; cid?: string; path?: undefined };
 
 export interface Mailer {
   send(msg: MailMessage): Promise<{ messageId?: string }>;
@@ -38,6 +43,7 @@ export class SmtpMailer implements Mailer {
       to: msg.to,
       subject: msg.subject,
       text: msg.text,
+      html: msg.html,
       attachments: msg.attachments,
     });
     return { messageId: info.messageId };
@@ -55,7 +61,9 @@ export class MemoryMailer implements Mailer {
       throw e;
     }
     // copy the bytes now: the caller deletes the temp file after send() resolves
-    const data = msg.attachments.map((a) => readFileSync(a.path));
+    const data = msg.attachments.map((a) =>
+      a.content ? Buffer.from(a.content) : readFileSync(a.path!),
+    );
     this.sent.push({ ...msg, attachmentData: data });
     return { messageId: `<memory-${this.sent.length}@queryforge.invalid>` };
   }

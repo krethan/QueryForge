@@ -17,9 +17,11 @@
   },
   "dependencies": {
     "@ibm/mapepire-js": "1.0.2",
+    "@resvg/resvg-wasm": "^2.6.2",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
     "cron-parser": "^4.9.0",
+    "dejavu-fonts-ttf": "^2.37.3",
     "dotenv": "^16.4.7",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",

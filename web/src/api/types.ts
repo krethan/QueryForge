@@ -1,3 +1,4 @@
+import type { ChartDef } from '../utils/chartData';
 export type ColumnKind =
   | 'integer'
   | 'decimal'
@@ -82,6 +83,10 @@ export interface Report {
   builderDef?: BuilderDef | null;
   /** Server re-validation of `builderDef` against the current catalog. */
   builder?: { valid: boolean; error?: string };
+  /** Saved chart settings (migration 005); null when the report has no chart. */
+  chartDef?: ChartDef | null;
+  /** Why stored chart settings were ignored (tampered / outdated JSON). */
+  chartError?: string;
 }
 export interface BuilderDef {
   version: 1;
@@ -137,6 +142,8 @@ export interface ReportInput {
   version?: number;
   /** Report Builder definition; the server regenerates `sql` and `parameters` from it. */
   builderDef?: BuilderDef | null;
+  /** Chart settings to save with a new report (existing reports use setReportChart). */
+  chartDef?: ChartDef | null;
 }
 
 export type AuthSource = 'LOCAL' | 'OIDC' | 'LDAP';

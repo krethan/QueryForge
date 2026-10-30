@@ -4,6 +4,7 @@ import type { MetadataDb } from '../db/types.js';
 import { NOW_UTC, T, q } from '../db/schema.js';
 import { AppError, DbError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
+import { parseChartDef, type ChartDef } from '../charts/chart-def.js';
 import {
   countMarkers,
   parameterListSchema,
@@ -31,6 +32,10 @@ export interface Report {
   parameters: ParameterDef[];
   /** Parsed Report Builder definition (migration 004), or null for SQL-only reports. */
   builderDef: unknown | null;
+  /** Validated chart settings (migration 005), or null when the report has no chart. */
+  chartDef: ChartDef | null;
+  /** Why stored chart settings were ignored (tampered / outdated JSON). */
+  chartError?: string;
 }
 
 export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
@@ -76,6 +81,8 @@ export type ReportInput = Omit<z.infer<typeof reportInputSchema>, 'parameters'> 
   parameters?: ParameterDef[];
   /** Validated builder definition; stored as JSON in BUILDER_DEF. */
   builderDef?: unknown | null;
+  /** Validated chart settings; stored as JSON in CHART_DEF (create only, see setChart). */
+  chartDef?: ChartDef | null;
 };
 
 export const reportUpdateSchema = z.intersection(
@@ -92,30 +99,35 @@ const SORT_SQL: Record<SortKey, string> = {
 };
 
 const COLS = `REPORT_ID, OWNER_ID, REPORT_NAME, DESCRIPTION, CATEGORY, SQL_TEXT, VERSION, CREATED_AT, UPDATED_AT,
-  LAST_EXECUTED_AT, LAST_STATUS, LAST_ROW_COUNT, LAST_DURATION_MS, PARAMETERS_JSON, BUILDER_DEF`;
+  LAST_EXECUTED_AT, LAST_STATUS, LAST_ROW_COUNT, LAST_DURATION_MS, PARAMETERS_JSON, BUILDER_DEF, CHART_DEF`;
 
 type Row = Record<string, unknown>;
-const toReport = (r: Row): Report => ({
-  id: String(r.REPORT_ID),
-  ownerId: String(r.OWNER_ID),
-  name: String(r.REPORT_NAME),
-  description: (r.DESCRIPTION as string) ?? null,
-  category: (r.CATEGORY as string) ?? null,
-  sql: String(r.SQL_TEXT ?? ''),
-  version: Number(r.VERSION),
-  createdAt: dbTimestampToIso(r.CREATED_AT),
-  updatedAt: dbTimestampToIso(r.UPDATED_AT),
-  lastExecutedAt: dbTimestampToIso(r.LAST_EXECUTED_AT),
-  lastStatus: (r.LAST_STATUS as ExecutionStatus) ?? 'NEVER',
-  lastRowCount:
-    r.LAST_ROW_COUNT === null || r.LAST_ROW_COUNT === undefined ? null : Number(r.LAST_ROW_COUNT),
-  lastDurationMs:
-    r.LAST_DURATION_MS === null || r.LAST_DURATION_MS === undefined
-      ? null
-      : Number(r.LAST_DURATION_MS),
-  parameters: parseStoredParameters(r.PARAMETERS_JSON),
-  builderDef: parseBuilderDef(r.BUILDER_DEF),
-});
+const toReport = (r: Row): Report => {
+  const chart = parseChartDef(r.CHART_DEF);
+  return {
+    id: String(r.REPORT_ID),
+    ownerId: String(r.OWNER_ID),
+    name: String(r.REPORT_NAME),
+    description: (r.DESCRIPTION as string) ?? null,
+    category: (r.CATEGORY as string) ?? null,
+    sql: String(r.SQL_TEXT ?? ''),
+    version: Number(r.VERSION),
+    createdAt: dbTimestampToIso(r.CREATED_AT),
+    updatedAt: dbTimestampToIso(r.UPDATED_AT),
+    lastExecutedAt: dbTimestampToIso(r.LAST_EXECUTED_AT),
+    lastStatus: (r.LAST_STATUS as ExecutionStatus) ?? 'NEVER',
+    lastRowCount:
+      r.LAST_ROW_COUNT === null || r.LAST_ROW_COUNT === undefined ? null : Number(r.LAST_ROW_COUNT),
+    lastDurationMs:
+      r.LAST_DURATION_MS === null || r.LAST_DURATION_MS === undefined
+        ? null
+        : Number(r.LAST_DURATION_MS),
+    parameters: parseStoredParameters(r.PARAMETERS_JSON),
+    builderDef: parseBuilderDef(r.BUILDER_DEF),
+    chartDef: chart.def,
+    ...(chart.error ? { chartError: chart.error } : {}),
+  };
+};
 
 function parseBuilderDef(raw: unknown): unknown | null {
   if (raw === null || raw === undefined || raw === '') return null;
@@ -223,8 +235,8 @@ export class ReportRepository {
     try {
       await this.db.update(
         `INSERT INTO ${this.table} (REPORT_ID, OWNER_ID, REPORT_NAME, REPORT_NAME_KEY, DESCRIPTION, CATEGORY, SQL_TEXT,
-            PARAMETERS_JSON, BUILDER_DEF, VERSION, CREATED_AT, UPDATED_AT, LAST_STATUS)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ${NOW_UTC}, ${NOW_UTC}, 'NEVER')`,
+            PARAMETERS_JSON, BUILDER_DEF, CHART_DEF, VERSION, CREATED_AT, UPDATED_AT, LAST_STATUS)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ${NOW_UTC}, ${NOW_UTC}, 'NEVER')`,
         [
           id,
           ownerId,
@@ -235,6 +247,7 @@ export class ReportRepository {
           input.sql,
           paramsJson(input.parameters),
           builderJson(input.builderDef),
+          builderJson(input.chartDef),
         ],
       );
     } catch (e) {
@@ -296,6 +309,19 @@ export class ReportRepository {
         'This report was changed elsewhere. Reload it and try again.',
       );
     }
+    return this.get(ownerId, id);
+  }
+
+  /**
+   * Replace (or clear, with null) a report's chart settings. Charts are presentation only,
+   * so this does not bump VERSION and cannot conflict with an SQL edit.
+   */
+  async setChart(ownerId: string, id: string, def: ChartDef | null): Promise<Report> {
+    const n = await this.db.update(
+      `UPDATE ${this.table} SET CHART_DEF = ?, UPDATED_AT = ${NOW_UTC} WHERE REPORT_ID = ? AND OWNER_ID = ?`,
+      [builderJson(def), id, ownerId],
+    );
+    if (n === 0) throw NOT_FOUND();
     return this.get(ownerId, id);
   }
 
