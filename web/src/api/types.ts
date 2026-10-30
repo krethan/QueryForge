@@ -78,6 +78,14 @@ export interface Report {
   ownerName?: string;
   /** The caller's access to this report. */
   access?: AccessRole;
+  /** Saved Report Builder definition ({version, spec}); null for SQL-only reports. */
+  builderDef?: BuilderDef | null;
+  /** Server re-validation of `builderDef` against the current catalog. */
+  builder?: { valid: boolean; error?: string };
+}
+export interface BuilderDef {
+  version: 1;
+  spec: ReportSpec;
 }
 
 export interface ExecutionRecord {
@@ -127,6 +135,8 @@ export interface ReportInput {
   sql: string;
   parameters?: ParameterDef[];
   version?: number;
+  /** Report Builder definition; the server regenerates `sql` and `parameters` from it. */
+  builderDef?: BuilderDef | null;
 }
 
 export type AuthSource = 'LOCAL' | 'OIDC' | 'LDAP';
@@ -140,7 +150,14 @@ export interface ParameterDef {
   required: boolean;
   defaultValue: string | null;
   options?: { value: string; label?: string }[];
+  /** A Report Builder filter value: bound like any parameter but never prompted for. */
+  fixed?: boolean;
+  /** Report Builder text match: the value is escaped and wrapped in % on the server. */
+  match?: 'contains' | 'startsWith' | 'endsWith';
 }
+/** Parameters a user is asked for (fixed Report Builder values are not). */
+export const promptable = (defs: ParameterDef[] | undefined) =>
+  (defs ?? []).filter((d) => !d.fixed);
 export type ParameterValues = Record<string, string | number | null>;
 
 export interface AuthProviders {
@@ -299,7 +316,61 @@ export interface ReportSpec {
   alias?: string;
   joins?: ReportJoin[];
   columns: (string | ReportColumnRef)[];
-  sort?: { table?: string; column: string; direction: SortDirection }[];
+  sort?: { table?: string; column?: string; aggregate?: string; direction: SortDirection }[];
+  filters?: (ReportFilter | ReportFilterGroup)[];
+  filterLogic?: FilterLogic;
+  groupBy?: ReportColumnRef[];
+  aggregates?: ReportAggregate[];
+  having?: ReportHaving[];
+}
+
+export type FilterLogic = 'AND' | 'OR';
+export type FilterOp =
+  | '='
+  | '<>'
+  | '<'
+  | '<='
+  | '>'
+  | '>='
+  | 'BETWEEN'
+  | 'IN'
+  | 'CONTAINS'
+  | 'STARTS_WITH'
+  | 'ENDS_WITH'
+  | 'IS_NULL'
+  | 'IS_NOT_NULL';
+export interface ReportFilter {
+  table?: string;
+  column: string;
+  op: FilterOp;
+  value?: string | number | null;
+  value2?: string | number | null;
+  values?: (string | number)[];
+  /** "Ask when run": becomes a report parameter (BETWEEN: NAME_FROM / NAME_TO). */
+  ask?: {
+    name: string;
+    label: string;
+    defaultValue?: string | number | null;
+    defaultValue2?: string | number | null;
+  } | null;
+}
+export interface ReportFilterGroup {
+  logic: FilterLogic;
+  filters: ReportFilter[];
+}
+export type AggregateFn = 'COUNT' | 'COUNT_DISTINCT' | 'SUM' | 'AVG' | 'MIN' | 'MAX';
+export interface ReportAggregate {
+  fn: AggregateFn;
+  table?: string;
+  column?: string | null;
+  name?: string;
+}
+export type HavingOp = '=' | '<>' | '<' | '<=' | '>' | '>=' | 'BETWEEN';
+export interface ReportHaving {
+  aggregate: string;
+  op: HavingOp;
+  value: string | number | null;
+  value2?: string | number | null;
 }
 
 export interface JoinSuggestion {
@@ -317,6 +388,8 @@ export interface ReportSqlPreview {
   /** Joined reports only: final aliases (base first) and type warnings. */
   aliases?: string[];
   warnings?: string[];
+  /** Bound values in marker order: fixed filter values and "Ask when run" parameters. */
+  parameters?: ParameterDef[];
 }
 
 export interface ReportBuilderRun extends RunResponse {

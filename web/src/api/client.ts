@@ -256,8 +256,18 @@ export const api = {
       table,
     }),
   /** Report Builder: build + execute server-side, returning the standard paged result. */
-  runReportBuilder: (spec: ReportSpec, executionId: string, signal?: AbortSignal) =>
-    json<ReportBuilderRun>('POST', '/schema/run', { ...spec, executionId }, signal),
+  runReportBuilder: (
+    spec: ReportSpec,
+    executionId: string,
+    signal?: AbortSignal,
+    values?: ParameterValues,
+  ) =>
+    json<ReportBuilderRun>(
+      'POST',
+      '/schema/run',
+      { ...spec, executionId, ...(values ? { values } : {}) },
+      signal,
+    ),
 
   dataSource: (check = false) =>
     json<DataSourceInfo>('GET', `/datasource${check ? '?check=1' : ''}`),
