@@ -178,6 +178,7 @@ GET  /api/schema/tables                                 ?search=…&limit=…
 GET  /api/schema/tables/:schema/:table/columns
 POST /api/schema/sql                                    { schema, table, columns, sort }
 POST /api/schema/run                                    { schema, table, columns, sort, executionId }
+POST /api/schema/join-suggestions                       { tables: [{ alias, schema, table }], schema, table }
 ```
 
 - The list comes from `QSYS2.SYSTABLES` (`TABLE_TYPE` in `T`, `P`, `V`, `L`, `A`, `M`, `SYSTEM_TABLE = 'N'`) and
@@ -197,7 +198,31 @@ POST /api/schema/run                                    { schema, table, columns
 - **Save as report** creates a normal saved report from the generated SQL (no parameters) and opens its editor,
   so it shows up in _Saved Reports_, can be shared, scheduled and exported like any other report.
 
-Limitations: one table per report (no joins, filters, aggregates or expressions); views, logical files, aliases
+### Joining tables
+
+**Add table** (with a join-type picker: inner, left outer, right outer, full outer) adds up to **8** more tables.
+Each joined table gets an alias (default `T2`, `T3`, … with the base table `T1`; custom aliases must match
+`^[A-Z][A-Z0-9_]{0,9}$`) and one or more `ON` equalities that are AND-ed together. The left side of each
+condition is a column of a table added earlier; the right side is a column of the joined table. The same table
+can be joined to itself under a different alias (for example `EMPLOYEES E` joined to `EMPLOYEES MGR`).
+
+- **Suggestions**: when a table is added, the server reads foreign keys between it and the tables already in the
+  report from `QSYS2.SYSREFCST` / `SYSCST` / `SYSKEYCST` (both directions, all key columns), and otherwise
+  suggests same-name columns with compatible types. The first suggestion is applied; the user can pick another,
+  edit the condition rows, add more or remove them.
+- Columns are grouped by table and emitted alias-qualified (`"T2"."NAME"`); names that would repeat in the result
+  get unique `AS` names (`CUSTOMERS_NAME`, then `ALIAS_NAME`). Sorting can use any column of any table, picked or
+  not. A compact diagram shows the join chain and a live SQL preview shows the generated `JOIN … ON …`.
+- Validation is server-side: every table/column is resolved against the catalog, aliases and join types are
+  checked, each join needs at least one condition referring only to earlier tables, and numeric/character/date
+  mismatches in `ON` are rejected (DATE vs TIMESTAMP is allowed with a warning). The browser still never sends SQL.
+- Joins can multiply rows (one result row per match); the UI says so, and results are still paged with
+  _Load more_ like any other query.
+- **Save as report** stores the generated SQL. The builder definition (tables, aliases, conditions) is _not_
+  persisted, so a saved joined report is edited as SQL afterwards.
+
+Limitations: no filters, aggregates or expressions, and joins only on column equality; the builder definition
+is not saved with the report (no migration was added for it). Views, logical files, aliases
 and MQTs are listed alongside physical tables, and whether they are read-only depends on the object itself;
 LOB/XML/DATALINK/ROWID columns are listed but may be awkward to display; the table list is cached for
 `CATALOG_CACHE_TTL_MS`, so new objects/grants appear after that; mixed-case or system-named objects are emitted
