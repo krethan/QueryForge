@@ -52,7 +52,21 @@ import {
   suggestJoinConditions,
   suggestJoinedReportName,
   type JoinedReportSpec,
+  type OutputColumn,
+  type ResolvedSource,
 } from '../catalog/join-builder.js';
+import {
+  availableColumns,
+  defaultDetailColumns,
+  deriveDetailSpec,
+  drillDefSchema,
+  drillLabel,
+  groupFields,
+  mapTargetValues,
+  MAX_DETAIL_COLUMNS,
+  type DrillDef,
+  type GroupField,
+} from '../reports/drill.js';
 import type { QueryExecutor } from '../sql/executor.js';
 import type { MetadataDb } from '../db/types.js';
 import { AppError, DbError, sanitizeErrorMessage } from '../util/errors.js';
@@ -243,6 +257,8 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
       warnings: [] as string[],
       parameters: [] as ParameterDef[],
       aliases: undefined as string[] | undefined,
+      columns: undefined as OutputColumn[] | undefined,
+      sources: [resolved] as ResolvedSource[],
     };
   }
   const joins = spec.joins ?? [];
@@ -259,6 +275,8 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
     warnings: built.warnings,
     aliases: built.aliases,
     parameters: built.parameters,
+    columns: built.columns as OutputColumn[] | undefined,
+    sources: sources as ResolvedSource[],
   };
 }
 
@@ -312,6 +330,33 @@ const exportSchema = z.object({
   parameters: parameterListSchema.optional(),
   values: parameterValuesSchema.optional(),
 });
+
+type XlsxFile = Awaited<ReturnType<ExecutionService['exportXlsx']>>;
+async function sendXlsx(res: Response, file: XlsxFile) {
+  res.setHeader('X-QF-Row-Count', String(file.rowCount));
+  res.setHeader(
+    'X-QF-Chart',
+    file.chart ? 'included' : file.chartNote ? encodeURIComponent(file.chartNote) : 'none',
+  );
+  res.setHeader('X-QF-Truncated', String(file.truncated));
+  res.setHeader(
+    'Access-Control-Expose-Headers',
+    'X-QF-Row-Count, X-QF-Truncated, X-QF-Chart, Content-Disposition',
+  );
+  res.setHeader('Cache-Control', 'no-store');
+  await new Promise<void>((resolve, reject) =>
+    res.download(
+      file.path,
+      file.filename,
+      {
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+      },
+      (e) => (e ? reject(e) : resolve()),
+    ),
+  ).finally(() => file.cleanup());
+}
 
 export function apiRouter(d: ApiDeps): Router {
   const r = Router();
@@ -689,29 +734,7 @@ export function apiRouter(d: ApiDeps): Router {
         ...body,
         definitions: body.parameters,
       });
-      res.setHeader('X-QF-Row-Count', String(file.rowCount));
-      res.setHeader(
-        'X-QF-Chart',
-        file.chart ? 'included' : file.chartNote ? encodeURIComponent(file.chartNote) : 'none',
-      );
-      res.setHeader('X-QF-Truncated', String(file.truncated));
-      res.setHeader(
-        'Access-Control-Expose-Headers',
-        'X-QF-Row-Count, X-QF-Truncated, X-QF-Chart, Content-Disposition',
-      );
-      res.setHeader('Cache-Control', 'no-store');
-      await new Promise<void>((resolve, reject) =>
-        res.download(
-          file.path,
-          file.filename,
-          {
-            headers: {
-              'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            },
-          },
-          (e) => (e ? reject(e) : resolve()),
-        ),
-      ).finally(() => file.cleanup());
+      await sendXlsx(res, file);
     }),
   );
 
@@ -782,10 +805,13 @@ export function apiRouter(d: ApiDeps): Router {
       const { report, access } = await d.access.require(user(req), reportId(req), 'VIEW');
       // Re-validate a saved builder definition so the UI knows whether it can reopen it.
       let builder: { valid: boolean; error?: string } | undefined;
+      let fields: GroupField[] = [];
       if (report.builderDef !== null) {
         try {
-          await rebuildFromDef(d, user(req).id, report.builderDef);
+          const rebuilt = await rebuildFromDef(d, user(req).id, report.builderDef);
           builder = { valid: true };
+          if (rebuilt.columns)
+            fields = groupFields(rebuilt.def.spec as JoinedReportSpec, rebuilt.columns);
         } catch (e) {
           builder = {
             valid: false,
@@ -793,7 +819,11 @@ export function apiRouter(d: ApiDeps): Router {
           };
         }
       }
-      res.json({ report: { ...report, access }, ...(builder ? { builder } : {}) });
+      res.json({
+        report: { ...report, access },
+        ...(builder ? { builder } : {}),
+        drill: await drillInfo(user(req), report, fields),
+      });
     }),
   );
   r.put(
@@ -858,6 +888,222 @@ export function apiRouter(d: ApiDeps): Router {
       );
     }),
   );
+  // ---- drill-down (see reports/drill.ts) ----
+  const drillBody = z
+    .object({
+      executionId: uuid.optional(),
+      /** The source report's own parameter values (ask-when-run filters). */
+      values: parameterValuesSchema.optional(),
+      /** Clicked group field (result column name) -> value; null means IS NULL. */
+      keys: z
+        .record(z.string().min(1).max(128), z.union([scalar, z.null()]))
+        .refine((k) => Object.keys(k).length <= 20, 'At most 20 drill fields.'),
+      mode: z.enum(['builder', 'target']).optional(),
+      /** Detail columns (builder mode); defaults to the derived ones. */
+      columns: z.array(columnRef).min(1).max(MAX_DETAIL_COLUMNS).optional(),
+    })
+    .strict();
+  type DrillBody = z.infer<typeof drillBody>;
+
+  /** The drill target, if configured and the user can run it (null otherwise). */
+  async function drillTarget(u: AppUser, report: Report) {
+    if (!report.drillDef) return null;
+    try {
+      return (await d.access.require(u, report.drillDef.targetReportId, 'VIEW')).report;
+    } catch (e) {
+      if (e instanceof AppError && (e.status === 403 || e.status === 404)) return null;
+      throw e;
+    }
+  }
+
+  /** What the UI may offer for a report: builder fields and / or a runnable target. */
+  async function drillInfo(u: AppUser, report: Report, fields?: GroupField[]) {
+    if (fields === undefined) {
+      fields = [];
+      if (report.builderDef !== null)
+        try {
+          const rebuilt = await rebuildFromDef(d, u.id, report.builderDef);
+          if (rebuilt.columns)
+            fields = groupFields(rebuilt.def.spec as JoinedReportSpec, rebuilt.columns);
+        } catch {
+          fields = [];
+        }
+    }
+    const target = await drillTarget(u, report);
+    return {
+      builder:
+        report.builderDef !== null && fields.length > 0
+          ? { fields: fields.map((f) => f.name) }
+          : null,
+      target:
+        target && report.drillDef
+          ? {
+              id: target.id,
+              name: target.name,
+              fields: report.drillDef.mapping.map((m) => m.field),
+            }
+          : null,
+      /** A target is configured but this user cannot run it. */
+      targetUnavailable: !!report.drillDef && !target,
+    };
+  }
+
+  async function planDrill(u: AppUser, sourceId: string, body: DrillBody) {
+    const { report } = await d.access.require(u, sourceId, 'VIEW');
+    const mode = body.mode ?? (report.drillDef ? 'target' : 'builder');
+    if (mode === 'target') {
+      if (!report.drillDef)
+        throw new AppError(400, 'NO_DRILL_TARGET', 'This report has no drill target.');
+      if (body.columns)
+        throw new AppError(400, 'BAD_REQUEST', 'Columns can only be chosen for builder drills.');
+      // Access is checked again for the person clicking, not the owner who configured it.
+      const target = (await d.access.require(u, report.drillDef.targetReportId, 'VIEW')).report;
+      const values = mapTargetValues(report.drillDef, body.keys, target.parameters);
+      const applied = Object.entries(body.keys).map(([field, value]) => ({ field, value }));
+      return { kind: 'target' as const, report, target, values, applied };
+    }
+    if (report.builderDef === null)
+      throw new AppError(
+        400,
+        'NOT_DRILLABLE',
+        'Only Report Builder reports can be drilled into without a drill target.',
+      );
+    const rebuilt = await rebuildFromDef(d, u.id, report.builderDef);
+    if (!rebuilt.columns || !rebuilt.aliases)
+      throw new AppError(400, 'NOT_DRILLABLE', 'This report is not grouped.');
+    const spec = rebuilt.def.spec as JoinedReportSpec;
+    const fields = groupFields(spec, rebuilt.columns);
+    const columns =
+      body.columns ?? defaultDetailColumns(spec, rebuilt.aliases, rebuilt.sources, fields);
+    const derived = deriveDetailSpec(spec, fields, body.keys, columns);
+    const built = await buildQuery(d, u.id, derived.spec as BuilderInput);
+    return {
+      kind: 'builder' as const,
+      report,
+      built,
+      applied: derived.applied,
+      columns,
+      available: availableColumns(rebuilt.aliases, rebuilt.sources),
+    };
+  }
+
+  r.post(
+    '/reports/:id/drill',
+    execLimiter,
+    h(async (req, res) => {
+      const body = drillBody.parse(req.body ?? {});
+      const plan = await planDrill(user(req), reportId(req), body);
+      const execId = body.executionId ?? randomUUID();
+      const label = drillLabel(plan.applied);
+      if (plan.kind === 'target') {
+        const out = await d.execution.runReport(user(req), plan.target.id, execId, plan.values);
+        res.json({
+          ...out,
+          drill: {
+            mode: 'target',
+            sourceId: plan.report.id,
+            sourceName: plan.report.name,
+            label,
+            applied: plan.applied,
+            target: { id: plan.target.id, name: plan.target.name },
+            values: plan.values,
+            next: await drillInfo(user(req), plan.target),
+          },
+        });
+        return;
+      }
+      const out = await d.execution.runAdhoc(user(req), plan.built.sql, execId, {
+        definitions: plan.built.parameters,
+        values: body.values ?? {},
+      });
+      res.json({
+        ...out,
+        drill: {
+          mode: 'builder',
+          sourceId: plan.report.id,
+          sourceName: plan.report.name,
+          label,
+          applied: plan.applied,
+          columns: plan.columns,
+          available: plan.available,
+        },
+      });
+    }),
+  );
+  r.post(
+    '/reports/:id/drill/export',
+    execLimiter,
+    h(async (req, res) => {
+      const body = drillBody.parse(req.body ?? {});
+      const plan = await planDrill(user(req), reportId(req), body);
+      const label = drillLabel(plan.applied);
+      const file =
+        plan.kind === 'target'
+          ? await d.execution.exportXlsx(user(req), {
+              reportId: plan.target.id,
+              values: plan.values,
+              chart: null,
+            })
+          : await d.execution.exportXlsx(user(req), {
+              sql: plan.built.sql,
+              definitions: plan.built.parameters,
+              values: body.values ?? {},
+              name: `${plan.report.name} - ${label}`.slice(0, 128),
+              chart: null,
+            });
+      await sendXlsx(res, file);
+    }),
+  );
+  /** Reports the editor may pick as a drill target (ones they can run), with parameters. */
+  r.get(
+    '/reports/:id/drill-targets',
+    h(async (req, res) => {
+      const { report } = await d.access.require(user(req), reportId(req), 'EDIT');
+      const owned = await d.reports.list(user(req).id, { sort: 'name' });
+      const groups = await d.groups.forUser(user(req).id);
+      const shared = await d.reports.listShared(user(req).id, groups);
+      const seen = new Set<string>([report.id]);
+      const targets = [];
+      for (const x of [...owned, ...shared]) {
+        if (seen.has(x.id)) continue;
+        seen.add(x.id);
+        targets.push({
+          id: x.id,
+          name: x.name,
+          parameters: x.parameters
+            .filter((p) => !p.fixed)
+            .map((p) => ({ name: p.name, label: p.label, type: p.type })),
+        });
+      }
+      res.json({ targets });
+    }),
+  );
+  r.put(
+    '/reports/:id/drill',
+    h(async (req, res) => {
+      const { drillDef } = z
+        .object({ drillDef: drillDefSchema.nullable() })
+        .strict()
+        .parse(req.body ?? {});
+      const { report, access } = await d.access.require(user(req), reportId(req), 'EDIT');
+      if (drillDef) await checkDrillDef(user(req), report, drillDef);
+      const updated = await d.reports.setDrill(report.ownerId, report.id, drillDef);
+      res.json({ report: { ...updated, access }, drill: await drillInfo(user(req), updated) });
+    }),
+  );
+  async function checkDrillDef(u: AppUser, report: Report, def: DrillDef) {
+    if (def.targetReportId === report.id)
+      throw new AppError(400, 'INVALID_DRILL_TARGET', 'A report cannot drill to itself.');
+    const target = (await d.access.require(u, def.targetReportId, 'VIEW')).report;
+    for (const m of def.mapping)
+      if (!target.parameters.some((p) => p.name === m.parameter && !p.fixed))
+        throw new AppError(
+          400,
+          'INVALID_DRILL_TARGET',
+          `${target.name} has no parameter named ${m.parameter}.`,
+        );
+  }
+
   r.get(
     '/reports/:id/history',
     h(async (req, res) => {

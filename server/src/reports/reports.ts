@@ -4,7 +4,8 @@ import type { MetadataDb } from '../db/types.js';
 import { NOW_UTC, T, q } from '../db/schema.js';
 import { AppError, DbError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
-import { parseChartDef, type ChartDef } from '../charts/chart-def.js';
+import type { ChartDef } from '../charts/chart-def.js';
+import { parsePresentation, presentationJson, type DrillDef } from './drill.js';
 import {
   countMarkers,
   parameterListSchema,
@@ -36,6 +37,9 @@ export interface Report {
   chartDef: ChartDef | null;
   /** Why stored chart settings were ignored (tampered / outdated JSON). */
   chartError?: string;
+  /** Configured "Drill to report" target (stored in the CHART_DEF envelope, version 2). */
+  drillDef: DrillDef | null;
+  drillError?: string;
 }
 
 export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
@@ -83,6 +87,7 @@ export type ReportInput = Omit<z.infer<typeof reportInputSchema>, 'parameters'> 
   builderDef?: unknown | null;
   /** Validated chart settings; stored as JSON in CHART_DEF (create only, see setChart). */
   chartDef?: ChartDef | null;
+  drillDef?: DrillDef | null;
 };
 
 export const reportUpdateSchema = z.intersection(
@@ -103,7 +108,7 @@ const COLS = `REPORT_ID, OWNER_ID, REPORT_NAME, DESCRIPTION, CATEGORY, SQL_TEXT,
 
 type Row = Record<string, unknown>;
 const toReport = (r: Row): Report => {
-  const chart = parseChartDef(r.CHART_DEF);
+  const chart = parsePresentation(r.CHART_DEF);
   return {
     id: String(r.REPORT_ID),
     ownerId: String(r.OWNER_ID),
@@ -124,8 +129,10 @@ const toReport = (r: Row): Report => {
         : Number(r.LAST_DURATION_MS),
     parameters: parseStoredParameters(r.PARAMETERS_JSON),
     builderDef: parseBuilderDef(r.BUILDER_DEF),
-    chartDef: chart.def,
-    ...(chart.error ? { chartError: chart.error } : {}),
+    chartDef: chart.chart,
+    ...(chart.chartError ? { chartError: chart.chartError } : {}),
+    drillDef: chart.drill,
+    ...(chart.drillError ? { drillError: chart.drillError } : {}),
   };
 };
 
@@ -247,7 +254,7 @@ export class ReportRepository {
           input.sql,
           paramsJson(input.parameters),
           builderJson(input.builderDef),
-          builderJson(input.chartDef),
+          presentationJson(input.chartDef ?? null, input.drillDef ?? null),
         ],
       );
     } catch (e) {
@@ -317,9 +324,25 @@ export class ReportRepository {
    * so this does not bump VERSION and cannot conflict with an SQL edit.
    */
   async setChart(ownerId: string, id: string, def: ChartDef | null): Promise<Report> {
+    const cur = await this.get(ownerId, id);
+    return this.writePresentation(ownerId, id, def, cur.drillDef);
+  }
+
+  /** Replace (or clear) the "Drill to report" target; keeps the chart settings. */
+  async setDrill(ownerId: string, id: string, drill: DrillDef | null): Promise<Report> {
+    const cur = await this.get(ownerId, id);
+    return this.writePresentation(ownerId, id, cur.chartDef, drill);
+  }
+
+  private async writePresentation(
+    ownerId: string,
+    id: string,
+    chart: ChartDef | null,
+    drill: DrillDef | null,
+  ): Promise<Report> {
     const n = await this.db.update(
       `UPDATE ${this.table} SET CHART_DEF = ?, UPDATED_AT = ${NOW_UTC} WHERE REPORT_ID = ? AND OWNER_ID = ?`,
-      [builderJson(def), id, ownerId],
+      [presentationJson(chart, drill), id, ownerId],
     );
     if (n === 0) throw NOT_FOUND();
     return this.get(ownerId, id);
