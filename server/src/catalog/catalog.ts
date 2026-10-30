@@ -15,6 +15,7 @@ import type { AppConfig } from '../config/config.js';
 import type { QueryExecutor } from '../sql/executor.js';
 import { AppError, sanitizeErrorMessage } from '../util/errors.js';
 import type { CatalogColumn, CatalogTable } from './sql-builder.js';
+import type { ForeignKeyColumn } from './join-builder.js';
 import type { Cell } from '../sql/results.js';
 
 /** TABLE_TYPE values worth showing: SQL table, DDS physical file, view, logical file, alias, MQT. */
@@ -110,6 +111,7 @@ export class CatalogService {
   private readonly tables = new Map<string, CacheEntry<CatalogTableEntry[]>>();
   private readonly oneTable = new Map<string, CacheEntry<CatalogTableEntry | null>>();
   private readonly columnsByTable = new Map<string, CacheEntry<CatalogColumn[]>>();
+  private readonly foreignKeys = new Map<string, CacheEntry<ForeignKeyColumn[]>>();
   private readonly pending = new Map<string, Promise<unknown>>();
 
   constructor(
@@ -125,6 +127,7 @@ export class CatalogService {
     this.tables.clear();
     this.oneTable.clear();
     this.columnsByTable.clear();
+    this.foreignKeys.clear();
   }
 
   private fresh<T>(e: CacheEntry<T> | undefined, now: number): e is CacheEntry<T> {
@@ -372,5 +375,60 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
         this.columnsByTable.get(`${found.schema}.${found.name}`)?.at ?? Date.now(),
       ).toISOString(),
     };
+  }
+
+  /**
+   * Referential constraints in which the table is the child or the parent, read from
+   * QSYS2.SYSREFCST + SYSCST + SYSKEYCST (one row per key column). Used only to
+   * suggest join conditions, so a catalog that cannot be read yields no suggestions
+   * instead of an error.
+   */
+  async listForeignKeys(
+    ownerId: string,
+    schema: string,
+    table: string,
+  ): Promise<ForeignKeyColumn[]> {
+    const key = `${schema.toUpperCase()}.${table.toUpperCase()}`;
+    const cached = this.foreignKeys.get(key);
+    if (this.fresh(cached, Date.now())) return cached.value;
+    return this.once(`fks:${key}`, async () => {
+      const sql = `SELECT C.TABLE_SCHEMA, C.TABLE_NAME, K.COLUMN_NAME,
+       P.TABLE_SCHEMA, P.TABLE_NAME, PK.COLUMN_NAME,
+       R.CONSTRAINT_NAME, K.ORDINAL_POSITION
+FROM QSYS2.SYSREFCST R
+JOIN QSYS2.SYSCST C
+  ON C.CONSTRAINT_SCHEMA = R.CONSTRAINT_SCHEMA AND C.CONSTRAINT_NAME = R.CONSTRAINT_NAME
+JOIN QSYS2.SYSKEYCST K
+  ON K.CONSTRAINT_SCHEMA = R.CONSTRAINT_SCHEMA AND K.CONSTRAINT_NAME = R.CONSTRAINT_NAME
+JOIN QSYS2.SYSCST P
+  ON P.CONSTRAINT_SCHEMA = R.UNIQUE_CONSTRAINT_SCHEMA AND P.CONSTRAINT_NAME = R.UNIQUE_CONSTRAINT_NAME
+JOIN QSYS2.SYSKEYCST PK
+  ON PK.CONSTRAINT_SCHEMA = R.UNIQUE_CONSTRAINT_SCHEMA AND PK.CONSTRAINT_NAME = R.UNIQUE_CONSTRAINT_NAME
+ AND PK.ORDINAL_POSITION = K.ORDINAL_POSITION
+WHERE (C.TABLE_SCHEMA = ? AND C.TABLE_NAME = ?) OR (P.TABLE_SCHEMA = ? AND P.TABLE_NAME = ?)
+ORDER BY R.CONSTRAINT_NAME, K.ORDINAL_POSITION
+FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
+      let list: ForeignKeyColumn[] = [];
+      try {
+        const run = await this.run(sql, ownerId, [schema, table, schema, table], MAX_COLUMNS);
+        list = run.rows
+          .map((r) => ({
+            childSchema: str(r[0]),
+            childTable: str(r[1]),
+            childColumn: str(r[2]),
+            parentSchema: str(r[3]),
+            parentTable: str(r[4]),
+            parentColumn: str(r[5]),
+            constraint: str(r[6]),
+            ordinal: num(r[7]) ?? 0,
+          }))
+          .filter((f) => f.constraint && f.childColumn && f.parentColumn);
+      } catch {
+        list = [];
+      }
+      this.foreignKeys.set(key, { at: Date.now(), value: list });
+      CatalogService.trim(this.foreignKeys);
+      return list;
+    });
   }
 }
