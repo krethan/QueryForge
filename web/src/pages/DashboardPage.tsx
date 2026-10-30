@@ -17,7 +17,12 @@ import { api } from '../api/client';
 import type { Report } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { DashboardChart } from '../components/charts/DashboardChart';
+import { encodeDrill } from '../utils/drill';
 import { formatDateTime, formatDuration, statusLabel, statusTagType } from '../utils/format';
+
+/** Grouped builder reports and reports with a drill target can be drilled from a tile. */
+const mayDrill = (r: Report) =>
+  !!r.drillDef || !!(r.builderDef?.spec.groupBy?.length || r.builderDef?.spec.aggregates?.length);
 
 export function useReports(search: string, sort: string) {
   const [reports, setReports] = useState<Report[] | null>(null);
@@ -117,7 +122,16 @@ function ReportTile({
         </div>
       )}
       <p className="qf-tile__desc">{r.description ?? 'No description'}</p>
-      {r.chartDef?.showOnDashboard && <DashboardChart report={r} />}
+      {r.chartDef?.showOnDashboard && (
+        <DashboardChart
+          report={r}
+          onDrill={
+            mayDrill(r)
+              ? (keys) => nav(`/reports/${r.id}?drill=${encodeURIComponent(encodeDrill(keys))}`)
+              : undefined
+          }
+        />
+      )}
       <div className="qf-tile__meta">
         <div>
           Last run: {formatDateTime(r.lastExecutedAt)}{' '}
