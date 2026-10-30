@@ -87,6 +87,11 @@ export interface Report {
   chartDef?: ChartDef | null;
   /** Why stored chart settings were ignored (tampered / outdated JSON). */
   chartError?: string;
+  /** Saved drill target settings; null when none. */
+  drillDef?: DrillDef | null;
+  drillError?: string;
+  /** Drill-down options for the caller (GET /reports/:id only). */
+  drill?: DrillInfo;
 }
 export interface BuilderDef {
   version: 1;
@@ -401,4 +406,59 @@ export interface ReportSqlPreview {
 
 export interface ReportBuilderRun extends RunResponse {
   builder?: { name: string; sql: string };
+}
+
+// ---- drill-down ----
+export type DrillValue = string | number | null;
+export type DrillKeys = Record<string, DrillValue>;
+export interface DrillDef {
+  version: 1;
+  targetReportId: string;
+  mapping: { field: string; parameter: string }[];
+}
+/** What a report offers for drill-down (from GET /reports/:id). */
+export interface DrillInfo {
+  /** Builder reports: group fields that can be drilled into automatically. */
+  builder: { fields: string[] } | null;
+  /** A configured drill target the caller can run. */
+  target: { id: string; name: string; fields: string[] } | null;
+  targetUnavailable: boolean;
+}
+export interface DetailColumn {
+  table: string;
+  column: string;
+  label?: string;
+  type?: string;
+}
+export type DrillMeta =
+  | {
+      mode: 'builder';
+      sourceId: string;
+      sourceName: string;
+      label: string;
+      applied: { field: string; value: DrillValue }[];
+      columns: DetailColumn[];
+      available: DetailColumn[];
+    }
+  | {
+      mode: 'target';
+      sourceId: string;
+      sourceName: string;
+      label: string;
+      applied: { field: string; value: DrillValue }[];
+      target: { id: string; name: string };
+      values: ParameterValues;
+      next: DrillInfo;
+    };
+export interface DrillRequest {
+  keys: DrillKeys;
+  mode?: 'builder' | 'target';
+  values?: ParameterValues;
+  columns?: { table: string; column: string }[];
+  executionId?: string;
+}
+export interface DrillTargetOption {
+  id: string;
+  name: string;
+  parameters: { name: string; label?: string; type: string }[];
 }

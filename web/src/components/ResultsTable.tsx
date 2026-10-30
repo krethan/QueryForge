@@ -13,7 +13,7 @@ import {
   TableToolbarSearch,
 } from '@carbon/react';
 import { WarningAlt } from '@carbon/icons-react';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ApiError, api } from '../api/client';
 import type { Cell, RunResponse } from '../api/types';
 import {
@@ -32,6 +32,9 @@ interface Props {
   toolbar?: ReactNode;
   /** Called with every loaded row (first page plus "Load next" pages) — used by charts. */
   onRowsChange?(rows: Cell[][], hasMore: boolean): void;
+  /** Makes rows clickable (drill-down); return false for rows that cannot be opened. */
+  onRowClick?(row: Cell[]): void;
+  rowActionLabel?: string;
 }
 
 interface Loaded {
@@ -60,7 +63,13 @@ const initial = (r: RunResponse): Loaded => ({
  * MAX_RESULT_ROWS). NULL is rendered as a distinct, styled marker so it never
  * looks like an empty string.
  */
-export function ResultsTable({ result, toolbar, onRowsChange }: Props) {
+export function ResultsTable({
+  result,
+  toolbar,
+  onRowsChange,
+  onRowClick,
+  rowActionLabel = 'Show detail rows',
+}: Props) {
   const { columns } = result;
   const [loaded, setLoaded] = useState<Loaded>(() => initial(result));
   const [loading, setLoading] = useState(false);
@@ -250,7 +259,24 @@ export function ResultsTable({ result, toolbar, onRowsChange }: Props) {
               </TableHead>
               <tbody aria-live="polite">
                 {pageRows.map(({ r, i }) => (
-                  <TableRow key={i}>
+                  <TableRow
+                    key={i}
+                    {...(onRowClick
+                      ? {
+                          className: 'qf-row-drill',
+                          tabIndex: 0,
+                          title: rowActionLabel,
+                          'data-testid': 'drill-row',
+                          onClick: () => onRowClick(r),
+                          onKeyDown: (e: KeyboardEvent) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              onRowClick(r);
+                            }
+                          },
+                        }
+                      : {})}
+                  >
                     {r.map((v, ci) => (
                       <TableCell
                         key={columns[ci].key}
