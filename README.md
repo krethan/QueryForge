@@ -289,6 +289,32 @@ When you first switch to Chart, a chart is suggested from the column types (text
 - The demo includes "Revenue by Region (chart)", "Daily Revenue (chart)" and "Orders by Status (chart)".
   `node scripts/screenshots-charts.mjs` captures chart screenshots from a running demo.
 
+## Drill-down
+
+Click a bar, slice or point in a chart (or a row of a grouped table) to open the
+detail rows behind it in a side panel with a breadcrumb (`Revenue by Region > West`),
+**Back** and **Export to Excel**. A dashboard mini chart click opens the report with
+the drill applied (`/reports/:id?drill=…`).
+
+- **Report Builder reports** with grouping drill automatically. The server derives the
+  detail query from the saved definition: same tables, joins, filters and ask-when-run
+  parameters, plus `= ?` (or `IS NULL`) for each clicked group field; no GROUP BY or
+  totals. The client only sends field names and values, never SQL; fields are checked
+  against the report's group fields and values are bound. The detail columns default
+  to the group fields, the aggregated columns and base-table columns, and can be
+  changed in the panel.
+- **Drill to report X** (report settings → Drill-down): map clicked fields to X's
+  parameters. Only reports the editor can run are listed, and access to X is checked
+  again for whoever clicks; a target the viewer cannot run is not offered. Drills nest
+  when X itself drills somewhere.
+- **SQL-only reports** drill only through a configured target; otherwise nothing is
+  clickable.
+- Endpoints: `POST /api/reports/:id/drill`, `POST /api/reports/:id/drill/export`,
+  `GET /api/reports/:id/drill-targets`, `PUT /api/reports/:id/drill`.
+- Storage: no migration. The drill target is kept in the existing chart column as a
+  version 2 envelope `{"version":2,"chart":…,"drill":…}`, written only when a target is
+  set; version 1 chart JSON is still read as before.
+
 ## Sharing audit
 
 Every share grant, role change and revoke is written to `QFMETA.QF_SHARE_AUDIT` (migration 003) in the same
@@ -319,6 +345,11 @@ owner and by your access (Owner / Editor / Viewer).
 - XLSX built server-side with formula-injection escaping. Credentials only in env, never sent to the browser.
 
 ## Known limitations
+
+- Drill-down: not available in the unsaved Report Builder preview or while a report has
+  unsaved edits; grouped builder reports whose top-level filters use OR cannot be
+  drilled automatically; an empty (NULL) value mapped to a target parameter falls back
+  to that parameter's default; ad-hoc drill runs are not linked to the report in history.
 
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
   `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).
