@@ -854,7 +854,8 @@ async function main() {
     name: 'Orders by Region and Date',
     category: 'Sales',
     description: 'Parameterized: values are bound as Mapepire ? markers',
-    sql: 'SELECT ORDER_ID, CUSTOMER, REGION, ORDER_DATE, AMOUNT, STATUS\nFROM DEMOLIB.ORDERS\nWHERE REGION = ?\n  AND ORDER_DATE >= ?\n  AND AMOUNT >= ?\nORDER BY ORDER_DATE DESC',
+    // written in the builder's quoted style so the demo engine evaluates the filters
+    sql: 'SELECT "T1"."ORDER_ID", "T1"."CUSTOMER", "T1"."REGION", "T1"."ORDER_DATE", "T1"."AMOUNT", "T1"."STATUS"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nWHERE "T1"."REGION" = ?\n  AND "T1"."ORDER_DATE" >= ?\n  AND "T1"."AMOUNT" >= ?\nORDER BY "T1"."ORDER_DATE" DESC',
     parameters: [
       {
         name: 'region',
@@ -886,7 +887,7 @@ async function main() {
     name: 'Region Totals (SQL, drill target)',
     category: 'Sales',
     description: 'SQL report; clicking a row opens Orders by Region and Date for that region',
-    sql: 'SELECT REGION, COUNT(*) AS ORDERS, SUM(AMOUNT) AS TOTAL\nFROM DEMOLIB.ORDERS\nGROUP BY REGION',
+    sql: 'SELECT "T1"."REGION",\n       COUNT(*) AS "ORDERS",\n       SUM("T1"."AMOUNT") AS "TOTAL"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nGROUP BY "T1"."REGION"\nORDER BY "T1"."REGION" ASC',
   });
   await reports.setDrill(user.id, rawTotals.id, {
     version: 1,
