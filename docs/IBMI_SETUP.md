@@ -86,6 +86,18 @@ only thing executed. **No new GRANT is needed**: the existing `SELECT, INSERT, U
 `QF_REPORTS` covers the column. A DBA applying the migration needs `*OBJALTER` (or ownership) on
 `QF_REPORTS` for the `ALTER TABLE`; save `QFMETA` and try it on a non-production system first, as with 002.
 
+### Migration 005 — Chart settings
+
+`server/migrations/005_report_chart_def.sql` adds one nullable column, `QF_REPORTS.CHART_DEF`
+(`CLOB(64K) CCSID 1208`), holding a report's versioned chart settings (`{"version":1,"type":"bar",...}`).
+It is kept separate from `BUILDER_DEF` so SQL-only reports can have charts too. Existing rows get NULL
+(no chart). The server validates the JSON on save and again on every read; chart field names are only
+compared with result column names at run time (an unknown field disables the chart with a message) and
+never become part of any SQL. **No new GRANT is needed** — the existing `SELECT, INSERT, UPDATE, DELETE`
+on `QF_REPORTS` covers the column; the DBA applying it needs `*OBJALTER` (or ownership) on `QF_REPORTS`.
+Charts in Excel exports and scheduled emails are rendered on the app server (SVG rasterised by
+WebAssembly resvg with a bundled font) — no extra IBM i objects or authorities are involved.
+
 Paged results keep one `QFREPORT` Mapepire job per open cursor for at most `CURSOR_MAX_LIFETIME_MS`
 (default 10 minutes); size `MAX_OPEN_CURSORS` with the Mapepire server's job limits in mind.
 `QFREPORT` should have **no** authority to `QFMETA` (it is also blocked by the validator).

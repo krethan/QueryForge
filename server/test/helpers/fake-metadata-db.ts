@@ -255,7 +255,7 @@ export class FakeMetadataDb implements MetadataDb {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
     if (s.startsWith('INSERT INTO') && s.includes('.QF_REPORTS')) {
-      const [id, owner, name, key, desc, cat, text, pjson, bdef] = params;
+      const [id, owner, name, key, desc, cat, text, pjson, bdef, cdef] = params;
       if ([...this.reports.values()].some((r) => r.OWNER_ID === owner && r.REPORT_NAME_KEY === key))
         throw new DbError('Duplicate key value specified.', '23505', -803);
       const now = this.now();
@@ -269,6 +269,7 @@ export class FakeMetadataDb implements MetadataDb {
         SQL_TEXT: text,
         PARAMETERS_JSON: pjson ?? null,
         BUILDER_DEF: bdef ?? null,
+        CHART_DEF: cdef ?? null,
         VERSION: 1,
         CREATED_AT: now,
         UPDATED_AT: now,
@@ -300,6 +301,13 @@ export class FakeMetadataDb implements MetadataDb {
         VERSION: Number(r.VERSION) + 1,
         UPDATED_AT: this.now(),
       });
+      return 1;
+    }
+    if (s.includes('.QF_REPORTS SET CHART_DEF = ?')) {
+      const [cdef, id, owner] = params;
+      const r = this.reports.get(String(id));
+      if (!r || r.OWNER_ID !== owner) return 0;
+      Object.assign(r, { CHART_DEF: cdef ?? null, UPDATED_AT: this.now() });
       return 1;
     }
     if (s.includes(".QF_REPORTS SET LAST_STATUS = 'RUNNING'")) {
