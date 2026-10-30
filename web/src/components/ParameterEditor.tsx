@@ -61,94 +61,110 @@ export function ParameterEditor({ sql, value, onChange, readOnly }: Props) {
           ? 'Use ? in the SQL for each value users should supply when running (for example WHERE REGION = ?).'
           : `The SQL has ${markers} marker${markers === 1 ? '' : 's'} (?) and ${value.length} parameter${value.length === 1 ? '' : 's'} defined${mismatch ? ' — define exactly one per marker, in order.' : '.'}`}
       </p>
-      {value.map((p, i) => (
-        <div className="qf-param-row" key={i} data-testid="param-row">
-          <span className="qf-param-row__index" aria-hidden>
-            ?{i + 1}
-          </span>
-          <TextInput
-            id={`pname-${i}`}
-            labelText="Name"
-            size="sm"
-            value={p.name}
-            readOnly={readOnly}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => set(i, { name: e.target.value })}
-          />
-          <TextInput
-            id={`plabel-${i}`}
-            labelText="Label"
-            size="sm"
-            value={p.label}
-            readOnly={readOnly}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => set(i, { label: e.target.value })}
-          />
-          <Select
-            id={`ptype-${i}`}
-            labelText="Type"
-            size="sm"
-            value={p.type}
-            disabled={readOnly}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-              set(i, {
-                type: e.target.value as ParameterType,
-                options: e.target.value === 'list' ? (p.options ?? []) : undefined,
-              })
-            }
-          >
-            {TYPES.map((t) => (
-              <SelectItem key={t.value} value={t.value} text={t.text} />
-            ))}
-          </Select>
-          <TextInput
-            id={`pdefault-${i}`}
-            labelText="Default"
-            size="sm"
-            placeholder={p.type === 'date' ? 'YYYY-MM-DD' : ''}
-            value={p.defaultValue ?? ''}
-            readOnly={readOnly}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              set(i, { defaultValue: e.target.value === '' ? null : e.target.value })
-            }
-          />
-          {p.type === 'list' && (
+      {value.map((p, i) =>
+        p.fixed ? (
+          <div className="qf-param-row" key={i} data-testid="param-row">
+            <span className="qf-param-row__index" aria-hidden>
+              ?{i + 1}
+            </span>
+            <span className="qf-muted">
+              {p.label}: <code>{p.defaultValue}</code> — fixed Report Builder filter value (bound,
+              never prompted)
+            </span>
+          </div>
+        ) : (
+          <div className="qf-param-row" key={i} data-testid="param-row">
+            <span className="qf-param-row__index" aria-hidden>
+              ?{i + 1}
+            </span>
             <TextInput
-              id={`poptions-${i}`}
-              labelText="List values (comma-separated)"
+              id={`pname-${i}`}
+              labelText="Name"
               size="sm"
-              value={(p.options ?? []).map((o) => o.value).join(', ')}
+              value={p.name}
               readOnly={readOnly}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                set(i, {
-                  options: e.target.value
-                    .split(',')
-                    .map((v) => v.trim())
-                    .filter(Boolean)
-                    .map((v) => ({ value: v })),
-                })
+                set(i, { name: e.target.value })
               }
             />
-          )}
-          <Checkbox
-            id={`preq-${i}`}
-            labelText="Required"
-            checked={p.required}
-            disabled={readOnly}
-            onChange={(_: unknown, { checked }: { checked: boolean }) =>
-              set(i, { required: checked })
-            }
-          />
-          {!readOnly && (
-            <Button
-              kind="ghost"
+            <TextInput
+              id={`plabel-${i}`}
+              labelText="Label"
               size="sm"
-              hasIconOnly
-              renderIcon={TrashCan}
-              iconDescription={`Remove ${p.label}`}
-              onClick={() => onChange(value.filter((_, j) => j !== i))}
+              value={p.label}
+              readOnly={readOnly}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                set(i, { label: e.target.value })
+              }
             />
-          )}
-        </div>
-      ))}
+            <Select
+              id={`ptype-${i}`}
+              labelText="Type"
+              size="sm"
+              value={p.type}
+              disabled={readOnly}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                set(i, {
+                  type: e.target.value as ParameterType,
+                  options: e.target.value === 'list' ? (p.options ?? []) : undefined,
+                })
+              }
+            >
+              {TYPES.map((t) => (
+                <SelectItem key={t.value} value={t.value} text={t.text} />
+              ))}
+            </Select>
+            <TextInput
+              id={`pdefault-${i}`}
+              labelText="Default"
+              size="sm"
+              placeholder={p.type === 'date' ? 'YYYY-MM-DD' : ''}
+              value={p.defaultValue ?? ''}
+              readOnly={readOnly}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                set(i, { defaultValue: e.target.value === '' ? null : e.target.value })
+              }
+            />
+            {p.type === 'list' && (
+              <TextInput
+                id={`poptions-${i}`}
+                labelText="List values (comma-separated)"
+                size="sm"
+                value={(p.options ?? []).map((o) => o.value).join(', ')}
+                readOnly={readOnly}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  set(i, {
+                    options: e.target.value
+                      .split(',')
+                      .map((v) => v.trim())
+                      .filter(Boolean)
+                      .map((v) => ({ value: v })),
+                  })
+                }
+              />
+            )}
+            <Checkbox
+              id={`preq-${i}`}
+              labelText="Required"
+              checked={p.required}
+              disabled={readOnly}
+              onChange={(_: unknown, { checked }: { checked: boolean }) =>
+                set(i, { required: checked })
+              }
+            />
+            {!readOnly && (
+              <Button
+                kind="ghost"
+                size="sm"
+                hasIconOnly
+                renderIcon={TrashCan}
+                iconDescription={`Remove ${p.label}`}
+                onClick={() => onChange(value.filter((_, j) => j !== i))}
+              />
+            )}
+          </div>
+        ),
+      )}
       {!readOnly && (
         <Button kind="tertiary" size="sm" renderIcon={Add} onClick={add}>
           Add parameter

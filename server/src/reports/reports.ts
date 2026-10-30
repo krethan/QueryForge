@@ -29,6 +29,8 @@ export interface Report {
   lastRowCount: number | null;
   lastDurationMs: number | null;
   parameters: ParameterDef[];
+  /** Parsed Report Builder definition (migration 004), or null for SQL-only reports. */
+  builderDef: unknown | null;
 }
 
 export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
@@ -72,6 +74,8 @@ export const reportInputSchema = z
   });
 export type ReportInput = Omit<z.infer<typeof reportInputSchema>, 'parameters'> & {
   parameters?: ParameterDef[];
+  /** Validated builder definition; stored as JSON in BUILDER_DEF. */
+  builderDef?: unknown | null;
 };
 
 export const reportUpdateSchema = z.intersection(
@@ -88,7 +92,7 @@ const SORT_SQL: Record<SortKey, string> = {
 };
 
 const COLS = `REPORT_ID, OWNER_ID, REPORT_NAME, DESCRIPTION, CATEGORY, SQL_TEXT, VERSION, CREATED_AT, UPDATED_AT,
-  LAST_EXECUTED_AT, LAST_STATUS, LAST_ROW_COUNT, LAST_DURATION_MS, PARAMETERS_JSON`;
+  LAST_EXECUTED_AT, LAST_STATUS, LAST_ROW_COUNT, LAST_DURATION_MS, PARAMETERS_JSON, BUILDER_DEF`;
 
 type Row = Record<string, unknown>;
 const toReport = (r: Row): Report => ({
@@ -110,9 +114,20 @@ const toReport = (r: Row): Report => ({
       ? null
       : Number(r.LAST_DURATION_MS),
   parameters: parseStoredParameters(r.PARAMETERS_JSON),
+  builderDef: parseBuilderDef(r.BUILDER_DEF),
 });
 
+function parseBuilderDef(raw: unknown): unknown | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return null; // a corrupt definition only disables "Open in Report Builder"
+  }
+}
+
 const paramsJson = (p: ParameterDef[] | undefined) => (p?.length ? JSON.stringify(p) : null);
+const builderJson = (d: unknown) => (d === null || d === undefined ? null : JSON.stringify(d));
 const nameKey = (name: string) => name.trim().toUpperCase();
 const isDuplicate = (e: unknown) =>
   e instanceof DbError && (e.sqlState === '23505' || e.sqlCode === -803);
@@ -208,8 +223,8 @@ export class ReportRepository {
     try {
       await this.db.update(
         `INSERT INTO ${this.table} (REPORT_ID, OWNER_ID, REPORT_NAME, REPORT_NAME_KEY, DESCRIPTION, CATEGORY, SQL_TEXT,
-            PARAMETERS_JSON, VERSION, CREATED_AT, UPDATED_AT, LAST_STATUS)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ${NOW_UTC}, ${NOW_UTC}, 'NEVER')`,
+            PARAMETERS_JSON, BUILDER_DEF, VERSION, CREATED_AT, UPDATED_AT, LAST_STATUS)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ${NOW_UTC}, ${NOW_UTC}, 'NEVER')`,
         [
           id,
           ownerId,
@@ -219,6 +234,7 @@ export class ReportRepository {
           input.category,
           input.sql,
           paramsJson(input.parameters),
+          builderJson(input.builderDef),
         ],
       );
     } catch (e) {
@@ -245,6 +261,7 @@ export class ReportRepository {
       input.category,
       input.sql,
       paramsJson(input.parameters),
+      builderJson(input.builderDef),
       id,
       ownerId,
     ];
@@ -257,7 +274,7 @@ export class ReportRepository {
     try {
       n = await this.db.update(
         `UPDATE ${this.table}
-            SET REPORT_NAME = ?, REPORT_NAME_KEY = ?, DESCRIPTION = ?, CATEGORY = ?, SQL_TEXT = ?, PARAMETERS_JSON = ?,
+            SET REPORT_NAME = ?, REPORT_NAME_KEY = ?, DESCRIPTION = ?, CATEGORY = ?, SQL_TEXT = ?, PARAMETERS_JSON = ?, BUILDER_DEF = ?,
                 VERSION = VERSION + 1, UPDATED_AT = ${NOW_UTC}
           WHERE REPORT_ID = ? AND OWNER_ID = ?${versionClause}`,
         params,

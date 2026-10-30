@@ -27,11 +27,17 @@ import {
   TableSplit,
 } from '@carbon/icons-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
+import { promptable } from '../api/types';
 import type {
+  FilterLogic,
   JoinSuggestion,
   JoinType,
+  ParameterDef,
+  ParameterValues,
+  Report,
+  ReportColumnRef,
   ReportSpec,
   RunResponse,
   SchemaColumn,
@@ -42,7 +48,22 @@ import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
 import { ResultsTable } from '../components/ResultsTable';
 import { SaveReportModal, type SaveValues } from '../components/SaveReportModal';
+import { BuilderFilters, type ColumnChoice } from '../components/BuilderFilters';
+import { BuilderGrouping, type GroupRow } from '../components/BuilderGrouping';
+import { RunParamsModal } from '../components/RunParamsModal';
 import { newExecutionId } from '../utils/format';
+import {
+  aggName,
+  filterProblems,
+  fromFilter,
+  toAggregates,
+  toFilters,
+  toHaving,
+  valueKind,
+  type AggRow,
+  type FilterNode,
+  type HavingRow,
+} from '../utils/builderState';
 
 /** The base table is always `BASE`; joined tables get a generated key. */
 const BASE = 'base';
@@ -59,7 +80,10 @@ interface SortRow extends ColPick {
   /** Stable key so React keeps the right <Select> when rows are added or removed. */
   key: string;
   direction: SortDirection;
+  /** Sort by a total instead of a column: the AggRow key. */
+  agg?: string;
 }
+const AGG_PREFIX = '#total:';
 
 interface CondRow {
   key: string;
@@ -102,7 +126,132 @@ export function describeSelection(spec: ReportSpec): string {
   const cols = spec.columns.length;
   const sorts = spec.sort?.length ?? 0;
   const tables = (spec.joins?.length ?? 0) + 1;
-  return `${cols} column${cols === 1 ? '' : 's'}${tables > 1 ? ` from ${tables} tables` : ''}${sorts ? `, ${sorts} sort key${sorts === 1 ? '' : 's'}` : ''}`;
+  const filters = (spec.filters ?? []).reduce(
+    (n, f) => n + ('filters' in f ? f.filters.length : 1),
+    0,
+  );
+  const totals = spec.aggregates?.length ?? 0;
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  return `${plural(cols, 'column')}${tables > 1 ? ` from ${tables} tables` : ''}${filters ? `, ${plural(filters, 'filter')}` : ''}${totals ? `, ${plural(totals, 'total')}` : ''}${sorts ? `, ${plural(sorts, 'sort key')}` : ''}`;
+}
+
+async function findTable(schema: string, name: string): Promise<SchemaTable> {
+  try {
+    const r = await api.schemaTables(name, 50);
+    const t = r.tables.find((x) => x.schema === schema && x.name === name);
+    if (t) return t;
+  } catch {
+    // fall through: the columns call below reports a real access problem
+  }
+  return { schema, name, type: 'T', typeLabel: 'Table', text: null };
+}
+
+/** Rebuild the page state from a saved spec (exported for tests). */
+export async function hydrate(spec: ReportSpec): Promise<Hydration> {
+  const [table, base] = await Promise.all([
+    findTable(spec.schema, spec.table),
+    api.schemaColumns(spec.schema, spec.table),
+  ]);
+  const joinSpecs = spec.joins ?? [];
+  const joins: JoinedTable[] = await Promise.all(
+    joinSpecs.map(async (j, i) => {
+      const [t, cols] = await Promise.all([
+        findTable(j.schema, j.table),
+        api.schemaColumns(j.schema, j.table),
+      ]);
+      return {
+        key: `J${i + 1}`,
+        table: t,
+        alias: j.alias ?? '',
+        type: j.type,
+        on: [],
+        columns: cols.columns,
+        error: null,
+        suggestions: [],
+        applied: null,
+      };
+    }),
+  );
+  // alias → source key (T1 / base alias → BASE; join i → its alias or T{i+2})
+  const keyOf = new Map<string, string>([['T1', BASE]]);
+  if (spec.alias) keyOf.set(spec.alias.toUpperCase(), BASE);
+  joins.forEach((j, i) => keyOf.set((j.alias || `T${i + 2}`).toUpperCase(), j.key));
+  const src = (t?: string) => (t ? (keyOf.get(t.toUpperCase()) ?? BASE) : BASE);
+  const pick = (r: { table?: string; column: string }) => `${src(r.table)}|${r.column}`;
+  joins.forEach((j, i) => {
+    j.on = joinSpecs[i].on.map((c) => ({
+      key: newExecutionId(),
+      left: `${src(c.left.table)}|${c.left.column}`,
+      right: c.right.column,
+    }));
+  });
+  const picked = spec.columns.map((c) =>
+    typeof c === 'string' ? { src: BASE, column: c } : splitKey(pick(c)),
+  );
+  const aggregates: AggRow[] = (spec.aggregates ?? []).map((a) => ({
+    key: newExecutionId(),
+    fn: a.fn,
+    pick: a.column ? pick({ table: a.table, column: a.column }) : '',
+    name: a.name ?? '',
+  }));
+  const aggKey = new Map(aggregates.map((a) => [a.name.toUpperCase(), a.key]));
+  const sort: SortRow[] = (spec.sort ?? []).map((s) =>
+    s.aggregate
+      ? {
+          key: newExecutionId(),
+          src: BASE,
+          column: '',
+          agg: aggKey.get(s.aggregate.toUpperCase()) ?? '',
+          direction: s.direction,
+        }
+      : {
+          key: newExecutionId(),
+          ...splitKey(pick({ table: s.table, column: s.column ?? '' })),
+          direction: s.direction,
+        },
+  );
+  const filters: FilterNode[] = (spec.filters ?? []).map((f) =>
+    'filters' in f
+      ? {
+          key: newExecutionId(),
+          kind: 'group' as const,
+          logic: f.logic,
+          rows: f.filters.map((x) => fromFilter(x, pick(x), newExecutionId)),
+        }
+      : { kind: 'row' as const, ...fromFilter(f, pick(f), newExecutionId) },
+  );
+  return {
+    table,
+    columns: base.columns,
+    joins,
+    picked,
+    sort,
+    filters,
+    filterLogic: spec.filterLogic ?? 'AND',
+    groupBy: (spec.groupBy ?? []).map((g) => ({ key: newExecutionId(), pick: pick(g) })),
+    aggregates,
+    having: (spec.having ?? []).map((h) => ({
+      key: newExecutionId(),
+      aggregate: aggKey.get(h.aggregate.toUpperCase()) ?? '',
+      op: h.op,
+      value: h.value === null || h.value === undefined ? '' : String(h.value),
+      value2: h.value2 === null || h.value2 === undefined ? '' : String(h.value2),
+    })),
+  };
+}
+
+/** State restored from a saved Report Builder definition, applied once its columns load. */
+interface Hydration {
+  table: SchemaTable;
+  columns: SchemaColumn[];
+  joins: JoinedTable[];
+  picked: ColPick[];
+  sort: SortRow[];
+  filters: FilterNode[];
+  filterLogic: FilterLogic;
+  groupBy: GroupRow[];
+  aggregates: AggRow[];
+  having: HavingRow[];
 }
 
 /**
@@ -112,6 +261,8 @@ export function describeSelection(spec: ReportSpec): string {
  */
 export function ReportBuilderPage() {
   const nav = useNavigate();
+  const [params] = useSearchParams();
+  const reportParam = params.get('report');
 
   const [search, setSearch] = useState('');
   const [tables, setTables] = useState<SchemaTable[] | null>(null);
@@ -129,6 +280,44 @@ export function ReportBuilderPage() {
   const [sort, setSort] = useState<SortRow[]>([]);
   const [joinChoice, setJoinChoice] = useState('');
   const [joinType, setJoinType] = useState<JoinType>('INNER');
+  const [filters, setFilters] = useState<FilterNode[]>([]);
+  const [filterLogic, setFilterLogic] = useState<FilterLogic>('AND');
+  const [groupBy, setGroupBy] = useState<GroupRow[]>([]);
+  const [aggregates, setAggregates] = useState<AggRow[]>([]);
+  const [having, setHaving] = useState<HavingRow[]>([]);
+  const [previewParams, setPreviewParams] = useState<ParameterDef[]>([]);
+  const [askOpen, setAskOpen] = useState(false);
+  const [askErrors, setAskErrors] = useState<Record<string, string> | null>(null);
+  const [lastValues, setLastValues] = useState<ParameterValues | undefined>(undefined);
+
+  /** The saved report being edited ("Open in Report Builder"). */
+  const [source, setSource] = useState<Report | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const hydration = useRef<Hydration | null>(null);
+
+  // "Open in Report Builder": load the saved definition and every table's columns, then
+  // select the base table; the columns effect applies the rest instead of resetting it.
+  useEffect(() => {
+    if (!reportParam) return;
+    let cancelled = false;
+    setLoadError(null);
+    (async () => {
+      const report = await api.getReport(reportParam);
+      if (!report.builderDef) throw new Error('This report was not built with Report Builder.');
+      if (report.builder && !report.builder.valid)
+        throw new Error(report.builder.error ?? 'The saved definition is no longer valid.');
+      const h = await hydrate(report.builderDef.spec);
+      if (cancelled) return;
+      setSource(report);
+      hydration.current = h;
+      setSelected(h.table);
+    })().catch((e) => {
+      if (!cancelled) setLoadError(e);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [reportParam]);
 
   const [sql, setSql] = useState<string>('');
   const [suggestedName, setSuggestedName] = useState('');
@@ -178,6 +367,26 @@ export function ReportBuilderPage() {
       setColumns(null);
       return;
     }
+    setResult(null);
+    setError(null);
+    setNotice(null);
+    const h = hydration.current;
+    if (h && h.table === selected) {
+      // Reopening a saved report: everything was loaded up front.
+      hydration.current = null;
+      setColumnsError(null);
+      setColumnsLoading(false);
+      setColumns(h.columns);
+      setJoins(h.joins);
+      setPicked(h.picked);
+      setSort(h.sort);
+      setFilters(h.filters);
+      setFilterLogic(h.filterLogic);
+      setGroupBy(h.groupBy);
+      setAggregates(h.aggregates);
+      setHaving(h.having);
+      return;
+    }
     let cancelled = false;
     setColumnsLoading(true);
     setColumnsError(null);
@@ -185,10 +394,12 @@ export function ReportBuilderPage() {
     setPicked([]);
     setSort([]);
     setJoins([]);
-    setResult(null);
+    setFilters([]);
+    setFilterLogic('AND');
+    setGroupBy([]);
+    setAggregates([]);
+    setHaving([]);
     setSql('');
-    setError(null);
-    setNotice(null);
     api
       .schemaColumns(selected.schema, selected.name)
       .then((r) => {
@@ -212,16 +423,70 @@ export function ReportBuilderPage() {
     [joins],
   );
 
+  /** A column of the report as the server's reference: alias-qualified once tables are joined. */
+  const refOf = useCallback(
+    (pick: string): ReportColumnRef => {
+      const p = splitKey(pick);
+      return joins.length ? { table: aliasOf(p.src), column: p.column } : { column: p.column };
+    },
+    [joins.length, aliasOf],
+  );
+  const columnOf = useCallback(
+    (pick: string): SchemaColumn | undefined => {
+      if (!pick) return undefined;
+      const p = splitKey(pick);
+      const cols = p.src === BASE ? columns : joins.find((j) => j.key === p.src)?.columns;
+      return cols?.find((c) => c.name === p.column);
+    },
+    [columns, joins],
+  );
+  const kindOf = useCallback((pick: string) => valueKind(columnOf(pick)), [columnOf]);
+  const columnName = useCallback((pick: string) => (pick ? splitKey(pick).column : null), []);
+  const aggNames = useMemo(
+    () => new Map(aggregates.map((a) => [a.key, aggName(a, columnName)])),
+    [aggregates, columnName],
+  );
+
+  /** Filters, grouping and totals (shared by the single-table and joined specs). */
+  const extras = useMemo(() => {
+    const out: Partial<ReportSpec> = {};
+    const f = toFilters(filters, refOf, kindOf);
+    if (f.length) {
+      out.filters = f;
+      out.filterLogic = filterLogic;
+    }
+    const gb = groupBy.filter((g) => g.pick).map((g) => refOf(g.pick));
+    if (gb.length) out.groupBy = gb;
+    if (aggregates.length) out.aggregates = toAggregates(aggregates, refOf, columnName);
+    const h = toHaving(having, (k) => aggNames.get(k));
+    if (h.length && aggregates.length) out.having = h;
+    return out;
+  }, [filters, filterLogic, groupBy, aggregates, having, refOf, kindOf, columnName, aggNames]);
+
+  const sortSpec = useCallback(
+    (qualified: boolean) =>
+      sort
+        .filter((s) => s.column || (s.agg && aggNames.has(s.agg)))
+        .map((s) =>
+          s.agg
+            ? { aggregate: aggNames.get(s.agg)!, direction: s.direction }
+            : qualified
+              ? { table: aliasOf(s.src), column: s.column, direction: s.direction }
+              : { column: s.column, direction: s.direction },
+        ),
+    [sort, aggNames, aliasOf],
+  );
+
   const spec = useMemo<ReportSpec>(() => {
     if (!selected) return { schema: '', table: '', columns: [] };
-    const sorts = sort.filter((s) => s.column);
     if (joins.length === 0)
-      // Single table: the original, unqualified spec (and SQL).
+      // Single table: the original, unqualified spec (and SQL when nothing else is used).
       return {
         schema: selected.schema,
         table: selected.name,
         columns: picked.map((p) => p.column),
-        sort: sorts.map((s) => ({ column: s.column, direction: s.direction })),
+        sort: sortSpec(false),
+        ...extras,
       };
     return {
       schema: selected.schema,
@@ -242,18 +507,22 @@ export function ReportBuilderPage() {
           }),
       })),
       columns: picked.map((p) => ({ table: aliasOf(p.src), column: p.column })),
-      sort: sorts.map((s) => ({ table: aliasOf(s.src), column: s.column, direction: s.direction })),
+      sort: sortSpec(true),
+      ...extras,
     };
-  }, [selected, picked, sort, joins, aliasOf]);
+  }, [selected, picked, joins, aliasOf, extras, sortSpec]);
+
+  const hasOutput = picked.length > 0 || aggregates.length > 0;
 
   // ---- live preview: the server builds the SQL for the current selection ----
   useEffect(() => {
-    if (!selected || picked.length === 0) {
+    if (!selected || !hasOutput) {
       setSql('');
       setSuggestedName('');
       setPreviewing(false);
       setPreviewError(null);
       setWarnings([]);
+      setPreviewParams([]);
       return;
     }
     let cancelled = false;
@@ -268,12 +537,14 @@ export function ReportBuilderPage() {
           setSuggestedName(p.name);
           setPreviewError(null);
           setWarnings(p.warnings ?? []);
+          setPreviewParams(p.parameters ?? []);
         })
         .catch((e) => {
           if (cancelled || (e as Error).name === 'AbortError') return;
           setSql('');
           setPreviewError(e instanceof Error ? e.message : String(e));
           setWarnings([]);
+          setPreviewParams([]);
         })
         .finally(() => !cancelled && setPreviewing(false));
     }, 200);
@@ -282,7 +553,7 @@ export function ReportBuilderPage() {
       clearTimeout(t);
       controller.abort();
     };
-  }, [selected, spec, picked.length]);
+  }, [selected, spec, hasOutput]);
 
   /** Every table of the report with its loaded columns, base first. */
   const sources = useMemo(
@@ -344,7 +615,15 @@ export function ReportBuilderPage() {
   const addSort = () => {
     const used = new Set(sort.map(pickKey));
     const first = picked.find((p) => !used.has(pickKey(p))) ?? picked[0];
-    if (!first) return;
+    if (!first) {
+      const a = aggregates.find((x) => !sort.some((s) => s.agg === x.key)) ?? aggregates[0];
+      if (!a) return;
+      setSort((rows) => [
+        ...rows,
+        { key: newExecutionId(), src: BASE, column: '', agg: a.key, direction: 'DESC' },
+      ]);
+      return;
+    }
     setSort((rows) => [...rows, { key: newExecutionId(), ...first, direction: 'ASC' }]);
     setResult(null);
   };
@@ -464,25 +743,46 @@ export function ReportBuilderPage() {
   });
   const aliasClash = new Set(sources.map((s) => aliasOf(s.key))).size !== sources.length;
 
-  const run = useCallback(async () => {
-    if (runningRef.current || !selected || picked.length === 0) return;
-    runningRef.current = true;
-    const execId = newExecutionId();
-    setRunning(execId);
-    setError(null);
-    setNotice(null);
-    try {
-      const r = await api.runReportBuilder(spec, execId);
-      setResult(r);
-      if (r.builder?.sql) setSql(r.builder.sql);
-    } catch (e) {
-      setError(e);
-      setResult(null);
-    } finally {
-      runningRef.current = false;
-      setRunning(null);
-    }
-  }, [selected, picked.length, spec]);
+  const runWith = useCallback(
+    async (values?: ParameterValues) => {
+      if (runningRef.current || !selected || !hasOutput) return;
+      runningRef.current = true;
+      const execId = newExecutionId();
+      setRunning(execId);
+      setError(null);
+      setNotice(null);
+      try {
+        const r = values
+          ? await api.runReportBuilder(spec, execId, undefined, values)
+          : await api.runReportBuilder(spec, execId);
+        setResult(r);
+        setLastValues(values);
+        setAskOpen(false);
+        setAskErrors(null);
+        if (r.builder?.sql) setSql(r.builder.sql);
+      } catch (e) {
+        // Bad prompt values come back per field; keep the prompt open for them.
+        const fields = e instanceof ApiError ? e.fields : undefined;
+        if (askOpen && fields) setAskErrors(fields);
+        else {
+          setAskOpen(false);
+          setError(e);
+        }
+        setResult(null);
+      } finally {
+        runningRef.current = false;
+        setRunning(null);
+      }
+    },
+    [selected, hasOutput, spec, askOpen],
+  );
+  const asks = promptable(previewParams);
+  const run = () => {
+    if (asks.length) {
+      setAskErrors(null);
+      setAskOpen(true);
+    } else void runWith();
+  };
 
   const cancel = async () => {
     if (!running) return;
@@ -493,19 +793,24 @@ export function ReportBuilderPage() {
     }
   };
 
+  const [saveMode, setSaveMode] = useState<'new' | 'update'>('new');
   const save = async (v: SaveValues) => {
     setSaving(true);
     setSaveError(null);
     try {
-      const report = await api.createReport({
+      const input = {
         name: v.name,
         description: v.description || null,
         category: v.category || null,
-        // The saved report stores the generated SQL; the builder definition is not
-        // persisted (see docs/report-builder.md, "Joins").
+        // The server re-validates the definition and regenerates SQL and parameters from it.
         sql,
-        parameters: [],
-      });
+        parameters: previewParams,
+        builderDef: { version: 1 as const, spec },
+      };
+      const report =
+        saveMode === 'update' && source
+          ? await api.updateReport(source.id, { ...input, version: source.version })
+          : await api.createReport(input);
       setSaveOpen(false);
       nav(`/reports/${report.id}`);
     } catch (e) {
@@ -772,14 +1077,38 @@ export function ReportBuilderPage() {
     </section>
   );
 
+  // ---- filters, grouping and totals ----
+  const columnChoices: ColumnChoice[] = sources.map((src) => ({
+    label: joined ? `${aliasOf(src.key)} · ${src.table.name}` : src.table.name,
+    items: src.columns.map((c) => ({
+      value: `${src.key}|${c.name}`,
+      text: joined ? `${aliasOf(src.key)}.${c.name}` : c.name,
+    })),
+  }));
+  const pickLabel = (pick: string) => (pick ? label(splitKey(pick)) : '');
+  const grouping = groupBy.length > 0 || aggregates.length > 0;
+  const groupKeys = new Set(groupBy.map((g) => g.pick));
+  const autoGrouped = grouping
+    ? picked.filter((p) => !groupKeys.has(pickKey(p))).map((p) => label(p))
+    : [];
+  const filterRows = filters.flatMap((n) => (n.kind === 'row' ? [n] : n.rows));
+  const filterIssues = filterRows
+    .map((r) => filterProblems(r, kindOf(r.pick)))
+    .filter((x): x is string => Boolean(x));
+
   const canRun =
-    Boolean(selected) && picked.length > 0 && !running && joinProblems.length === 0 && !aliasClash;
+    Boolean(selected) &&
+    hasOutput &&
+    !running &&
+    joinProblems.length === 0 &&
+    !aliasClash &&
+    filterIssues.length === 0;
   const pickerHint = !selected
     ? 'Pick a table to see its columns.'
     : columnsLoading
       ? 'Reading columns…'
-      : picked.length === 0
-        ? 'Tick at least one column.'
+      : !hasOutput
+        ? 'Tick at least one column or add a total.'
         : describeSelection(spec);
 
   return (
@@ -787,6 +1116,11 @@ export function ReportBuilderPage() {
       <div className="qf-page-header">
         <div>
           <h1>Report Builder</h1>
+          {source && (
+            <p className="qf-muted" data-testid="builder-source">
+              Editing saved report <strong>{source.name}</strong>
+            </p>
+          )}
           <p>
             Choose a table the reporting profile can read, pick the fields, set the sort order, and
             Uncle Bob builds the read-only SELECT for you.
@@ -797,6 +1131,7 @@ export function ReportBuilderPage() {
         </Tag>
       </div>
 
+      {loadError !== null && <ErrorNotice error={loadError} onClose={() => setLoadError(null)} />}
       <div className="qf-builder">
         <section className="qf-builder__tables" aria-label="Tables">
           <Search
@@ -999,15 +1334,36 @@ export function ReportBuilderPage() {
                               id={`qb-sort-col-${row.key}`}
                               labelText={`Sort ${i + 1} column`}
                               size="sm"
-                              value={pickKey(row)}
-                              onChange={(e: { target: { value: string } }) =>
+                              value={row.agg ? `${AGG_PREFIX}${row.agg}` : pickKey(row)}
+                              onChange={(e: { target: { value: string } }) => {
+                                const v = e.target.value;
                                 setSort((rows) =>
                                   rows.map((r) =>
-                                    r.key === row.key ? { ...r, ...splitKey(e.target.value) } : r,
+                                    r.key !== row.key
+                                      ? r
+                                      : v.startsWith(AGG_PREFIX)
+                                        ? {
+                                            ...r,
+                                            src: BASE,
+                                            column: '',
+                                            agg: v.slice(AGG_PREFIX.length),
+                                          }
+                                        : { ...r, ...splitKey(v), agg: undefined },
                                   ),
-                                )
-                              }
+                                );
+                              }}
                             >
+                              {aggregates.length > 0 && (
+                                <SelectItemGroup label="Totals">
+                                  {aggregates.map((a) => (
+                                    <SelectItem
+                                      key={a.key}
+                                      value={`${AGG_PREFIX}${a.key}`}
+                                      text={aggNames.get(a.key) ?? ''}
+                                    />
+                                  ))}
+                                </SelectItemGroup>
+                              )}
                               {joined
                                 ? sources.map((src) => (
                                     <SelectItemGroup
@@ -1066,13 +1422,45 @@ export function ReportBuilderPage() {
                         kind="ghost"
                         size="sm"
                         renderIcon={Add}
-                        disabled={picked.length === 0 || sort.length >= 16}
+                        disabled={!hasOutput || sort.length >= 16}
                         onClick={addSort}
                       >
                         Add sort column
                       </Button>
                     </div>
                   </div>
+                  <BuilderFilters
+                    nodes={filters}
+                    logic={filterLogic}
+                    columns={columnChoices}
+                    kindOf={kindOf}
+                    nameOf={pickLabel}
+                    onChange={(n) => {
+                      setFilters(n);
+                      setResult(null);
+                    }}
+                    onLogic={setFilterLogic}
+                  />
+                  <BuilderGrouping
+                    groupBy={groupBy}
+                    aggregates={aggregates}
+                    having={having}
+                    columns={columnChoices}
+                    kindOf={kindOf}
+                    columnName={columnName}
+                    autoGrouped={autoGrouped}
+                    onGroupBy={(g) => {
+                      setGroupBy(g);
+                      setResult(null);
+                    }}
+                    onAggregates={(a) => {
+                      setAggregates(a);
+                      const keys = new Set(a.map((x) => x.key));
+                      setSort((rows) => rows.filter((r) => !r.agg || keys.has(r.agg)));
+                      setResult(null);
+                    }}
+                    onHaving={setHaving}
+                  />
                 </>
               )}
             </>
@@ -1092,12 +1480,12 @@ export function ReportBuilderPage() {
             </CodeSnippet>
           ) : (
             <p className="qf-muted">
-              {picked.length === 0
-                ? 'Choose at least one column to see the SELECT statement.'
+              {!hasOutput
+                ? 'Choose at least one column or total to see the SELECT statement.'
                 : 'The server could not build a statement for this selection.'}
             </p>
           )}
-          {!sql && previewError && picked.length > 0 && (
+          {!sql && previewError && hasOutput && (
             <p className="qf-error-text" role="alert">
               {previewError}
             </p>
@@ -1112,6 +1500,11 @@ export function ReportBuilderPage() {
               subtitle={w}
             />
           ))}
+          {asks.length > 0 && sql && (
+            <p className="qf-muted" data-testid="builder-asks">
+              Asks when run: {asks.map((a) => a.label || a.name).join(', ')}
+            </p>
+          )}
           {sql && (
             <p className="qf-muted">
               <SortDescending size={16} /> Built and validated on the server from the catalog;
@@ -1133,16 +1526,36 @@ export function ReportBuilderPage() {
             </Button>
           </>
         )}
+        {filterIssues.length > 0 && (
+          <span className="qf-error-text" role="status">
+            Fix the filters first: {filterIssues[0]}
+          </span>
+        )}
+        {source && (
+          <Button
+            kind="primary"
+            renderIcon={Save}
+            disabled={!sql || Boolean(running) || previewing || filterIssues.length > 0}
+            onClick={() => {
+              setSaveMode('update');
+              setSaveError(null);
+              setSaveOpen(true);
+            }}
+          >
+            Save changes
+          </Button>
+        )}
         <Button
           kind="secondary"
           renderIcon={Save}
-          disabled={!sql || Boolean(running) || previewing}
+          disabled={!sql || Boolean(running) || previewing || filterIssues.length > 0}
           onClick={() => {
+            setSaveMode('new');
             setSaveError(null);
             setSaveOpen(true);
           }}
         >
-          Save as report
+          {source ? 'Save as new report' : 'Save as report'}
         </Button>
       </div>
 
@@ -1161,7 +1574,13 @@ export function ReportBuilderPage() {
             result={result}
             toolbar={
               <ExportButton
-                source={{ sql, name: suggestedName || selected?.name || 'Report' }}
+                source={{
+                  sql,
+                  name: suggestedName || selected?.name || 'Report',
+                  ...(previewParams.length
+                    ? { parameters: previewParams, values: lastValues }
+                    : {}),
+                }}
                 disabled={Boolean(running)}
                 onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
                 onDone={(i) =>
@@ -1177,14 +1596,22 @@ export function ReportBuilderPage() {
 
       <SaveReportModal
         open={saveOpen}
-        title="Save as report"
-        initial={{
-          name: suggestedName || (selected ? selected.name : ''),
-          description: selected
-            ? `Built with Report Builder from ${selected.schema}.${selected.name}.`
-            : '',
-          category: '',
-        }}
+        title={saveMode === 'update' ? 'Save changes' : 'Save as report'}
+        initial={
+          saveMode === 'update' && source
+            ? {
+                name: source.name,
+                description: source.description ?? '',
+                category: source.category ?? '',
+              }
+            : {
+                name: suggestedName || (selected ? selected.name : ''),
+                description: selected
+                  ? `Built with Report Builder from ${selected.schema}.${selected.name}.`
+                  : '',
+                category: '',
+              }
+        }
         saving={saving}
         error={saveError}
         onClose={() => {
@@ -1192,6 +1619,16 @@ export function ReportBuilderPage() {
           setSaveError(null);
         }}
         onSave={save}
+      />
+      <RunParamsModal
+        open={askOpen}
+        title="Run report"
+        parameters={previewParams}
+        initial={lastValues}
+        primaryText="Run"
+        serverErrors={askErrors}
+        onClose={() => setAskOpen(false)}
+        onSubmit={(v) => void runWith(v)}
       />
     </>
   );

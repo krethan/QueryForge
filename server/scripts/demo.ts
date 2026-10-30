@@ -275,8 +275,8 @@ function script(sql: string, parameters?: unknown[]): Scripted {
     return { columns: [col('X', 'INTEGER')], rows: [[1]] };
   const catalog = catalogScript(s, parameters);
   if (catalog) return catalog;
-  const joined = joinedScript(sql);
-  if (joined) return joined;
+  const built = builderScript(sql, parameters);
+  if (built) return built;
   return shaped(dataScript(sql), sql);
 }
 
@@ -284,12 +284,12 @@ const ident = String.raw`"((?:[^"]|"")*)"`;
 const unq = (x: string) => x.replace(/""/g, '"');
 
 /**
- * Evaluate a Report Builder JOIN statement over the fake tables, so joined demo
- * results are consistent (ORDERS.CUSTNO really matches CUSTOMERS.CUSTNO, …).
- * Only the shape the server builds is understood: aliased tables and `a.x = b.y`.
+ * Evaluate a Report Builder statement in its aliased form over the fake tables, so
+ * demo results are consistent: joins really match (ORDERS.CUSTNO = CUSTOMERS.CUSTNO),
+ * filters use the bound parameter values, and GROUP BY / totals / HAVING / ORDER BY
+ * are computed. Only the shapes the server builds are understood.
  */
-function joinedScript(sql: string): Scripted | null {
-  if (!/\n(INNER|LEFT OUTER|RIGHT OUTER|FULL OUTER) JOIN /.test(sql)) return null;
+function builderScript(sql: string, parameters: unknown[] = []): Scripted | null {
   const head = new RegExp(String.raw`^SELECT ([\s\S]+?)\nFROM ${ident}\.${ident} AS ${ident}`).exec(
     sql,
   );
@@ -306,8 +306,9 @@ function joinedScript(sql: string): Scripted | null {
   let rows = first.rows;
   const allCols = [...first.cols];
   let leftKeys = first.cols.map((c) => c.key);
+  const clauseEnd = String.raw`(?=\n(?:INNER|LEFT|RIGHT|FULL|WHERE|GROUP BY|HAVING|ORDER BY)|$)`;
   const joinRe = new RegExp(
-    String.raw`\n(INNER|LEFT OUTER|RIGHT OUTER|FULL OUTER) JOIN ${ident}\.${ident} AS ${ident}\n  ON ([\s\S]+?)(?=\n(?:INNER|LEFT|RIGHT|FULL|ORDER BY)|$)`,
+    String.raw`\n(INNER|LEFT OUTER|RIGHT OUTER|FULL OUTER) JOIN ${ident}\.${ident} AS ${ident}\n  ON ([\s\S]+?)${clauseEnd}`,
     'g',
   );
   const condRe = new RegExp(String.raw`${ident}\.${ident} = ${ident}\.${ident}`, 'g');
@@ -347,18 +348,47 @@ function joinedScript(sql: string): Scripted | null {
     allCols.push(...right.cols);
     leftKeys = allCols.map((c) => c.key);
   }
-  const items = [
-    ...head[1].matchAll(new RegExp(String.raw`${ident}\.${ident}(?: AS ${ident})?`, 'g')),
-  ].map((x) => ({ key: `${unq(x[1])}.${unq(x[2])}`, name: unq(x[3] ?? x[2]) }));
-  const order = /\nORDER BY ([\s\S]+)$/.exec(sql);
-  if (order) {
-    const keys = [
-      ...order[1].matchAll(new RegExp(String.raw`${ident}\.${ident} (ASC|DESC)`, 'g')),
-    ].map((x) => ({ key: `${unq(x[1])}.${unq(x[2])}`, dir: x[3] === 'DESC' ? -1 : 1 }));
-    rows = [...rows].sort((a, b) => {
+  const clause = (kw: string) =>
+    new RegExp(String.raw`\n${kw} ([\s\S]+?)${clauseEnd}`).exec(sql)?.[1] ?? null;
+  const whereSql = clause('WHERE');
+  const groupSql = clause('GROUP BY');
+  const havingSql = clause('HAVING');
+  const orderSql = clause('ORDER BY');
+
+  // Bound values are consumed in marker order: SELECT has none, then WHERE, then HAVING.
+  let pi = 0;
+  const where = whereSql ? parseExpr(whereSql, () => parameters[pi++]) : null;
+  const having = havingSql ? parseExpr(havingSql, () => parameters[pi++]) : null;
+  const items = splitTop(head[1]).map((it) => {
+    const m = new RegExp(String.raw`^([\s\S]+?)(?: AS ${ident})?$`).exec(it.trim())!;
+    const e = parseExpr(m[1], () => null);
+    const name = m[2] ? unq(m[2]) : (e.ref?.split('.')[1] ?? it.trim());
+    return { e, name };
+  });
+  if (where) rows = rows.filter((r) => truthy(where.eval([r])));
+
+  // groups: GROUP BY keys, or one group of everything when there are totals only
+  const hasAgg = items.some((i) => i.e.agg);
+  let groups: Row[][];
+  if (groupSql) {
+    const keys = splitTop(groupSql).map((g) => parseExpr(g, () => null));
+    const by = new Map<string, Row[]>();
+    for (const r of rows) {
+      const k = JSON.stringify(keys.map((e) => e.eval([r])));
+      by.set(k, [...(by.get(k) ?? []), r]);
+    }
+    groups = [...by.values()];
+  } else groups = hasAgg ? [rows] : rows.map((r) => [r]);
+  if (having) groups = groups.filter((g) => truthy(having.eval(g)));
+  if (orderSql) {
+    const keys = splitTop(orderSql).map((k) => {
+      const m = /^([\s\S]+) (ASC|DESC)$/.exec(k.trim())!;
+      return { e: parseExpr(m[1], () => null), dir: m[2] === 'DESC' ? -1 : 1 };
+    });
+    groups = [...groups].sort((a, b) => {
       for (const k of keys) {
-        const x = a.get(k.key);
-        const y = b.get(k.key);
+        const x = k.e.eval(a);
+        const y = k.e.eval(b);
         if (x === y) continue;
         if (x === null || x === undefined) return 1;
         if (y === null || y === undefined) return -1;
@@ -373,12 +403,225 @@ function joinedScript(sql: string): Scripted | null {
   }
   return {
     columns: items.map((it) => {
-      const c = allCols.find((a) => a.key === it.key)?.col ?? col(it.name, 'VARCHAR', 40);
+      const src = it.e.ref ? allCols.find((a) => a.key === it.e.ref)?.col : undefined;
+      const c = it.e.agg
+        ? it.e.agg === 'COUNT'
+          ? col(it.name, 'INTEGER')
+          : it.e.agg === 'AVG' || it.e.agg === 'SUM'
+            ? col(it.name, 'DECIMAL', 15, 2)
+            : (src ?? col(it.name, 'VARCHAR', 40))
+        : (src ?? col(it.name, 'VARCHAR', 40));
       return { ...c, name: it.name };
     }),
-    rows: rows.map((r) => items.map((it) => (r.get(it.key) ?? null) as never)),
+    rows: groups.map((g) => items.map((it) => (it.e.eval(g) ?? null) as never)),
     delayMs: 80,
   };
+}
+
+/** Split on top-level commas (outside parentheses and quotes). */
+function splitTop(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let q: string | null = null;
+  let cur = '';
+  for (const ch of text) {
+    if (q) {
+      if (ch === q) q = null;
+    } else if (ch === '"' || ch === "'") q = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === ',' && depth === 0) {
+      out.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+type Val = unknown;
+interface Expr {
+  /** Evaluated over a group of rows (a single row is a group of one). */
+  eval(rows: Map<string, unknown>[]): Val;
+  ref?: string;
+  agg?: string;
+}
+const truthy = (v: Val) => v === true;
+const num = (v: Val) => (typeof v === 'number' ? v : Number(v));
+function cmp(a: Val, b: Val): number | null {
+  if (a === null || a === undefined || b === null || b === undefined) return null;
+  if (typeof a === 'number' || typeof b === 'number') return num(a) - num(b);
+  return String(a).trimEnd().localeCompare(String(b).trimEnd());
+}
+function likeRe(pattern: string) {
+  let re = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\') re += (pattern[++i] ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    else if (ch === '%') re += '.*';
+    else if (ch === '_') re += '.';
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`, 's');
+}
+
+/** Tiny recursive-descent parser for the predicates and operands the builder writes. */
+function parseExpr(text: string, nextParam: () => unknown): Expr {
+  const toks = [
+    ...text.matchAll(
+      /"((?:[^"]|"")*)"|'((?:[^']|'')*)'|<>|<=|>=|[=<>(),.*?]|[A-Za-z_][A-Za-z0-9_]*|\S/g,
+    ),
+  ].map((m) =>
+    m[1] !== undefined
+      ? { id: unq(m[1]) }
+      : m[2] !== undefined
+        ? { str: m[2] }
+        : { kw: m[0].toUpperCase() },
+  );
+  let i = 0;
+  const peek = (k: string) => (toks[i] as { kw?: string })?.kw === k;
+  const take = (k: string) => {
+    if (!peek(k)) throw new Error(`demo SQL: expected ${k} in ${text}`);
+    i++;
+  };
+  const first = (rows: Map<string, unknown>[]) => rows[0];
+  const operand = (): Expr => {
+    const t = toks[i++] as { id?: string; kw?: string };
+    if (t.kw === '?') {
+      const v = nextParam();
+      return { eval: () => v };
+    }
+    if (t.id !== undefined) {
+      take('.');
+      const c = (toks[i++] as { id: string }).id;
+      const key = `${t.id}.${c}`;
+      return { ref: key, eval: (rows) => first(rows)?.get(key) ?? null };
+    }
+    if (t.kw && ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'].includes(t.kw)) {
+      const fn = t.kw;
+      take('(');
+      if (peek('*')) {
+        i++;
+        take(')');
+        return { agg: 'COUNT', eval: (rows) => rows.length };
+      }
+      const distinct = peek('DISTINCT') ? (i++, true) : false;
+      const inner = operand();
+      take(')');
+      return {
+        agg: fn,
+        eval: (rows) => {
+          let vals = rows.map((r) => inner.eval([r])).filter((v) => v !== null && v !== undefined);
+          if (distinct) vals = [...new Set(vals.map((v) => String(v)))];
+          if (fn === 'COUNT') return vals.length;
+          if (!vals.length) return null;
+          if (fn === 'SUM' || fn === 'AVG') {
+            const sum = vals.reduce((a: number, v) => a + num(v), 0);
+            return Math.round((fn === 'SUM' ? sum : sum / vals.length) * 100) / 100;
+          }
+          return vals.reduce((a, v) => ((cmp(v, a) ?? 0) * (fn === 'MIN' ? -1 : 1) > 0 ? v : a));
+        },
+      };
+    }
+    throw new Error(`demo SQL: unexpected ${JSON.stringify(t)} in ${text}`);
+  };
+  const predicate = (): Expr => {
+    if (peek('(')) {
+      i++;
+      const e = or();
+      take(')');
+      return e;
+    }
+    const a = operand();
+    const op = (toks[i++] as { kw: string }).kw;
+    if (op === 'IS') {
+      const not = peek('NOT') ? (i++, true) : false;
+      take('NULL');
+      return { eval: (r) => (a.eval(r) === null || a.eval(r) === undefined) !== not };
+    }
+    if (op === 'BETWEEN') {
+      const lo = operand();
+      take('AND');
+      const hi = operand();
+      return {
+        eval: (r) => {
+          const x = a.eval(r);
+          const l = cmp(x, lo.eval(r));
+          const h = cmp(x, hi.eval(r));
+          return l !== null && h !== null && l >= 0 && h <= 0;
+        },
+      };
+    }
+    if (op === 'IN') {
+      take('(');
+      const list = [operand()];
+      while (peek(',')) {
+        i++;
+        list.push(operand());
+      }
+      take(')');
+      return { eval: (r) => list.some((e) => cmp(a.eval(r), e.eval(r)) === 0) };
+    }
+    if (op === 'LIKE') {
+      const p = operand();
+      take('ESCAPE');
+      i++; // '\'
+      return {
+        eval: (r) => {
+          const v = a.eval(r);
+          return (
+            v !== null && v !== undefined && likeRe(String(p.eval(r))).test(String(v).trimEnd())
+          );
+        },
+      };
+    }
+    const b = operand();
+    const test: Record<string, (c: number) => boolean> = {
+      '=': (c) => c === 0,
+      '<>': (c) => c !== 0,
+      '<': (c) => c < 0,
+      '<=': (c) => c <= 0,
+      '>': (c) => c > 0,
+      '>=': (c) => c >= 0,
+    };
+    return {
+      eval: (r) => {
+        const c = cmp(a.eval(r), b.eval(r));
+        return c !== null && test[op](c);
+      },
+    };
+  };
+  const and = (): Expr => {
+    let e = predicate();
+    while (peek('AND')) {
+      i++;
+      const l = e;
+      const r = predicate();
+      e = { eval: (x) => truthy(l.eval(x)) && truthy(r.eval(x)) };
+    }
+    return e;
+  };
+  const or = (): Expr => {
+    let e = and();
+    while (peek('OR')) {
+      i++;
+      const l = e;
+      const r = and();
+      e = { eval: (x) => truthy(l.eval(x)) || truthy(r.eval(x)) };
+    }
+    return e;
+  };
+  // SELECT items / GROUP BY keys / ORDER BY keys are single operands
+  const startsPredicate = toks.some((t) =>
+    ['=', '<>', '<', '<=', '>', '>=', 'IS', 'BETWEEN', 'IN', 'LIKE'].includes(
+      (t as { kw?: string }).kw ?? '',
+    ),
+  );
+  const e = startsPredicate ? or() : operand();
+  if (i !== toks.length) throw new Error(`demo SQL: trailing tokens in ${text}`);
+  return e;
 }
 
 function dataScript(sql: string): Scripted {

@@ -504,3 +504,44 @@ body {
   padding-left: 1rem;
   list-style: disc;
 }
+
+// Report Builder filters, grouping and totals
+.qf-builder__filters,
+.qf-builder__grouping {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--cds-border-subtle);
+}
+.qf-builder__h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem;
+}
+.qf-filter-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.5rem;
+  align-items: end;
+  margin-bottom: 0.75rem;
+}
+.qf-filter-row--ask {
+  background: var(--cds-layer-accent-01, #e0e0e0);
+  padding: 0.5rem;
+}
+.qf-filter-row__problem {
+  grid-column: 1 / -1;
+  font-size: 0.75rem;
+  margin: 0;
+}
+.qf-filter-group {
+  border-left: 3px solid var(--cds-border-interactive, #0f62fe);
+  padding: 0.5rem 0 0.5rem 0.75rem;
+  margin: 0.5rem 0 1rem;
+}
+.qf-builder__agg-row {
+  display: grid;
+  grid-template-columns: 10rem minmax(9rem, 1fr) minmax(9rem, 1fr) auto;
+  gap: 0.5rem;
+  align-items: end;
+  margin-bottom: 0.5rem;
+}

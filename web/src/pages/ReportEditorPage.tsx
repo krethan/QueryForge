@@ -1,5 +1,13 @@
 import { Button, InlineLoading, InlineNotification, Loading, Modal, Tag } from '@carbon/react';
-import { Erase, Play, Save, Share as ShareIcon, StopFilled, Time } from '@carbon/icons-react';
+import {
+  DataTable as DataTableIcon,
+  Erase,
+  Play,
+  Save,
+  Share as ShareIcon,
+  StopFilled,
+  Time,
+} from '@carbon/icons-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
@@ -124,7 +132,7 @@ export function ReportEditorPage() {
 
   // Parameterized reports show the Carbon run form first.
   const run = useCallback(() => {
-    if (defs.length > 0) setAskParams(true);
+    if (defs.some((d) => !d.fixed)) setAskParams(true);
     else void runWith();
   }, [defs, runWith]);
 
@@ -213,6 +221,24 @@ export function ReportEditorPage() {
             )}
           </p>
         </div>
+        {report?.builderDef && (
+          <div>
+            <Button
+              kind="tertiary"
+              size="sm"
+              renderIcon={DataTableIcon}
+              disabled={report.builder?.valid === false}
+              onClick={() => nav(`/report-builder?report=${encodeURIComponent(report.id)}`)}
+            >
+              Open in Report Builder
+            </Button>
+            {report.builder?.valid === false && (
+              <div className="qf-error-text" role="alert">
+                The saved builder definition no longer matches the catalog: {report.builder.error}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <SqlEditor
         labelId="editor-title"

@@ -176,8 +176,8 @@ add one or more sort keys with ASC/DESC, and Uncle Bob generates and runs the `S
 ```
 GET  /api/schema/tables                                 ?search=…&limit=…
 GET  /api/schema/tables/:schema/:table/columns
-POST /api/schema/sql                                    { schema, table, columns, sort }
-POST /api/schema/run                                    { schema, table, columns, sort, executionId }
+POST /api/schema/sql                                    { schema, table, columns, sort, filters, groupBy, aggregates, having }
+POST /api/schema/run                                    { …spec, executionId, values }
 POST /api/schema/join-suggestions                       { tables: [{ alias, schema, table }], schema, table }
 ```
 
@@ -195,7 +195,7 @@ POST /api/schema/join-suggestions                       { tables: [{ alias, sche
   identifiers (`"NAME"`, embedded quotes doubled), always schema-qualified. `ORDER BY` only accepts `ASC`/`DESC`
   literals chosen from the UI. Preview (`POST /api/schema/sql`) and Run (`POST /api/schema/run`) build the same
   statement; the built SQL is validated once more before execution.
-- **Save as report** creates a normal saved report from the generated SQL (no parameters) and opens its editor,
+- **Save as report** creates a normal saved report from the generated SQL (plus any filter parameters) and opens its editor,
   so it shows up in _Saved Reports_, can be shared, scheduled and exported like any other report.
 
 ### Joining tables
@@ -218,11 +218,48 @@ can be joined to itself under a different alias (for example `EMPLOYEES E` joine
   mismatches in `ON` are rejected (DATE vs TIMESTAMP is allowed with a warning). The browser still never sends SQL.
 - Joins can multiply rows (one result row per match); the UI says so, and results are still paged with
   _Load more_ like any other query.
-- **Save as report** stores the generated SQL. The builder definition (tables, aliases, conditions) is _not_
-  persisted, so a saved joined report is edited as SQL afterwards.
+- Joined columns, filters, groups and totals are all alias-qualified the same way.
 
-Limitations: no filters, aggregates or expressions, and joins only on column equality; the builder definition
-is not saved with the report (no migration was added for it). Views, logical files, aliases
+### Filters
+
+**Add filter** adds a `WHERE` row: column, condition and a type-aware value input (number keypad for numeric
+columns, a date picker for `DATE`, one value per line for _is one of_). Conditions: `=`, `<>`, `<`, `<=`, `>`,
+`>=`, `BETWEEN`, `IN`, _contains_ / _starts with_ / _ends with_ (`LIKE … ESCAPE`, text columns only), _is empty_
+(`IS NULL`) and _is not empty_. The top level is either all **AND** or all **OR** (_Rows must match_), with one
+optional level of **groups** (`Add group`), each AND or OR. Limits: 30 filters, 10 groups, 100 `IN` values,
+1000 characters per value.
+
+- **Every value is bound with `?`**; the server never splices a value into the SQL. Fixed values travel as
+  hidden report parameters named `QF_F1`, `QF_F2`, … (`QF_H…` for totals); the `QF_` prefix is reserved and they
+  are never shown in run prompts. For `LIKE`, the server escapes `%`, `_` and the escape character, then adds
+  the wildcards.
+- **Ask when run** turns a filter into a normal report parameter (name, prompt and optional default): the Run
+  button then shows the usual parameter dialog, and a saved report prompts like any hand-written one. `BETWEEN`
+  creates two parameters, `NAME_FROM` and `NAME_TO`.
+
+### Grouping and totals
+
+**Group & totals** adds `GROUP BY` columns and totals: `COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `AVG`, `MIN`
+and `MAX`, each with a friendly column name (letters, digits, `_` and spaces; defaults such as `Sum of AMOUNT`).
+`SUM`/`AVG` are only offered (and only accepted by the server) for numeric columns. Selected columns that are not
+totals are added to `GROUP BY` automatically. **Total filters** become `HAVING` conditions with bound values, and
+sort keys can be a total (`ORDER BY SUM(…) DESC`).
+
+### Saving and reopening (migration 004)
+
+**Save as report** stores the generated SQL _and_ the builder definition (`{ version: 1, spec }`) in
+`QF_REPORTS.BUILDER_DEF` (`CLOB(1M)`, migration `004_report_builder_def.sql`). On every save the server
+re-validates the definition against the catalog and regenerates the SQL and parameters itself; the SQL the browser
+sends is ignored for builder reports. Reports written as SQL keep working unchanged (`BUILDER_DEF` is `NULL`).
+
+**Open in Report Builder** (report editor header) reopens a builder report as editable at
+`/report-builder?report=ID`, with _Save changes_ (same report, optimistic version check) and _Save as new report_.
+If a table or column has since disappeared, the button is disabled and shows the server's reason. See
+[`docs/IBMI_SETUP.md`](docs/IBMI_SETUP.md#migration-004--report-builder-definitions) for applying the migration (no new grants needed).
+
+Limitations: joins only on column equality; no computed columns or expressions; one level of filter groups;
+filters on totals only compare numbers; changing a builder report's SQL by hand in the SQL editor detaches it
+from the builder (the definition is dropped on that save, so it can no longer be reopened in the builder). Views, logical files, aliases
 and MQTs are listed alongside physical tables, and whether they are read-only depends on the object itself;
 LOB/XML/DATALINK/ROWID columns are listed but may be awkward to display; the table list is cached for
 `CATALOG_CACHE_TTL_MS`, so new objects/grants appear after that; mixed-case or system-named objects are emitted

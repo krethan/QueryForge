@@ -13,7 +13,18 @@ import {
   parameterListSchema,
   parameterValuesSchema,
   resolveParameters,
+  type ParameterDef,
 } from '../reports/parameters.js';
+import {
+  AGGREGATE_FNS,
+  FILTER_OPS,
+  HAVING_OPS,
+  MAX_AGGREGATES,
+  MAX_FILTERS,
+  MAX_HAVING,
+  MAX_IN_VALUES,
+  MAX_VALUE_LENGTH,
+} from '../catalog/filter-builder.js';
 import { validateCron } from '../scheduler/cron.js';
 import type { Scheduler } from '../scheduler/scheduler.js';
 import {
@@ -87,7 +98,34 @@ const executeSchema = z.object({
  */
 const name128 = z.string().min(1).max(128);
 const alias = z.string().min(1).max(10);
-const reportSpecSchema = z.object({
+const columnRef = z.object({ table: alias.optional(), column: name128 });
+const scalar = z.union([z.string().max(MAX_VALUE_LENGTH), z.number()]);
+const filterSchema = z.object({
+  table: alias.optional(),
+  column: name128,
+  op: z.enum(FILTER_OPS),
+  value: scalar.nullable().optional(),
+  value2: scalar.nullable().optional(),
+  // a little over the limit so the builder can report it with a clear message
+  values: z
+    .array(scalar)
+    .max(MAX_IN_VALUES + 1)
+    .optional(),
+  ask: z
+    .object({
+      name: z.string().max(30),
+      label: z.string().max(80),
+      defaultValue: scalar.nullable().optional(),
+      defaultValue2: scalar.nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+const filterGroupSchema = z.object({
+  logic: z.enum(['AND', 'OR']),
+  filters: z.array(filterSchema).min(1).max(MAX_FILTERS),
+});
+const reportSpecBase = z.object({
   schema: name128,
   table: name128,
   /** Correlation name of the base table (generated as T1 when omitted). */
@@ -113,20 +151,59 @@ const reportSpecSchema = z.object({
     .optional(),
   columns: z
     .array(z.union([name128, z.object({ table: alias.optional(), column: name128 })]))
-    .min(1)
     .max(400),
   sort: z
     .array(
       z.object({
         table: alias.optional(),
-        column: name128,
+        column: name128.optional(),
+        aggregate: z.string().min(1).max(64).optional(),
         direction: z.enum(['ASC', 'DESC']),
       }),
     )
     .max(50)
     .optional(),
+  filters: z
+    .array(z.union([filterSchema, filterGroupSchema]))
+    .max(MAX_FILTERS)
+    .optional(),
+  filterLogic: z.enum(['AND', 'OR']).optional(),
+  groupBy: z.array(columnRef).max(100).optional(),
+  aggregates: z
+    .array(
+      z.object({
+        fn: z.enum(AGGREGATE_FNS),
+        table: alias.optional(),
+        column: name128.nullable().optional(),
+        name: z.string().max(64).optional(),
+      }),
+    )
+    .max(MAX_AGGREGATES)
+    .optional(),
+  having: z
+    .array(
+      z.object({
+        aggregate: z.string().min(1).max(64),
+        op: z.enum(HAVING_OPS),
+        value: scalar.nullable(),
+        value2: scalar.nullable().optional(),
+      }),
+    )
+    .max(MAX_HAVING)
+    .optional(),
 });
-const builderQuerySchema = reportSpecSchema.extend({ executionId: uuid.optional() });
+const needsOutput = (s: { columns: unknown[]; aggregates?: unknown[] }, ctx: z.RefinementCtx) => {
+  if (s.columns.length === 0 && !s.aggregates?.length)
+    ctx.addIssue({ code: 'custom', path: ['columns'], message: 'Choose at least one column.' });
+};
+const reportSpecSchema = reportSpecBase.superRefine(needsOutput);
+const builderQuerySchema = reportSpecBase
+  .extend({
+    executionId: uuid.optional(),
+    /** Values for "Ask when run" filters (fixed filter values are never taken from here). */
+    values: parameterValuesSchema.optional(),
+  })
+  .superRefine(needsOutput);
 const joinSuggestSchema = z.object({
   tables: z
     .array(z.object({ alias, schema: name128, table: name128 }))
@@ -138,10 +215,16 @@ const joinSuggestSchema = z.object({
 
 type BuilderInput = z.infer<typeof reportSpecSchema>;
 
-/** Single-table selections without aliases keep the original, unqualified SQL. */
+/** Single-table selections without aliases, filters or totals keep the original, unqualified SQL. */
 const isSimple = (spec: BuilderInput) =>
   !spec.joins?.length &&
   !spec.alias &&
+  !spec.filters?.length &&
+  !spec.groupBy?.length &&
+  !spec.aggregates?.length &&
+  !spec.having?.length &&
+  spec.columns.length > 0 &&
+  (spec.sort ?? []).every((s) => s.column !== undefined && s.aggregate === undefined) &&
   spec.columns.every((c) => typeof c === 'string') &&
   (spec.sort ?? []).every((s) => s.table === undefined);
 
@@ -157,6 +240,8 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
       name: suggestReportName(simple),
       table: resolved.table,
       warnings: [] as string[],
+      parameters: [] as ParameterDef[],
+      aliases: undefined as string[] | undefined,
     };
   }
   const joins = spec.joins ?? [];
@@ -172,7 +257,35 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
     table: sources[0].table,
     warnings: built.warnings,
     aliases: built.aliases,
+    parameters: built.parameters,
   };
+}
+
+/** Versioned Report Builder definition stored in QF_REPORTS.BUILDER_DEF. */
+export const BUILDER_DEF_VERSION = 1;
+const builderDefSchema = z.object({
+  version: z.literal(BUILDER_DEF_VERSION),
+  spec: reportSpecSchema,
+});
+export type BuilderDef = z.infer<typeof builderDefSchema>;
+
+/**
+ * Validate a stored or submitted builder definition: shape, version, and every name
+ * against the catalog. Returns the regenerated SQL and parameters.
+ */
+async function rebuildFromDef(d: ApiDeps, ownerId: string, raw: unknown) {
+  const parsed = builderDefSchema.safeParse(raw);
+  if (!parsed.success)
+    throw new AppError(
+      400,
+      'INVALID_BUILDER_DEF',
+      `The Report Builder definition is not valid: ${parsed.error.issues
+        .slice(0, 3)
+        .map((i) => `${i.path.join('.') || 'definition'}: ${i.message}`)
+        .join('; ')}`,
+    );
+  const built = await buildQuery(d, ownerId, parsed.data.spec);
+  return { def: parsed.data, ...built };
 }
 
 const exportSchema = z.object({
@@ -491,8 +604,10 @@ export function apiRouter(d: ApiDeps): Router {
         name: built.name,
         schema: built.table.schema,
         table: built.table.name,
-        // Joined reports also report their aliases and any type warnings.
-        ...('aliases' in built ? { warnings: built.warnings, aliases: built.aliases } : {}),
+        // Joined, filtered or grouped reports also report aliases and any warnings.
+        ...(built.aliases
+          ? { warnings: built.warnings, aliases: built.aliases, parameters: built.parameters }
+          : {}),
       });
     }),
   );
@@ -524,6 +639,7 @@ export function apiRouter(d: ApiDeps): Router {
         req.session!.user,
         built.sql,
         body.executionId ?? randomUUID(),
+        { definitions: built.parameters, values: body.values ?? {} },
       );
       res.json({ ...out, builder: { name: built.name, sql: built.sql } });
     }),
@@ -609,30 +725,71 @@ export function apiRouter(d: ApiDeps): Router {
       res.json({ reports: owned.map((x) => ({ ...x, access: 'OWNER' as const })), shared });
     }),
   );
+  /**
+   * A report saved from the Report Builder sends its definition. The server validates
+   * it against the catalog and regenerates SQL and parameters from it; any SQL or
+   * parameters in the request body are ignored.
+   */
+  const withBuilderDef = async (req: Request) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.builderDef === undefined || body.builderDef === null)
+      return { body, builderDef: body.builderDef as null | undefined };
+    const rebuilt = await rebuildFromDef(d, user(req).id, body.builderDef);
+    return {
+      body: { ...body, sql: rebuilt.sql, parameters: rebuilt.parameters },
+      builderDef: rebuilt.def,
+    };
+  };
   r.post(
     '/reports',
     h(async (req, res) => {
-      const input = reportInputSchema.parse(req.body);
+      const { body, builderDef } = await withBuilderDef(req);
+      const input = reportInputSchema.parse(body);
       checkLength(input.sql);
-      res
-        .status(201)
-        .json({ report: { ...(await d.reports.create(user(req).id, input)), access: 'OWNER' } });
+      const created = await d.reports.create(user(req).id, { ...input, builderDef });
+      res.status(201).json({ report: { ...created, access: 'OWNER' } });
     }),
   );
   r.get(
     '/reports/:id',
     h(async (req, res) => {
       const { report, access } = await d.access.require(user(req), reportId(req), 'VIEW');
-      res.json({ report: { ...report, access } });
+      // Re-validate a saved builder definition so the UI knows whether it can reopen it.
+      let builder: { valid: boolean; error?: string } | undefined;
+      if (report.builderDef !== null) {
+        try {
+          await rebuildFromDef(d, user(req).id, report.builderDef);
+          builder = { valid: true };
+        } catch (e) {
+          builder = {
+            valid: false,
+            error: e instanceof AppError ? e.message : 'The definition could not be checked.',
+          };
+        }
+      }
+      res.json({ report: { ...report, access }, ...(builder ? { builder } : {}) });
     }),
   );
   r.put(
     '/reports/:id',
     h(async (req, res) => {
-      const input = reportUpdateSchema.parse(req.body);
-      checkLength(input.sql);
       const { report, access } = await d.access.require(user(req), reportId(req), 'EDIT');
-      const updated = await d.reports.update(report.ownerId, report.id, input);
+      const { body, builderDef } = await withBuilderDef(req);
+      const input = reportUpdateSchema.parse(body);
+      checkLength(input.sql);
+      // An edit without a definition (e.g. in the SQL editor) keeps the stored one only
+      // while the SQL and parameters are unchanged; otherwise it no longer describes the SQL.
+      let def: unknown | null = builderDef ?? null;
+      if (builderDef === undefined && report.builderDef !== null) {
+        const same =
+          input.sql === report.sql &&
+          JSON.stringify(input.parameters ?? []) === JSON.stringify(report.parameters);
+        def = same ? report.builderDef : null;
+      }
+      const updated = await d.reports.update(report.ownerId, report.id, {
+        ...input,
+        builderDef: def,
+      });
       res.json({ report: { ...updated, access } });
     }),
   );

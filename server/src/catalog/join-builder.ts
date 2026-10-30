@@ -18,6 +18,17 @@ import {
   type CatalogTable,
   type SortDirection,
 } from './sql-builder.js';
+import {
+  buildAggregates,
+  buildHaving,
+  buildWhere,
+  ParamCollector,
+  type AggregateSpec,
+  type BuildContext,
+  type FilterItem,
+  type HavingSpec,
+} from './filter-builder.js';
+import type { ParameterDef } from '../reports/parameters.js';
 
 export const MAX_JOINS = 8;
 export const MAX_CONDITIONS_PER_JOIN = 16;
@@ -55,7 +66,9 @@ export interface ColumnRef {
 
 export interface JoinedSortSpec {
   table?: string;
-  column: string;
+  /** A column; or omit it and give `aggregate` (a total's output name). */
+  column?: string;
+  aggregate?: string;
   direction: SortDirection;
 }
 
@@ -66,6 +79,13 @@ export interface JoinedReportSpec {
   joins?: JoinSpec[];
   columns: (string | ColumnRef)[];
   sort?: JoinedSortSpec[];
+  /** WHERE: all AND or all OR at the top level, with one optional level of groups. */
+  filters?: FilterItem[];
+  filterLogic?: 'AND' | 'OR';
+  /** GROUP BY columns; selected columns are added automatically when grouping. */
+  groupBy?: ColumnRef[];
+  aggregates?: AggregateSpec[];
+  having?: HavingSpec[];
 }
 
 /** Catalog metadata for one table of the report, in spec order (base first). */
@@ -78,6 +98,8 @@ export interface OutputColumn {
   alias: string;
   table: string;
   column: string;
+  /** Set for totals: the aggregate function. */
+  aggregate?: string;
   /** Result column name: the catalog name, or a generated unique AS name. */
   name: string;
 }
@@ -88,6 +110,8 @@ export interface BuiltJoinQuery {
   aliases: string[];
   columns: OutputColumn[];
   warnings: string[];
+  /** One definition per `?` marker, in order (fixed filter values and ask-when-run ones). */
+  parameters: ParameterDef[];
 }
 
 type Category = 'numeric' | 'char' | 'date' | 'time' | 'timestamp' | 'binary' | 'other';
@@ -241,23 +265,63 @@ export function buildJoinedReportSql(
     );
   });
 
+  // ---- WHERE (filters are resolved before anything is grouped) ----
+  const resolveRef = (ref: { table?: string; column: unknown }, what: string) => {
+    const i = ref?.table === undefined || ref?.table === null ? 0 : indexOfAlias(ref.table);
+    if (i < 0)
+      throw bad(
+        'UNKNOWN_ALIAS',
+        `${what} ${JSON.stringify(ref?.column)} refers to an unknown table alias.`,
+      );
+    return { i, c: findColumn(i, ref?.column) };
+  };
+  const ctx: BuildContext = {
+    resolve: resolveRef,
+    colRef,
+    label: (i, c) => `${aliases[i]}.${c.name}`,
+  };
+  const params = new ParamCollector();
+  const where = buildWhere(spec.filters, spec.filterLogic, ctx, params);
+
+  // ---- grouping ----
+  const aggs = buildAggregates(spec.aggregates ?? [], ctx);
+  const groupRefs = Array.isArray(spec.groupBy) ? spec.groupBy : [];
+  const grouping = aggs.length > 0 || groupRefs.length > 0;
+
   // ---- SELECT list, with unique output names ----
   const wanted = Array.isArray(spec.columns) ? spec.columns : [];
-  if (wanted.length === 0)
+  if (wanted.length === 0 && aggs.length === 0)
     throw bad('EMPTY_SELECTION', 'Choose at least one column to include in the report.');
   const chosen: { i: number; c: CatalogColumn }[] = [];
   for (const ref of wanted) {
     const r: ColumnRef = typeof ref === 'string' ? { column: ref } : (ref ?? { column: '' });
-    const i = r.table === undefined ? 0 : indexOfAlias(r.table);
-    if (i < 0)
-      throw bad(
-        'UNKNOWN_ALIAS',
-        `Column ${JSON.stringify(r.column)} refers to an unknown table alias.`,
-      );
-    const c = findColumn(i, r.column);
+    const { i, c } = resolveRef(r, 'Column');
     if (chosen.some((x) => x.i === i && x.c.name === c.name))
       throw bad('DUPLICATE_COLUMN', `Column ${aliases[i]}.${c.name} is selected more than once.`);
     chosen.push({ i, c });
+  }
+  const groupCols: { i: number; c: CatalogColumn }[] = [];
+  if (grouping) {
+    for (const ref of groupRefs) {
+      const { i, c } = resolveRef(ref, 'Group-by column');
+      if (groupCols.some((x) => x.i === i && x.c.name === c.name))
+        throw bad('DUPLICATE_COLUMN', `${aliases[i]}.${c.name} is grouped more than once.`);
+      groupCols.push({ i, c });
+    }
+    // Every selected, non-aggregated column must be a group-by column: add it.
+    const added: string[] = [];
+    for (const x of chosen)
+      if (!groupCols.some((g) => g.i === x.i && g.c.name === x.c.name)) {
+        groupCols.push(x);
+        if (groupRefs.length) added.push(`${aliases[x.i]}.${x.c.name}`);
+      }
+    if (added.length)
+      warnings.push(
+        `${added.join(', ')} ${added.length === 1 ? 'was' : 'were'} added to GROUP BY because ${added.length === 1 ? 'it is' : 'they are'} selected without a total.`,
+      );
+    // Group-by columns that were not selected are shown too, so each row is labelled.
+    for (const g of groupCols)
+      if (!chosen.some((x) => x.i === g.i && x.c.name === g.c.name)) chosen.push(g);
   }
   const counts = new Map<string, number>();
   for (const x of chosen) counts.set(x.c.name, (counts.get(x.c.name) ?? 0) + 1);
@@ -275,17 +339,35 @@ export function buildJoinedReportSql(
     }
     return { alias: aliases[i], table: sources[i].table.name, column: c.name, name };
   });
-  const select = chosen
-    .map(({ i, c }, k) =>
+  const outNames = new Set(out.map((o) => o.name.toUpperCase()));
+  for (const a of aggs) {
+    if (outNames.has(a.name.toUpperCase()))
+      throw bad('DUPLICATE_OUTPUT_NAME', `The output name "${a.name}" is used more than once.`);
+    outNames.add(a.name.toUpperCase());
+    out.push({
+      alias: '',
+      table: '',
+      column: a.column?.name ?? '*',
+      name: a.name,
+      aggregate: a.fn,
+    });
+  }
+  const select = [
+    ...chosen.map(({ i, c }, k) =>
       out[k].name === c.name ? colRef(i, c) : `${colRef(i, c)} AS ${q(out[k].name)}`,
-    )
-    .join(',\n       ');
+    ),
+    ...aggs.map((a) => `${a.expr} AS ${q(a.name)}`),
+  ].join(',\n       ');
+  const having = grouping ? buildHaving(spec.having, aggs, params) : null;
+  if (!grouping && spec.having?.length)
+    throw bad('INVALID_HAVING', 'Total filters need grouping or at least one total.');
 
   // ---- ORDER BY: any column of any table ----
   const sorts: string[] = [];
   const sortSeen = new Set<string>();
   for (const row of spec.sort ?? []) {
-    if (!row || typeof row.column !== 'string')
+    const isAgg = !!row && typeof row.aggregate === 'string' && row.aggregate !== '';
+    if (!row || (!isAgg && typeof row.column !== 'string'))
       throw bad('INVALID_SORT_DIRECTION', 'A sort row is missing its column.');
     const direction = String(row.direction ?? '')
       .trim()
@@ -293,8 +375,22 @@ export function buildJoinedReportSql(
     if (direction !== 'ASC' && direction !== 'DESC')
       throw bad(
         'INVALID_SORT_DIRECTION',
-        `Sort direction for ${JSON.stringify(row.column)} must be ASC or DESC.`,
+        `Sort direction for ${JSON.stringify(row.column ?? row.aggregate)} must be ASC or DESC.`,
       );
+    if (isAgg) {
+      const a = aggs.find((x) => x.name.toUpperCase() === row.aggregate!.toUpperCase());
+      if (!a)
+        throw bad(
+          'UNKNOWN_AGGREGATE',
+          `Sort refers to ${JSON.stringify(row.aggregate)}, which is not a total in this report.`,
+        );
+      const key = `agg:${a.name.toUpperCase()}`;
+      if (sortSeen.has(key))
+        throw bad('DUPLICATE_SORT_COLUMN', `${a.name} is used more than once in the sort order.`);
+      sortSeen.add(key);
+      sorts.push(`${a.expr} ${direction}`);
+      continue;
+    }
     const i = row.table === undefined ? 0 : indexOfAlias(row.table);
     if (i < 0)
       throw bad(
@@ -302,6 +398,11 @@ export function buildJoinedReportSql(
         `Sort column ${JSON.stringify(row.column)} refers to an unknown table alias.`,
       );
     const c = findColumn(i, row.column);
+    if (grouping && !groupCols.some((g) => g.i === i && g.c.name === c.name))
+      throw bad(
+        'INVALID_SORT_COLUMN',
+        `${aliases[i]}.${c.name} is not grouped, so it cannot be used to sort grouped results; sort by a group-by column or a total.`,
+      );
     const key = `${i}.${c.name}`;
     if (sortSeen.has(key))
       throw bad(
@@ -312,12 +413,18 @@ export function buildJoinedReportSql(
     sorts.push(`${colRef(i, c)} ${direction}`);
   }
 
-  const orderBy = sorts.length ? `\nORDER BY ${sorts.join(', ')}` : '';
+  const clauses = [...lines];
+  if (where) clauses.push(`WHERE ${where}`);
+  if (grouping && groupCols.length)
+    clauses.push(`GROUP BY ${groupCols.map(({ i, c }) => colRef(i, c)).join(', ')}`);
+  if (having) clauses.push(`HAVING ${having}`);
+  if (sorts.length) clauses.push(`ORDER BY ${sorts.join(', ')}`);
   return {
-    sql: `SELECT ${select}\n${lines.join('\n')}${orderBy}`,
+    sql: `SELECT ${select}\n${clauses.join('\n')}`,
     aliases,
     columns: out,
     warnings,
+    parameters: params.defs,
   };
 }
 

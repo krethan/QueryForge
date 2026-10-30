@@ -7,7 +7,10 @@ export type ParameterType = (typeof PARAMETER_TYPES)[number];
 /** Value bound to a Mapepire parameter marker (a subset of mapepire-js BindingValue). */
 export type BoundValue = string | number | null;
 
-const MAX_PARAMS = 20;
+/** Parameters a user can be prompted for. */
+export const MAX_PARAMS = 20;
+/** All markers, including fixed Report Builder filter values (IN lists can be long). */
+export const MAX_TOTAL_PARAMS = 250;
 const MAX_STRING = 1000;
 
 export const parameterDefSchema = z
@@ -31,8 +34,20 @@ export const parameterDefSchema = z
       .array(z.object({ value: z.string().min(1).max(256), label: z.string().max(256).optional() }))
       .max(200)
       .optional(),
+    /**
+     * Fixed value written by the Report Builder for a filter that is not "Ask when run".
+     * It is never prompted, its value is always the default, and client values are ignored.
+     */
+    fixed: z.boolean().optional(),
+    /**
+     * Report Builder LIKE filter: the value is escaped (\, %, _) and wrapped in % wildcards
+     * on the server, for a marker written as `LIKE ? ESCAPE '\'`.
+     */
+    match: z.enum(['contains', 'startsWith', 'endsWith']).optional(),
   })
   .superRefine((p, ctx) => {
+    if (p.fixed && p.defaultValue === null)
+      ctx.addIssue({ code: 'custom', message: `Fixed parameter "${p.name}" needs a value.` });
     if (p.type === 'list' && !p.options?.length)
       ctx.addIssue({
         code: 'custom',
@@ -51,13 +66,24 @@ export type ParameterDef = {
   required: boolean;
   defaultValue: string | null;
   options?: { value: string; label?: string }[];
+  fixed?: boolean;
+  match?: LikeMatch;
 };
+export type LikeMatch = 'contains' | 'startsWith' | 'endsWith';
+
+/** Escape LIKE wildcards with `\` (paired with `ESCAPE '\'`) and add the match wildcards. */
+export function likePattern(value: string, match: LikeMatch): string {
+  const v = value.replace(/[\\%_]/g, (c) => `\\${c}`);
+  return match === 'contains' ? `%${v}%` : match === 'startsWith' ? `${v}%` : `%${v}`;
+}
 
 export const parameterListSchema = z
   .array(parameterDefSchema)
-  .max(MAX_PARAMS, `At most ${MAX_PARAMS} parameters are allowed.`)
+  .max(MAX_TOTAL_PARAMS, `At most ${MAX_TOTAL_PARAMS} parameter markers are allowed.`)
   .default([])
   .superRefine((list, ctx) => {
+    if (list.filter((p) => !p.fixed).length > MAX_PARAMS)
+      ctx.addIssue({ code: 'custom', message: `At most ${MAX_PARAMS} parameters are allowed.` });
     const seen = new Set<string>();
     for (const p of list) {
       const k = p.name.toUpperCase();
@@ -164,7 +190,7 @@ export function resolveParameters(
   const bound: BoundValue[] = [];
   const used: Record<string, BoundValue> = {};
   for (const d of defs) {
-    let v = raw[d.name];
+    let v = d.fixed ? d.defaultValue : raw[d.name];
     if (v === undefined || v === null || (typeof v === 'string' && v.trim() === ''))
       v = d.defaultValue;
     if (v === null || v === undefined) {
@@ -178,7 +204,7 @@ export function resolveParameters(
       errors[d.name] = `${d.label} ${c.message}`;
       continue;
     }
-    bound.push(c.value);
+    bound.push(d.match ? likePattern(String(c.value), d.match) : c.value);
     used[d.name] = c.value;
   }
   if (Object.keys(errors).length)

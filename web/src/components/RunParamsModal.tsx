@@ -15,6 +15,7 @@ import type { ParameterDef, ParameterValues } from '../api/types';
 export function validateValues(defs: ParameterDef[], v: Record<string, string>) {
   const errors: Record<string, string> = {};
   for (const d of defs) {
+    if (d.fixed) continue;
     const s = (v[d.name] ?? '').trim();
     if (!s) {
       if (d.required && !d.defaultValue) errors[d.name] = `${d.label} is required`;
@@ -35,10 +36,12 @@ export function initialValues(
   prev?: ParameterValues,
 ): Record<string, string> {
   return Object.fromEntries(
-    defs.map((d) => {
-      const p = prev?.[d.name];
-      return [d.name, p !== undefined && p !== null ? String(p) : (d.defaultValue ?? '')];
-    }),
+    defs
+      .filter((d) => !d.fixed)
+      .map((d) => {
+        const p = prev?.[d.name];
+        return [d.name, p !== undefined && p !== null ? String(p) : (d.defaultValue ?? '')];
+      }),
   );
 }
 
@@ -68,47 +71,51 @@ export function ParameterFields({
 }) {
   return (
     <>
-      {parameters.map((d) => {
-        const id = `${idPrefix}-param-${d.name}`;
-        const label = `${d.label}${d.required ? '' : ' (optional)'}`;
-        const invalid = Boolean(errors[d.name]);
-        if (d.type === 'list')
+      {parameters
+        .filter((d) => !d.fixed)
+        .map((d) => {
+          const id = `${idPrefix}-param-${d.name}`;
+          const label = `${d.label}${d.required ? '' : ' (optional)'}`;
+          const invalid = Boolean(errors[d.name]);
+          if (d.type === 'list')
+            return (
+              <Select
+                key={d.name}
+                id={id}
+                labelText={label}
+                value={values[d.name] ?? ''}
+                invalid={invalid}
+                invalidText={errors[d.name]}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                  onChange(d.name, e.target.value)
+                }
+              >
+                {!d.required && <SelectItem value="" text="(any)" />}
+                {(d.options ?? []).map((o) => (
+                  <SelectItem key={o.value} value={o.value} text={o.label ?? o.value} />
+                ))}
+              </Select>
+            );
           return (
-            <Select
+            <TextInput
               key={d.name}
               id={id}
               labelText={label}
+              type={d.type === 'date' ? 'date' : 'text'}
+              inputMode={
+                d.type === 'integer' ? 'numeric' : d.type === 'decimal' ? 'decimal' : undefined
+              }
+              placeholder={d.type === 'date' ? 'YYYY-MM-DD' : (d.defaultValue ?? '')}
+              helperText={d.defaultValue ? `Default: ${d.defaultValue}` : undefined}
               value={values[d.name] ?? ''}
               invalid={invalid}
               invalidText={errors[d.name]}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 onChange(d.name, e.target.value)
               }
-            >
-              {!d.required && <SelectItem value="" text="(any)" />}
-              {(d.options ?? []).map((o) => (
-                <SelectItem key={o.value} value={o.value} text={o.label ?? o.value} />
-              ))}
-            </Select>
+            />
           );
-        return (
-          <TextInput
-            key={d.name}
-            id={id}
-            labelText={label}
-            type={d.type === 'date' ? 'date' : 'text'}
-            inputMode={
-              d.type === 'integer' ? 'numeric' : d.type === 'decimal' ? 'decimal' : undefined
-            }
-            placeholder={d.type === 'date' ? 'YYYY-MM-DD' : (d.defaultValue ?? '')}
-            helperText={d.defaultValue ? `Default: ${d.defaultValue}` : undefined}
-            value={values[d.name] ?? ''}
-            invalid={invalid}
-            invalidText={errors[d.name]}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(d.name, e.target.value)}
-          />
-        );
-      })}
+        })}
     </>
   );
 }

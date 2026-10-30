@@ -101,12 +101,12 @@ function ReportTile({
     <Tile className="qf-tile" data-testid="report-tile">
       <h3>{r.name}</h3>
       {r.access && r.access !== 'OWNER' && (
-        <p className="qf-tile__owner">
+        <div className="qf-tile__owner">
           Shared by {r.ownerName ?? 'another user'} ·{' '}
           <Tag size="sm" type="purple">
             {r.access === 'EDITOR' ? 'Editor' : 'Viewer'}
           </Tag>
-        </p>
+        </div>
       )}
       {r.category && (
         <div>
