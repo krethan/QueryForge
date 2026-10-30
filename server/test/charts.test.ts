@@ -51,7 +51,7 @@ describe('chart settings validation', () => {
     [{ title: 'x'.repeat(121) }, 'title too long'],
     [{ dashboardAutoLoad: true }, 'auto-load without dashboard'],
     [{ evil: '<script>' }, 'unknown key'],
-  ])('rejects %j (%s)', (patch) => {
+  ] as Array<[Record<string, unknown>, string]>)('rejects %j (%s)', (patch) => {
     const r = chartDefSchema.safeParse({ ...bar, ...patch });
     expect(r.success).toBe(false);
   });
