@@ -743,6 +743,7 @@ async function main() {
     description: string;
     sql: string;
     chartDef?: ChartDef;
+    builderDef?: unknown;
   }> = [
     {
       name: 'Open Orders by Region',
@@ -790,6 +791,18 @@ async function main() {
       category: 'Sales',
       description: 'Bar chart, shown on the dashboard',
       sql: 'SELECT "T1"."REGION",\n       SUM("T1"."AMOUNT") AS "REVENUE"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nGROUP BY "T1"."REGION"\nORDER BY "T1"."REGION" ASC',
+      // saved from the Report Builder, so it can be drilled into (click a bar)
+      builderDef: {
+        version: 1,
+        spec: {
+          schema: 'DEMOLIB',
+          table: 'ORDERS',
+          columns: ['REGION'],
+          groupBy: [{ column: 'REGION' }],
+          aggregates: [{ fn: 'SUM', column: 'AMOUNT', name: 'REVENUE' }],
+          sort: [{ column: 'REGION', direction: 'ASC' }],
+        },
+      },
       chartDef: {
         version: 1,
         type: 'bar',
@@ -841,7 +854,8 @@ async function main() {
     name: 'Orders by Region and Date',
     category: 'Sales',
     description: 'Parameterized: values are bound as Mapepire ? markers',
-    sql: 'SELECT ORDER_ID, CUSTOMER, REGION, ORDER_DATE, AMOUNT, STATUS\nFROM DEMOLIB.ORDERS\nWHERE REGION = ?\n  AND ORDER_DATE >= ?\n  AND AMOUNT >= ?\nORDER BY ORDER_DATE DESC',
+    // written in the builder's quoted style so the demo engine evaluates the filters
+    sql: 'SELECT "T1"."ORDER_ID", "T1"."CUSTOMER", "T1"."REGION", "T1"."ORDER_DATE", "T1"."AMOUNT", "T1"."STATUS"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nWHERE "T1"."REGION" = ?\n  AND "T1"."ORDER_DATE" >= ?\n  AND "T1"."AMOUNT" >= ?\nORDER BY "T1"."ORDER_DATE" DESC',
     parameters: [
       {
         name: 'region',
@@ -866,6 +880,19 @@ async function main() {
         defaultValue: '0',
       },
     ],
+  });
+
+  // SQL-only report that drills through a configured target (region -> parameter)
+  const rawTotals = await reports.create(user.id, {
+    name: 'Region Totals (SQL, drill target)',
+    category: 'Sales',
+    description: 'SQL report; clicking a row opens Orders by Region and Date for that region',
+    sql: 'SELECT "T1"."REGION",\n       COUNT(*) AS "ORDERS",\n       SUM("T1"."AMOUNT") AS "TOTAL"\nFROM "DEMOLIB"."ORDERS" AS "T1"\nGROUP BY "T1"."REGION"\nORDER BY "T1"."REGION" ASC',
+  });
+  await reports.setDrill(user.id, rawTotals.id, {
+    version: 1,
+    targetReportId: parameterized.id,
+    mapping: [{ field: 'REGION', parameter: 'region' }],
   });
 
   // a second (fictional) user who owns reports shared with the demo user

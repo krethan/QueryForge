@@ -13,6 +13,7 @@ import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-route
 import { ApiError, api } from '../api/client';
 import type {
   Cell,
+  DrillKeys,
   ParameterDef,
   ParameterValues,
   Report,
@@ -31,6 +32,9 @@ import type { ChartDef, ChartView } from '../utils/chartData';
 import { SaveReportModal, type SaveValues } from '../components/SaveReportModal';
 import { SqlEditor } from '../components/SqlEditor';
 import { newExecutionId } from '../utils/format';
+import { DrillPanel } from '../components/DrillPanel';
+import { DrillSettings } from '../components/DrillSettings';
+import { decodeDrill, drillFields, keysForRow } from '../utils/drill';
 
 export function ReportEditorPage() {
   const { id } = useParams();
@@ -62,10 +66,14 @@ export function ReportEditorPage() {
     hasMore: false,
   });
 
+  const [drill, setDrill] = useState<{ keys: DrillKeys; n: number } | null>(null);
+  const openDrill = (keys: DrillKeys) => setDrill((d) => ({ keys, n: (d?.n ?? 0) + 1 }));
   const access = report?.access ?? 'OWNER';
   const canEdit = access !== 'VIEWER';
   const defsChanged = JSON.stringify(defs) !== JSON.stringify(report?.parameters ?? []);
   const dirty = canEdit && (report ? sql !== report.sql || defsChanged : sql.trim().length > 0);
+  // drill runs the saved definition, so it is off while there are unsaved edits
+  const fields = report && !dirty ? drillFields(report.drill) : null;
 
   useEffect(() => {
     if (!id) {
@@ -149,8 +157,14 @@ export function ReportEditorPage() {
 
   // Auto-run when opened from a dashboard "Run" action.
   useEffect(() => {
-    if (report && params.get('run') === '1' && !autoRan.current) {
+    const fromDash = report ? decodeDrill(params.get('drill')) : null;
+    if (report && (params.get('run') === '1' || fromDash) && !autoRan.current) {
       autoRan.current = true;
+      const allowed = new Set(drillFields(report.drill)?.map((f) => f.toUpperCase()) ?? []);
+      const keys = Object.fromEntries(
+        Object.entries(fromDash ?? {}).filter(([k]) => allowed.has(k.toUpperCase())),
+      );
+      if (Object.keys(keys).length) openDrill(keys);
       // Drop ?run=1 without a router navigation so a reload doesn't re-run it.
       window.history.replaceState(window.history.state, '', window.location.pathname);
       void run();
@@ -194,6 +208,11 @@ export function ReportEditorPage() {
         ? await api.updateReport(report.id, { ...input, version: report.version })
         : await api.createReport(input);
       setReport(saved);
+      // refresh the drill options for the saved definition
+      void api
+        .getReport(saved.id)
+        .then((r) => setReport((p) => (p?.id === r.id ? { ...p, drill: r.drill } : p)))
+        .catch(() => undefined);
       setSql(saved.sql);
       setDefs(saved.parameters ?? []);
       setSaveOpen(false);
@@ -269,6 +288,23 @@ export function ReportEditorPage() {
             value={defs}
             onChange={setDefs}
             readOnly={!canEdit || Boolean(running)}
+          />
+        </details>
+      )}
+      {report && canEdit && (
+        <details className="qf-params-panel" open={!!report.drillDef}>
+          <summary>Drill-down{report.drillDef ? ' (target set)' : ''}</summary>
+          <DrillSettings
+            report={report}
+            fields={[
+              ...new Set([
+                ...(report.drill?.builder?.fields ?? []),
+                ...(result?.columns.map((c) => c.name) ?? []),
+              ]),
+            ]}
+            onSaved={(r) =>
+              setReport((p) => (p ? { ...p, drillDef: r.drillDef, drill: r.drill } : p))
+            }
           />
         </details>
       )}
@@ -349,6 +385,8 @@ export function ReportEditorPage() {
             onViewChange={setView}
             saved={report?.chartDef ?? null}
             storedError={report?.chartError}
+            drillFields={fields}
+            onDrill={openDrill}
             onSave={
               report && canEdit
                 ? async (def) => {
@@ -369,6 +407,19 @@ export function ReportEditorPage() {
               <ResultsTable
                 result={result}
                 onRowsChange={(rows, hasMore) => setLoadedRows({ rows, hasMore })}
+                onRowClick={
+                  fields
+                    ? (row) => {
+                        const k = keysForRow(fields, result.columns, row);
+                        if (k) openDrill(k);
+                      }
+                    : undefined
+                }
+                rowActionLabel={
+                  report?.drill?.target
+                    ? `Open ${report.drill.target.name} for this row`
+                    : 'Show the detail rows behind this row'
+                }
                 toolbar={
                   <ExportButton
                     source={
@@ -396,6 +447,16 @@ export function ReportEditorPage() {
             }
           />
         </section>
+      )}
+      {drill && report?.drill && (
+        <DrillPanel
+          key={drill.n}
+          source={{ id: report.id, name: report.name }}
+          info={report.drill}
+          values={lastValues}
+          keys={drill.keys}
+          onClose={() => setDrill(null)}
+        />
       )}
       <SaveReportModal
         open={saveOpen}

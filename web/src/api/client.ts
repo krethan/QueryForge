@@ -2,6 +2,11 @@ import type { ChartDef } from '../utils/chartData';
 import type {
   AuthProviders,
   DataSourceInfo,
+  DrillDef,
+  DrillInfo,
+  DrillMeta,
+  DrillRequest,
+  DrillTargetOption,
   ParameterDef,
   ParameterValues,
   Schedule,
@@ -157,7 +162,25 @@ export const api = {
     ).then((r) => ({ owned: r.reports, shared: r.shared ?? [] }));
   },
   getReport: (id: string) =>
-    json<{ report: Report }>('GET', `/reports/${id}`).then((r) => r.report),
+    json<{ report: Report; builder?: Report['builder']; drill?: DrillInfo }>(
+      'GET',
+      `/reports/${id}`,
+    ).then((r) => ({
+      ...r.report,
+      ...(r.builder ? { builder: r.builder } : {}),
+      ...(r.drill ? { drill: r.drill } : {}),
+    })),
+  /** Runs the detail rows behind a clicked chart element or grouped row. */
+  drill: (id: string, req: DrillRequest, signal?: AbortSignal) =>
+    json<RunResponse & { drill: DrillMeta }>('POST', `/reports/${id}/drill`, req, signal),
+  drillTargets: (id: string) =>
+    json<{ targets: DrillTargetOption[] }>('GET', `/reports/${id}/drill-targets`).then(
+      (r) => r.targets,
+    ),
+  setReportDrill: (id: string, drillDef: DrillDef | null) =>
+    json<{ report: Report; drill: DrillInfo }>('PUT', `/reports/${id}/drill`, { drillDef }).then(
+      (r) => ({ ...r.report, drill: r.drill }),
+    ),
   createReport: (input: ReportInput) =>
     json<{ report: Report }>('POST', '/reports', input).then((r) => r.report),
   updateReport: (id: string, input: ReportInput) =>
@@ -296,22 +319,29 @@ export const api = {
     /** Chart to draw on the workbook's Chart sheet (defaults to the report's saved chart). */
     chart?: ChartDef | null;
   }) {
-    const res = await raw('POST', '/export', src);
-    const blob = await res.blob();
-    const name = filenameFrom(res, 'report.xlsx');
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return {
-      filename: name,
-      rowCount: Number(res.headers.get('X-QF-Row-Count') ?? 0),
-      truncated: res.headers.get('X-QF-Truncated') === 'true',
-      chart: chartHeader(res.headers.get('X-QF-Chart')),
-    };
+    return download(await raw('POST', '/export', src));
+  },
+  /** Downloads the drilled detail rows as XLSX. */
+  async exportDrill(id: string, req: DrillRequest) {
+    return download(await raw('POST', `/reports/${id}/drill/export`, req));
   },
 };
+
+async function download(res: Response) {
+  const blob = await res.blob();
+  const name = filenameFrom(res, 'report.xlsx');
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return {
+    filename: name,
+    rowCount: Number(res.headers.get('X-QF-Row-Count') ?? 0),
+    truncated: res.headers.get('X-QF-Truncated') === 'true',
+    chart: chartHeader(res.headers.get('X-QF-Chart')),
+  };
+}

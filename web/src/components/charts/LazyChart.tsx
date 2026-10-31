@@ -25,7 +25,12 @@ export function LazyChart(props: ChartViewProps) {
   return (
     <ChartBoundary>
       <Suspense fallback={<InlineLoading description="Loading chart…" />}>
-        <div className="qf-chart" data-testid="qf-chart" data-chart-type={props.type}>
+        <div
+          className="qf-chart"
+          data-testid="qf-chart"
+          data-chart-type={props.type}
+          data-clickable={props.onSelect ? 'true' : undefined}
+        >
           <ChartView {...props} />
         </div>
       </Suspense>

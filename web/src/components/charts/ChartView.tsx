@@ -5,7 +5,7 @@
  */
 import * as Carbon from '@carbon/charts-react';
 import { ScaleTypes, type ChartTabularData } from '@carbon/charts-react';
-import type { ComponentType } from 'react';
+import { useEffect, useRef, type ComponentType, type Ref } from 'react';
 import '@carbon/charts-react/styles.css';
 import type { ChartPoint, ChartType } from '../../utils/chartData';
 
@@ -20,10 +20,24 @@ export interface ChartViewProps {
   height?: string;
   /** Compact rendering for dashboard tiles (no toolbar, legend only when needed). */
   compact?: boolean;
+  /** Called when a bar, slice or point is clicked (enables the pointer cursor). */
+  onSelect?(point: { key: string; group: string }): void;
+}
+
+const CLICK_EVENTS = ['bar-click', 'pie-slice-click', 'scatter-click'];
+interface ChartHandle {
+  chart?: {
+    services?: {
+      events?: {
+        addEventListener(t: string, f: (e: Event) => void): void;
+        removeEventListener(t: string, f: (e: Event) => void): void;
+      };
+    };
+  };
 }
 
 // The class components' bundled typings do not line up with this project's @types/react.
-type CC = ComponentType<{ data: ChartTabularData; options: never }>;
+type CC = ComponentType<{ data: ChartTabularData; options: never; ref?: Ref<ChartHandle> }>;
 const AreaChart = Carbon.AreaChart as unknown as CC;
 const DonutChart = Carbon.DonutChart as unknown as CC;
 const GroupedBarChart = Carbon.GroupedBarChart as unknown as CC;
@@ -48,7 +62,24 @@ export default function ChartView(p: ChartViewProps) {
   const labels = { mapsTo: 'key', scaleType: ScaleTypes.LABELS, domain: p.keys, title: p.xLabel };
   const values = { mapsTo: 'value', title: p.yLabel };
   const vertical = { ...common, axes: { bottom: labels, left: values } };
-  const props = { data };
+  const ref = useRef<ChartHandle>(null);
+  const select = useRef(p.onSelect);
+  select.current = p.onSelect;
+  const clickable = Boolean(p.onSelect);
+  useEffect(() => {
+    const events = ref.current?.chart?.services?.events;
+    if (!events || !clickable) return;
+    const h = (e: Event) => {
+      const raw = (e as CustomEvent<{ datum?: Record<string, unknown> }>).detail?.datum;
+      // pie slices wrap the data point in a d3 arc
+      const d = (raw && 'data' in raw ? raw.data : raw) as { key?: unknown; group?: unknown };
+      if (d && d.key !== undefined)
+        select.current?.({ key: String(d.key), group: String(d.group ?? '') });
+    };
+    CLICK_EVENTS.forEach((t) => events.addEventListener(t, h));
+    return () => CLICK_EVENTS.forEach((t) => events.removeEventListener(t, h));
+  }, [clickable, p.type, p.groups.length]);
+  const props = { data, ref };
   switch (p.type) {
     case 'barHorizontal':
       return p.groups.length > 1 ? (

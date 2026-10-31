@@ -13,7 +13,8 @@ import { ChartColumnFloating, Save } from '@carbon/icons-react';
 import { useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
 type SelEv = ChangeEvent<HTMLSelectElement>;
 type InEv = ChangeEvent<HTMLInputElement>;
-import type { Cell, ResultColumn } from '../../api/types';
+import type { Cell, DrillKeys, ResultColumn } from '../../api/types';
+import { keysForPoint } from '../../utils/drill';
 import {
   CHART_SORTS,
   CHART_SORT_LABELS,
@@ -53,6 +54,9 @@ export interface ChartPanelProps {
   dashboardOptions?: boolean;
   /** Problem with the stored chart (from the server). */
   storedError?: string;
+  /** Result columns that can be drilled on; with onDrill, makes chart elements clickable. */
+  drillFields?: string[] | null;
+  onDrill?(keys: DrillKeys): void;
 }
 
 const VIEWS: ChartView[] = ['table', 'chart', 'both'];
@@ -371,7 +375,18 @@ export function ChartPanel(p: ChartPanelProps) {
                 title={def.title}
                 xLabel={xCol?.label ?? def.x}
                 yLabel={yName}
+                onSelect={
+                  p.onDrill && p.drillFields?.length
+                    ? (pt) => {
+                        const keys = keysForPoint(def, p.drillFields!, columns, rows, pt);
+                        if (keys) p.onDrill!(keys);
+                      }
+                    : undefined
+                }
               />
+            )}
+            {prepared?.ok && p.onDrill && !!p.drillFields?.length && (
+              <p className="qf-chart-note">Click a bar, slice or point to see its detail rows.</p>
             )}
             {notes.map((n) => (
               <p key={n} className="qf-chart-note" data-testid="qf-chart-note">

@@ -2,7 +2,8 @@ import { Button, InlineLoading } from '@carbon/react';
 import { ChartColumnFloating, Renew } from '@carbon/icons-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import type { Report } from '../../api/types';
+import type { Cell, DrillKeys, Report } from '../../api/types';
+import { keysForPoint } from '../../utils/drill';
 import { newExecutionId } from '../../utils/format';
 import { prepareChart, type PreparedChart } from '../../utils/chartData';
 import { LazyChart } from './LazyChart';
@@ -11,14 +12,28 @@ type State =
   | { s: 'idle' }
   | { s: 'loading' }
   | { s: 'error'; message: string }
-  | { s: 'ready'; prepared: PreparedChart; hasMore: boolean; at: Date };
+  | {
+      s: 'ready';
+      prepared: PreparedChart;
+      hasMore: boolean;
+      at: Date;
+      columns: { name: string }[];
+      rows: Cell[][];
+    };
 
 /**
  * Opt-in live chart on a dashboard tile. Runs the report fresh through the normal
  * execute API (so sharing, row limits and parameter defaults apply exactly as for
  * "Run"); by default only when the user clicks "Load chart".
  */
-export function DashboardChart({ report }: { report: Report }) {
+export function DashboardChart({
+  report,
+  onDrill,
+}: {
+  report: Report;
+  /** Click on a chart element: open the report with this drill applied. */
+  onDrill?(keys: DrillKeys): void;
+}) {
   const def = report.chartDef!;
   const [st, setSt] = useState<State>({ s: 'idle' });
   const abort = useRef<AbortController | null>(null);
@@ -36,7 +51,14 @@ export function DashboardChart({ report }: { report: Report }) {
         res.columns.map((c) => ({ name: c.name, label: c.label, kind: c.kind })),
         res.rows,
       );
-      setSt({ s: 'ready', prepared, hasMore: !!res.hasMore, at: new Date() });
+      setSt({
+        s: 'ready',
+        prepared,
+        hasMore: !!res.hasMore,
+        at: new Date(),
+        columns: res.columns,
+        rows: res.rows,
+      });
     } catch (e) {
       if (ctl.signal.aborted) return;
       const msg = (e as Error).message;
@@ -91,6 +113,15 @@ export function DashboardChart({ report }: { report: Report }) {
             yLabel={def.y.join(', ')}
             height="220px"
             compact
+            onSelect={
+              onDrill
+                ? (pt) => {
+                    const cols = [def.x, ...(def.series ? [def.series] : [])];
+                    const keys = keysForPoint(def, cols, st.columns, st.rows, pt);
+                    if (keys) onDrill(keys);
+                  }
+                : undefined
+            }
           />
           <div className="qf-tile__chart-meta">
             <span>
