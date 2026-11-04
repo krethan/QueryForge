@@ -92,6 +92,22 @@ export interface Report {
   drillError?: string;
   /** Drill-down options for the caller (GET /reports/:id only). */
   drill?: DrillInfo;
+  /** The viewing user's own folder for this report (null = Unfiled; GET /reports only). */
+  folderId?: string | null;
+  /** Whether the viewing user starred this report (GET /reports only). */
+  favorite?: boolean;
+}
+
+/** A personal report folder (migration 006). */
+export interface Folder {
+  id: string;
+  name: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+export interface ReportPrefs {
+  folderId: string | null;
+  favorite: boolean;
 }
 export interface BuilderDef {
   /** 1 = original; 2 = may contain calculated fields (1 is still read unchanged). */

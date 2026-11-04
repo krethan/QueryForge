@@ -688,3 +688,76 @@ body {
   max-width: 36rem;
   padding: 0.5rem 0;
 }
+
+// ---- Folders and favorites ----
+.qf-tile__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+
+  h3 {
+    flex: 1;
+    min-width: 0;
+  }
+}
+.qf-star {
+  flex-shrink: 0;
+  margin: -0.5rem -0.5rem 0 0;
+}
+.qf-star--on svg {
+  fill: #f1c21b;
+}
+.qf-tile__folder {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--cds-text-secondary);
+}
+.qf-section__count {
+  font-weight: 400;
+  color: var(--cds-text-secondary);
+}
+.qf-folders__note {
+  font-size: 0.875rem;
+  color: var(--cds-text-secondary);
+  margin-bottom: 1rem;
+}
+.qf-folders__new {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+.qf-folders__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.qf-folders__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 3rem;
+  border-bottom: 1px solid var(--cds-border-subtle);
+}
+.qf-folders__name {
+  flex: 1;
+  font-weight: 600;
+}
+.qf-folders__count {
+  font-size: 0.75rem;
+  color: var(--cds-text-secondary);
+}
+.qf-folders__rename,
+.qf-folders__confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+}
+.qf-folders__confirm span {
+  flex: 1;
+  font-size: 0.875rem;
+}

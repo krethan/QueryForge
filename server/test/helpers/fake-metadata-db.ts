@@ -19,6 +19,9 @@ export class FakeMetadataDb implements MetadataDb {
   shareAudit: Row[] = [];
   schedules = new Map<string, Row>();
   locks = new Map<string, Row>();
+  folders = new Map<string, Row>();
+  /** key `${userId}|${reportId}` */
+  reportPrefs = new Map<string, Row>();
   statements: { sql: string; params: P }[] = [];
   private clock = 0;
   failNext?: Error;
@@ -248,6 +251,41 @@ export class FakeMetadataDb implements MetadataDb {
       if (s.includes('AND REPORT_ID = ?')) rows = rows.filter((r) => r.REPORT_ID === params[1]);
       return rows.sort((a, b) => String(b.STARTED_AT).localeCompare(String(a.STARTED_AT))) as T[];
     }
+    if (
+      /^SELECT FOLDER_ID, FOLDER_NAME, CREATED_AT, UPDATED_AT FROM \w+\.QF_FOLDERS WHERE OWNER_ID = \? ORDER BY FOLDER_NAME_KEY$/.test(
+        s,
+      )
+    ) {
+      return [...this.folders.values()]
+        .filter((f) => f.OWNER_ID === params[0])
+        .sort((a, b) => String(a.FOLDER_NAME_KEY).localeCompare(String(b.FOLDER_NAME_KEY)))
+        .map((f) => ({ ...f })) as T[];
+    }
+    if (
+      /^SELECT FOLDER_ID, FOLDER_NAME, CREATED_AT, UPDATED_AT FROM \w+\.QF_FOLDERS WHERE FOLDER_ID = \? AND OWNER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const f = this.folders.get(String(params[0]));
+      return (f && f.OWNER_ID === params[1] ? [{ ...f }] : []) as T[];
+    }
+    if (
+      /^SELECT REPORT_ID, FOLDER_ID, IS_FAVORITE FROM \w+\.QF_REPORT_PREFS WHERE USER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      return [...this.reportPrefs.values()]
+        .filter((p) => p.USER_ID === params[0])
+        .map((p) => ({ ...p })) as T[];
+    }
+    if (
+      /^SELECT FOLDER_ID, IS_FAVORITE FROM \w+\.QF_REPORT_PREFS WHERE USER_ID = \? AND REPORT_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const p = this.reportPrefs.get(`${params[0]}|${params[1]}`);
+      return (p ? [{ ...p }] : []) as T[];
+    }
     throw new Error(`FakeMetadataDb: unsupported query ${s}`);
   }
 
@@ -335,6 +373,8 @@ export class FakeMetadataDb implements MetadataDb {
       this.shares = this.shares.filter((x) => x.REPORT_ID !== params[0]); // ON DELETE CASCADE
       for (const [k, v] of this.schedules) if (v.REPORT_ID === params[0]) this.schedules.delete(k);
       for (const e of this.executions.values()) if (e.REPORT_ID === params[0]) e.REPORT_ID = null; // ON DELETE SET NULL
+      for (const [k, v] of this.reportPrefs)
+        if (v.REPORT_ID === params[0]) this.reportPrefs.delete(k); // ON DELETE CASCADE
       return 1;
     }
     if (s.startsWith('INSERT INTO') && s.includes('.QF_EXECUTIONS')) {
@@ -591,7 +631,105 @@ export class FakeMetadataDb implements MetadataDb {
       this.locks.delete(String(params[0]));
       return 1;
     }
+    if (
+      /^INSERT INTO \w+\.QF_FOLDERS \(FOLDER_ID, OWNER_ID, FOLDER_NAME, FOLDER_NAME_KEY, CREATED_AT, UPDATED_AT\) VALUES \(\?, \?, \?, \?, /.test(
+        s,
+      )
+    ) {
+      const [id, owner, name, key] = params;
+      if (!this.users.has(String(owner)))
+        throw new DbError('Foreign key violation.', '23503', -530);
+      if ([...this.folders.values()].some((f) => f.OWNER_ID === owner && f.FOLDER_NAME_KEY === key))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      const now = this.now();
+      this.folders.set(String(id), {
+        FOLDER_ID: id,
+        OWNER_ID: owner,
+        FOLDER_NAME: name,
+        FOLDER_NAME_KEY: key,
+        CREATED_AT: now,
+        UPDATED_AT: now,
+      });
+      return 1;
+    }
+    if (
+      /^UPDATE \w+\.QF_FOLDERS SET FOLDER_NAME = \?, FOLDER_NAME_KEY = \?, UPDATED_AT = .* WHERE FOLDER_ID = \? AND OWNER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const [name, key, id, owner] = params;
+      const f = this.folders.get(String(id));
+      if (!f || f.OWNER_ID !== owner) return 0;
+      if (
+        [...this.folders.values()].some(
+          (x) => x !== f && x.OWNER_ID === owner && x.FOLDER_NAME_KEY === key,
+        )
+      )
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      Object.assign(f, { FOLDER_NAME: name, FOLDER_NAME_KEY: key, UPDATED_AT: this.now() });
+      return 1;
+    }
+    if (/^DELETE FROM \w+\.QF_FOLDERS WHERE FOLDER_ID = \? AND OWNER_ID = \?$/.test(s)) {
+      const f = this.folders.get(String(params[0]));
+      if (!f || f.OWNER_ID !== params[1]) return 0;
+      this.folders.delete(String(params[0]));
+      for (const p of this.reportPrefs.values()) if (p.FOLDER_ID === params[0]) p.FOLDER_ID = null; // ON DELETE SET NULL
+      return 1;
+    }
+    if (
+      /^UPDATE \w+\.QF_REPORT_PREFS SET FOLDER_ID = NULL, UPDATED_AT = .* WHERE USER_ID = \? AND FOLDER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      let n = 0;
+      for (const p of this.reportPrefs.values())
+        if (p.USER_ID === params[0] && p.FOLDER_ID === params[1]) {
+          p.FOLDER_ID = null;
+          n++;
+        }
+      return n;
+    }
+    if (/^DELETE FROM \w+\.QF_REPORT_PREFS WHERE USER_ID = \? AND REPORT_ID = \?$/.test(s)) {
+      return this.reportPrefs.delete(`${params[0]}|${params[1]}`) ? 1 : 0;
+    }
+    if (
+      /^UPDATE \w+\.QF_REPORT_PREFS SET FOLDER_ID = \?, IS_FAVORITE = \?, UPDATED_AT = .* WHERE USER_ID = \? AND REPORT_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const [folder, fav, userId, reportId] = params;
+      const p = this.reportPrefs.get(`${userId}|${reportId}`);
+      if (!p) return 0;
+      this.checkPrefFks(userId, reportId, folder);
+      Object.assign(p, { FOLDER_ID: folder, IS_FAVORITE: fav, UPDATED_AT: this.now() });
+      return 1;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_REPORT_PREFS \(USER_ID, REPORT_ID, FOLDER_ID, IS_FAVORITE, UPDATED_AT\) VALUES \(\?, \?, \?, \?, /.test(
+        s,
+      )
+    ) {
+      const [userId, reportId, folder, fav] = params;
+      if (this.reportPrefs.has(`${userId}|${reportId}`))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      this.checkPrefFks(userId, reportId, folder);
+      this.reportPrefs.set(`${userId}|${reportId}`, {
+        USER_ID: userId,
+        REPORT_ID: reportId,
+        FOLDER_ID: folder,
+        IS_FAVORITE: fav,
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
     throw new Error(`FakeMetadataDb: unsupported update ${s}`);
+  }
+
+  private checkPrefFks(userId: unknown, reportId: unknown, folder: unknown) {
+    if (!this.users.has(String(userId)) || !this.reports.has(String(reportId)))
+      throw new DbError('Foreign key violation.', '23503', -530);
+    if (folder !== null && !this.folders.has(String(folder)))
+      throw new DbError('Foreign key violation.', '23503', -530);
   }
 
   async transaction<R>(fn: (tx: Omit<MetadataDb, 'transaction'>) => Promise<R>): Promise<R> {
@@ -604,6 +742,8 @@ export class FakeMetadataDb implements MetadataDb {
       shareAudit: this.shareAudit.map((x) => ({ ...x })),
       schedules: new Map([...this.schedules].map(([k, v]) => [k, { ...v }])),
       locks: new Map([...this.locks].map(([k, v]) => [k, { ...v }])),
+      folders: new Map([...this.folders].map(([k, v]) => [k, { ...v }])),
+      reportPrefs: new Map([...this.reportPrefs].map(([k, v]) => [k, { ...v }])),
     };
     try {
       return await fn(this);
@@ -616,6 +756,8 @@ export class FakeMetadataDb implements MetadataDb {
       this.shareAudit = snapshot.shareAudit;
       this.schedules = snapshot.schedules;
       this.locks = snapshot.locks;
+      this.folders = snapshot.folders;
+      this.reportPrefs = snapshot.reportPrefs;
       throw e;
     }
   }

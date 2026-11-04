@@ -362,6 +362,42 @@ the history (`GET /api/reports/:id/access`, owner only). The audit table has no 
 trail survives report deletion. Saved Reports lists reports you own and reports shared with you, filterable by
 owner and by your access (Owner / Editor / Viewer).
 
+## Folders and favorites
+
+Each user organises the dashboard for themselves:
+
+- **Favorites.** The star on a report tile adds it to a **Favorites** section at the top of the
+  dashboard (owned and shared reports alike). Click it again to unstar.
+- **Folders.** **Manage folders** creates, renames and deletes your folders (names are unique per user,
+  case-insensitive; "Unfiled" and "Favorites" are reserved). The folder button on a tile moves that
+  report into a folder or back to **Unfiled**. The **Folder** filter shows one folder (or Unfiled), and
+  **Group by folder** shows a section per folder plus Unfiled.
+- **Deleting a folder never deletes reports.** Its reports move to Unfiled, in one transaction.
+
+Folders and stars belong to the viewing user, not to the report. A report someone shares with you can be
+filed and starred by you without changing what the owner (or anyone else) sees. The server enforces this:
+every statement on the folder tables is parameterised and scoped by the signed-in user's ID; renaming,
+deleting or filing into another user's folder returns 404; starring or filing a report needs at least view
+access to it (`PUT /api/reports/:id/prefs`), and a report you lose access to drops off your dashboard
+along with its folder placement.
+
+API: `GET/POST /api/folders`, `PUT/DELETE /api/folders/:folderId`, `PUT /api/reports/:id/prefs`
+(`{ folderId?: uuid | null, favorite?: boolean }`). `GET /api/reports` adds `folderId` and `favorite` to
+each report.
+
+Storage is migration `006_folders_favorites.sql` in `META_SCHEMA` (QFMETA by default):
+
+- `QF_FOLDERS` (FOLDER_ID, OWNER_ID, FOLDER_NAME, FOLDER_NAME_KEY, timestamps). Folder names are unique
+  per `(OWNER_ID, FOLDER_NAME_KEY)`. The foreign key to `QF_USERS` uses ON DELETE CASCADE.
+- `QF_REPORT_PREFS` (USER_ID, REPORT_ID, FOLDER_ID, IS_FAVORITE, UPDATED_AT) with primary key
+  `(USER_ID, REPORT_ID)`. FOLDER_ID NULL means Unfiled. Foreign keys: the user and report use ON DELETE
+  CASCADE, and the folder uses ON DELETE SET NULL. A row is removed once a report is both unfiled and
+  unstarred.
+
+Both tables are on the protected-objects list, so reporting SQL cannot read them. The migration and the
+routes have only been tested against the in-memory fake metadata database. They have not been run on a
+real IBM i or Db2 for i yet.
+
 ## Security model
 
 - Session JWT in HttpOnly SameSite=Strict cookie; double-submit CSRF token + Origin check; login lockout.
@@ -390,6 +426,8 @@ owner and by your access (Owner / Editor / Viewer).
   drilled automatically; an empty (NULL) value mapped to a target parameter falls back
   to that parameter's default; ad-hoc drill runs are not linked to the report in history.
 
+- Folders and favorites: there is no drag-and-drop or bulk move (one report at a time), no nested
+  folders, and no folder sharing. Migration 006 has not been applied to a real Db2 for i.
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
   `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).
 - Mapepire 1.0.2 has no statement cancel API; cancel/timeout close the job.
