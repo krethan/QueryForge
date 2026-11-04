@@ -23,6 +23,7 @@ import type {
   ReportInput,
   ReportSpec,
   ReportSqlPreview,
+  CalcValidation,
   RunResponse,
   SchemaColumnsResponse,
   SchemaTablesResponse,
@@ -281,6 +282,17 @@ export const api = {
   /** Report Builder: the SELECT the server built for this selection (no execution). */
   previewReportSql: (spec: ReportSpec, signal?: AbortSignal) =>
     json<ReportSqlPreview>('POST', '/schema/sql', spec, signal),
+  /** Report Builder: check one calculated-field expression against the report's tables. */
+  validateCalc: (
+    body: {
+      schema: string;
+      table: string;
+      alias?: string;
+      joins: { schema: string; table: string; alias?: string }[];
+      expression: string;
+    },
+    signal?: AbortSignal,
+  ) => json<CalcValidation>('POST', '/schema/calc/validate', body, signal),
   /** Report Builder: suggested ON conditions for joining a table to the ones already added. */
   joinSuggestions: (
     tables: { alias: string; schema: string; table: string }[],

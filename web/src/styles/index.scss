@@ -399,8 +399,33 @@ body {
   gap: 0.5rem;
   align-items: baseline;
 }
-.qf-builder__mono {
-  font-family: var(--cds-code-01-font-family, monospace);
+.qf-builder__mono,
+.qf-builder__mono textarea {
+  font-family: var(--cds-code-01-font-family, 'IBM Plex Mono', monospace);
+}
+.qf-calc__head {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+  margin-bottom: 0.75rem;
+}
+.qf-calc__where {
+  margin: 0.25rem 0 0;
+  padding: 0 1rem;
+  font-family: var(--cds-code-01-font-family, 'IBM Plex Mono', monospace);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--cds-text-error, #da1e28);
+  white-space: pre;
+  overflow-x: auto;
+}
+.qf-calc__status {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
 }
 .qf-builder__h3 {
   font-size: 1rem;

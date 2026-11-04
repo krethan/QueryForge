@@ -44,6 +44,7 @@ import type {
   SchemaColumn,
   SchemaTable,
   SortDirection,
+  CalcType,
 } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
@@ -54,6 +55,13 @@ import { SaveReportModal, type SaveValues } from '../components/SaveReportModal'
 import { BuilderFilters, type ColumnChoice } from '../components/BuilderFilters';
 import { BuilderGrouping, type GroupRow } from '../components/BuilderGrouping';
 import { RunParamsModal } from '../components/RunParamsModal';
+import {
+  CALC_MARKER,
+  CalculatedFields,
+  calcNameProblem,
+  type CalcRow,
+  type FieldOption,
+} from '../components/CalculatedFields';
 import { newExecutionId } from '../utils/format';
 import {
   aggName,
@@ -70,6 +78,29 @@ import {
 
 /** The base table is always `BASE`; joined tables get a generated key. */
 const BASE = 'base';
+/** Pseudo table key of the calculated fields (their server alias is `@CALC`). */
+const CALC = 'calc';
+const CALC_ALIAS = '@CALC';
+const CALC_COLUMN: Record<CalcType, Pick<SchemaColumn, 'type' | 'scale' | 'displayType'>> = {
+  integer: { type: 'INTEGER', scale: 0, displayType: 'whole number' },
+  decimal: { type: 'DECIMAL', scale: 2, displayType: 'number' },
+  char: { type: 'VARCHAR', scale: null, displayType: 'character' },
+  date: { type: 'DATE', scale: null, displayType: 'date' },
+  timestamp: { type: 'TIMESTAMP', scale: null, displayType: 'timestamp' },
+};
+/** A calculated field as a column of the `CALC` pseudo source (for pickers and filters). */
+export function calcColumn(r: CalcRow, i: number): SchemaColumn {
+  const t = r.type ? CALC_COLUMN[r.type] : { type: 'OTHER', scale: null, displayType: 'unknown' };
+  return {
+    name: r.id,
+    ...t,
+    length: null,
+    precision: null,
+    nullable: true,
+    text: r.name,
+    ordinal: i + 1,
+  };
+}
 export const MAX_JOINS = 8;
 const ALIAS_RE = /^[A-Z][A-Z0-9_]{0,9}$/;
 
@@ -178,6 +209,7 @@ export async function hydrate(spec: ReportSpec): Promise<Hydration> {
   // alias → source key (T1 / base alias → BASE; join i → its alias or T{i+2})
   const keyOf = new Map<string, string>([['T1', BASE]]);
   if (spec.alias) keyOf.set(spec.alias.toUpperCase(), BASE);
+  keyOf.set(CALC_ALIAS, CALC);
   joins.forEach((j, i) => keyOf.set((j.alias || `T${i + 2}`).toUpperCase(), j.key));
   const src = (t?: string) => (t ? (keyOf.get(t.toUpperCase()) ?? BASE) : BASE);
   const pick = (r: { table?: string; column: string }) => `${src(r.table)}|${r.column}`;
@@ -223,10 +255,20 @@ export async function hydrate(spec: ReportSpec): Promise<Hydration> {
         }
       : { kind: 'row' as const, ...fromFilter(f, pick(f), newExecutionId) },
   );
+  const calcs: CalcRow[] = (spec.calculated ?? []).map((c) => ({
+    key: newExecutionId(),
+    id: c.id,
+    name: c.name,
+    expression: c.expression,
+    // the server re-checks every field as soon as the editor shows it
+    status: c.type ? 'ok' : 'idle',
+    type: c.type,
+  }));
   return {
     table,
     columns: base.columns,
     joins,
+    calcs,
     picked,
     sort,
     filters,
@@ -248,6 +290,7 @@ interface Hydration {
   table: SchemaTable;
   columns: SchemaColumn[];
   joins: JoinedTable[];
+  calcs: CalcRow[];
   picked: ColPick[];
   sort: SortRow[];
   filters: FilterNode[];
@@ -279,6 +322,7 @@ export function ReportBuilderPage() {
   const [columnsError, setColumnsError] = useState<unknown>(null);
 
   const [joins, setJoins] = useState<JoinedTable[]>([]);
+  const [calcs, setCalcs] = useState<CalcRow[]>([]);
   const [picked, setPicked] = useState<ColPick[]>([]);
   const [sort, setSort] = useState<SortRow[]>([]);
   const [joinChoice, setJoinChoice] = useState('');
@@ -389,6 +433,7 @@ export function ReportBuilderPage() {
       setColumnsLoading(false);
       setColumns(h.columns);
       setJoins(h.joins);
+      setCalcs(h.calcs);
       setPicked(h.picked);
       setSort(h.sort);
       setFilters(h.filters);
@@ -405,6 +450,7 @@ export function ReportBuilderPage() {
     setPicked([]);
     setSort([]);
     setJoins([]);
+    setCalcs([]);
     setFilters([]);
     setFilterLogic('AND');
     setGroupBy([]);
@@ -428,6 +474,7 @@ export function ReportBuilderPage() {
   const aliasOf = useCallback(
     (key: string) => {
       if (key === BASE) return 'T1';
+      if (key === CALC) return CALC_ALIAS;
       const i = joins.findIndex((j) => j.key === key);
       return i < 0 ? '?' : joins[i].alias || `T${i + 2}`;
     },
@@ -438,6 +485,7 @@ export function ReportBuilderPage() {
   const refOf = useCallback(
     (pick: string): ReportColumnRef => {
       const p = splitKey(pick);
+      if (p.src === CALC) return { table: CALC_ALIAS, column: p.column };
       return joins.length ? { table: aliasOf(p.src), column: p.column } : { column: p.column };
     },
     [joins.length, aliasOf],
@@ -446,13 +494,29 @@ export function ReportBuilderPage() {
     (pick: string): SchemaColumn | undefined => {
       if (!pick) return undefined;
       const p = splitKey(pick);
+      if (p.src === CALC) {
+        const i = calcs.findIndex((c) => c.id === p.column);
+        return i < 0 ? undefined : calcColumn(calcs[i], i);
+      }
       const cols = p.src === BASE ? columns : joins.find((j) => j.key === p.src)?.columns;
       return cols?.find((c) => c.name === p.column);
     },
-    [columns, joins],
+    [columns, joins, calcs],
   );
   const kindOf = useCallback((pick: string) => valueKind(columnOf(pick)), [columnOf]);
-  const columnName = useCallback((pick: string) => (pick ? splitKey(pick).column : null), []);
+  const calcName = useCallback(
+    (id: string) => calcs.find((c) => c.id === id)?.name.trim() || id,
+    [calcs],
+  );
+  /** Bare column name (calculated fields: their name), used for default total names. */
+  const columnName = useCallback(
+    (pick: string) => {
+      if (!pick) return null;
+      const p = splitKey(pick);
+      return p.src === CALC ? calcName(p.column) : p.column;
+    },
+    [calcName],
+  );
   const aggNames = useMemo(
     () => new Map(aggregates.map((a) => [a.key, aggName(a, columnName)])),
     [aggregates, columnName],
@@ -481,23 +545,41 @@ export function ReportBuilderPage() {
         .map((s) =>
           s.agg
             ? { aggregate: aggNames.get(s.agg)!, direction: s.direction }
-            : qualified
+            : qualified || s.src === CALC
               ? { table: aliasOf(s.src), column: s.column, direction: s.direction }
               : { column: s.column, direction: s.direction },
         ),
     [sort, aggNames, aliasOf],
   );
 
+  /** Calculated fields sent to the server (empty ones are left out until they are typed). */
+  // keyed on the text only, so validation status changes do not rebuild the spec
+  const calcKey = JSON.stringify(
+    calcs.filter((c) => c.expression.trim()).map((c) => [c.id, c.name.trim(), c.expression]),
+  );
+  const calculated = useMemo(
+    () =>
+      (JSON.parse(calcKey) as [string, string, string][]).map(([id, name, expression]) => ({
+        id,
+        name,
+        expression,
+      })),
+    [calcKey],
+  );
   const spec = useMemo<ReportSpec>(() => {
     if (!selected) return { schema: '', table: '', columns: [] };
+    const calc = calculated.length ? { calculated } : {};
     if (joins.length === 0)
       // Single table: the original, unqualified spec (and SQL when nothing else is used).
       return {
         schema: selected.schema,
         table: selected.name,
-        columns: picked.map((p) => p.column),
+        columns: picked.map((p) =>
+          p.src === CALC ? { table: CALC_ALIAS, column: p.column } : p.column,
+        ),
         sort: sortSpec(false),
         ...extras,
+        ...calc,
       };
     return {
       schema: selected.schema,
@@ -520,8 +602,9 @@ export function ReportBuilderPage() {
       columns: picked.map((p) => ({ table: aliasOf(p.src), column: p.column })),
       sort: sortSpec(true),
       ...extras,
+      ...calc,
     };
-  }, [selected, picked, joins, aliasOf, extras, sortSpec]);
+  }, [selected, picked, joins, aliasOf, extras, sortSpec, calculated]);
 
   const hasOutput = picked.length > 0 || aggregates.length > 0;
 
@@ -579,7 +662,12 @@ export function ReportBuilderPage() {
   );
   const joined = joins.length > 0;
   /** Display name of a picked column: plain for one table, alias-qualified with joins. */
-  const label = (p: ColPick) => (joined ? `${aliasOf(p.src)}.${p.column}` : p.column);
+  const label = (p: ColPick) =>
+    p.src === CALC
+      ? `${CALC_MARKER} ${calcName(p.column)}`
+      : joined
+        ? `${aliasOf(p.src)}.${p.column}`
+        : p.column;
   const isPicked = (src: string, column: string) =>
     picked.some((p) => p.src === src && p.column === column);
 
@@ -816,7 +904,8 @@ export function ReportBuilderPage() {
         // The server re-validates the definition and regenerates SQL and parameters from it.
         sql,
         parameters: previewParams,
-        builderDef: { version: 1 as const, spec },
+        // version 2 only when calculated fields are used; older definitions stay version 1
+        builderDef: { version: spec.calculated?.length ? (2 as const) : (1 as const), spec },
       };
       // a chart is saved with the report only when it is shown (Chart or Both)
       const chartDef =
@@ -1094,6 +1183,60 @@ export function ReportBuilderPage() {
     </section>
   );
 
+  // ---- calculated fields ----
+  const calcFields: FieldOption[] = sources.flatMap((src) =>
+    src.columns.map((c) => {
+      const plain = /^[A-Za-z][A-Za-z0-9_]*$/.test(c.name)
+        ? c.name
+        : `"${c.name.replace(/"/g, '""')}"`;
+      const insert = joined ? `${aliasOf(src.key)}.${plain}` : plain;
+      return {
+        group: joined ? `${aliasOf(src.key)} · ${src.table.name}` : src.table.name,
+        insert,
+        text: `${insert} — ${c.displayType}`,
+      };
+    }),
+  );
+  const calcContext = JSON.stringify([
+    selected?.schema,
+    selected?.name,
+    joins.map((j, i) => [j.table.schema, j.table.name, j.alias || `T${i + 2}`]),
+  ]);
+  const validateCalc = (expression: string, signal: AbortSignal) =>
+    api.validateCalc(
+      {
+        schema: selected?.schema ?? '',
+        table: selected?.name ?? '',
+        joins: joins.map((j) => ({
+          schema: j.table.schema,
+          table: j.table.name,
+          ...(j.alias ? { alias: j.alias } : {}),
+        })),
+        expression,
+      },
+      signal,
+    );
+  /** Removing a field also removes every use of it (columns, sorts, filters, groups, totals). */
+  const removeCalc = (id: string) => {
+    const k = `${CALC}|${id}`;
+    setCalcs((rows) => rows.filter((r) => r.id !== id));
+    setPicked((rows) => rows.filter((p) => !(p.src === CALC && p.column === id)));
+    setSort((rows) => rows.filter((r) => !(r.src === CALC && r.column === id)));
+    setGroupBy((rows) => rows.filter((g) => g.pick !== k));
+    const gone = new Set(aggregates.filter((a) => a.pick === k).map((a) => a.key));
+    setAggregates((rows) => rows.filter((a) => a.pick !== k));
+    setHaving((rows) => rows.filter((h) => !gone.has(h.aggregate)));
+    setFilters((nodes) =>
+      nodes
+        .map((n) => (n.kind === 'group' ? { ...n, rows: n.rows.filter((r) => r.pick !== k) } : n))
+        .filter((n) => (n.kind === 'group' ? n.rows.length > 0 : n.pick !== k)),
+    );
+    setResult(null);
+  };
+  const calcIssues = calcs.filter(
+    (c) => c.status === 'error' || calcNameProblem(c, calcs) || c.status === 'checking',
+  );
+
   // ---- filters, grouping and totals ----
   const columnChoices: ColumnChoice[] = sources.map((src) => ({
     label: joined ? `${aliasOf(src.key)} · ${src.table.name}` : src.table.name,
@@ -1102,6 +1245,13 @@ export function ReportBuilderPage() {
       text: joined ? `${aliasOf(src.key)}.${c.name}` : c.name,
     })),
   }));
+  if (calcs.length)
+    columnChoices.push({
+      label: `${CALC_MARKER} Calculated fields`,
+      items: calcs
+        .filter((c) => c.status === 'ok')
+        .map((c) => ({ value: `${CALC}|${c.id}`, text: `${CALC_MARKER} ${calcName(c.id)}` })),
+    });
   const pickLabel = (pick: string) => (pick ? label(splitKey(pick)) : '');
   const grouping = groupBy.length > 0 || aggregates.length > 0;
   const groupKeys = new Set(groupBy.map((g) => g.pick));
@@ -1119,6 +1269,7 @@ export function ReportBuilderPage() {
     !running &&
     joinProblems.length === 0 &&
     !aliasClash &&
+    calcIssues.length === 0 &&
     filterIssues.length === 0;
   const pickerHint = !selected
     ? 'Pick a table to see its columns.'
@@ -1403,6 +1554,19 @@ export function ReportBuilderPage() {
                                       text={c.name}
                                     />
                                   ))}
+                              {calcs.some((c) => c.status === 'ok') && (
+                                <SelectItemGroup label={`${CALC_MARKER} Calculated fields`}>
+                                  {calcs
+                                    .filter((c) => c.status === 'ok')
+                                    .map((c) => (
+                                      <SelectItem
+                                        key={c.id}
+                                        value={`${CALC}|${c.id}`}
+                                        text={`${CALC_MARKER} ${calcName(c.id)}`}
+                                      />
+                                    ))}
+                                </SelectItemGroup>
+                              )}
                             </Select>
                             <Select
                               id={`qb-sort-dir-${row.key}`}
@@ -1446,6 +1610,16 @@ export function ReportBuilderPage() {
                       </Button>
                     </div>
                   </div>
+                  <CalculatedFields
+                    rows={calcs}
+                    fields={calcFields}
+                    validate={validateCalc}
+                    context={calcContext}
+                    isPicked={(id) => isPicked(CALC, id)}
+                    onToggleOutput={(id, on) => toggleColumn(CALC, id, on)}
+                    onChange={setCalcs}
+                    onRemove={removeCalc}
+                  />
                   <BuilderFilters
                     nodes={filters}
                     logic={filterLogic}
@@ -1552,7 +1726,13 @@ export function ReportBuilderPage() {
           <Button
             kind="primary"
             renderIcon={Save}
-            disabled={!sql || Boolean(running) || previewing || filterIssues.length > 0}
+            disabled={
+              !sql ||
+              Boolean(running) ||
+              previewing ||
+              filterIssues.length > 0 ||
+              calcIssues.length > 0
+            }
             onClick={() => {
               setSaveMode('update');
               setSaveError(null);
@@ -1565,7 +1745,13 @@ export function ReportBuilderPage() {
         <Button
           kind="secondary"
           renderIcon={Save}
-          disabled={!sql || Boolean(running) || previewing || filterIssues.length > 0}
+          disabled={
+            !sql ||
+            Boolean(running) ||
+            previewing ||
+            filterIssues.length > 0 ||
+            calcIssues.length > 0
+          }
           onClick={() => {
             setSaveMode('new');
             setSaveError(null);

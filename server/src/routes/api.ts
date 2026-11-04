@@ -54,7 +54,10 @@ import {
   type JoinedReportSpec,
   type OutputColumn,
   type ResolvedSource,
+  validateCalculation,
+  type CalculatedFieldSpec,
 } from '../catalog/join-builder.js';
+import { MAX_CALCULATED, MAX_EXPRESSION_LENGTH, TYPE_HINT } from '../catalog/calc-expr.js';
 import {
   availableColumns,
   defaultDetailColumns,
@@ -140,6 +143,13 @@ const filterGroupSchema = z.object({
   logic: z.enum(['AND', 'OR']),
   filters: z.array(filterSchema).min(1).max(MAX_FILTERS),
 });
+const calculatedSchema = z.object({
+  id: z.string().min(1).max(30),
+  name: z.string().min(1).max(64),
+  // a little over the limit so the parser can report it with a clear message
+  expression: z.string().max(MAX_EXPRESSION_LENGTH + 1),
+  type: z.enum(['integer', 'decimal', 'char', 'date', 'timestamp']).optional(),
+});
 const reportSpecBase = z.object({
   schema: name128,
   table: name128,
@@ -206,6 +216,8 @@ const reportSpecBase = z.object({
     )
     .max(MAX_HAVING)
     .optional(),
+  /** Calculated fields (expression text is parsed and checked server-side, never run as SQL). */
+  calculated: z.array(calculatedSchema).max(MAX_CALCULATED).optional(),
 });
 const needsOutput = (s: { columns: unknown[]; aggregates?: unknown[] }, ctx: z.RefinementCtx) => {
   if (s.columns.length === 0 && !s.aggregates?.length)
@@ -219,6 +231,16 @@ const builderQuerySchema = reportSpecBase
     values: parameterValuesSchema.optional(),
   })
   .superRefine(needsOutput);
+const calcValidateSchema = z.object({
+  schema: name128,
+  table: name128,
+  alias: alias.optional(),
+  joins: z
+    .array(z.object({ schema: name128, table: name128, alias: alias.optional() }))
+    .max(MAX_JOINS)
+    .optional(),
+  expression: z.string().max(MAX_EXPRESSION_LENGTH + 1),
+});
 const joinSuggestSchema = z.object({
   tables: z
     .array(z.object({ alias, schema: name128, table: name128 }))
@@ -232,6 +254,7 @@ type BuilderInput = z.infer<typeof reportSpecSchema>;
 
 /** Single-table selections without aliases, filters or totals keep the original, unqualified SQL. */
 const isSimple = (spec: BuilderInput) =>
+  !spec.calculated?.length &&
   !spec.joins?.length &&
   !spec.alias &&
   !spec.filters?.length &&
@@ -259,6 +282,7 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
       aliases: undefined as string[] | undefined,
       columns: undefined as OutputColumn[] | undefined,
       sources: [resolved] as ResolvedSource[],
+      calculated: [] as CalculatedFieldSpec[],
     };
   }
   const joins = spec.joins ?? [];
@@ -277,20 +301,34 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
     parameters: built.parameters,
     columns: built.columns as OutputColumn[] | undefined,
     sources: sources as ResolvedSource[],
+    calculated: built.calculated,
   };
 }
 
-/** Versioned Report Builder definition stored in QF_REPORTS.BUILDER_DEF. */
-export const BUILDER_DEF_VERSION = 1;
-const builderDefSchema = z.object({
-  version: z.literal(BUILDER_DEF_VERSION),
-  spec: reportSpecSchema,
-});
+/**
+ * Versioned Report Builder definition stored in QF_REPORTS.BUILDER_DEF (a JSON column,
+ * so new versions need no database migration).
+ *  - v1: the original shape; it cannot carry calculated fields.
+ *  - v2: adds `spec.calculated` ({ id, name, expression, type }). Written only when a
+ *    report has calculated fields, so reports without them keep saving as v1.
+ */
+export const BUILDER_DEF_VERSION = 2;
+const builderDefSchema = z.union([
+  z.object({
+    version: z.literal(1),
+    spec: reportSpecSchema.refine((s) => !s.calculated?.length, {
+      message: 'Version 1 definitions cannot contain calculated fields; use version 2.',
+      path: ['calculated'],
+    }),
+  }),
+  z.object({ version: z.literal(2), spec: reportSpecSchema }),
+]);
 export type BuilderDef = z.infer<typeof builderDefSchema>;
 
 /**
  * Validate a stored or submitted builder definition: shape, version, and every name
- * against the catalog. Returns the regenerated SQL and parameters.
+ * against the catalog. Returns the regenerated SQL and parameters; the returned
+ * definition carries the server-inferred type of every calculated field.
  */
 async function rebuildFromDef(d: ApiDeps, ownerId: string, raw: unknown) {
   const parsed = builderDefSchema.safeParse(raw);
@@ -304,7 +342,10 @@ async function rebuildFromDef(d: ApiDeps, ownerId: string, raw: unknown) {
         .join('; ')}`,
     );
   const built = await buildQuery(d, ownerId, parsed.data.spec);
-  return { def: parsed.data, ...built };
+  const def: BuilderDef = built.calculated.length
+    ? { version: 2, spec: { ...parsed.data.spec, calculated: built.calculated } }
+    : parsed.data;
+  return { def, ...built };
 }
 
 /** Chart settings in a request body: validated strictly; null clears / disables. */
@@ -670,7 +711,40 @@ export function apiRouter(d: ApiDeps): Router {
         ...(built.aliases
           ? { warnings: built.warnings, aliases: built.aliases, parameters: built.parameters }
           : {}),
+        ...(built.calculated.length ? { calculated: built.calculated } : {}),
       });
+    }),
+  );
+  // Calculated-field editor: parse and type-check one expression against the report's
+  // tables. Expression problems are an ordinary answer (ok: false), not an HTTP error.
+  r.post(
+    '/schema/calc/validate',
+    h(async (req, res) => {
+      const body = calcValidateSchema.parse(req.body);
+      const owner = req.session!.user.id;
+      const sources = [];
+      for (const t of [{ schema: body.schema, table: body.table }, ...(body.joins ?? [])])
+        sources.push(await d.catalog.resolveTable(owner, t.schema, t.table));
+      try {
+        const v = validateCalculation(body, sources, body.expression);
+        res.json({
+          ok: true,
+          type: v.type,
+          hint: TYPE_HINT[v.type],
+          sql: v.sql,
+          columns: v.columns,
+        });
+      } catch (e) {
+        if (e instanceof AppError && e.code === 'INVALID_CALCULATION') {
+          const position = typeof e.details?.position === 'number' ? e.details.position : null;
+          res.json({
+            ok: false,
+            error: { message: e.message.replace(/^Calculated field "Check": /, ''), position },
+          });
+          return;
+        }
+        throw e;
+      }
     }),
   );
   // Join suggestions: catalog foreign keys first, then same-name, same-type columns.
@@ -983,7 +1057,7 @@ export function apiRouter(d: ApiDeps): Router {
       built,
       applied: derived.applied,
       columns,
-      available: availableColumns(rebuilt.aliases, rebuilt.sources),
+      available: availableColumns(rebuilt.aliases, rebuilt.sources, rebuilt.calculated),
     };
   }
 
