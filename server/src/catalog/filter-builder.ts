@@ -100,6 +100,8 @@ export interface BuildContext {
   resolve(ref: { table?: string; column: unknown }, what: string): { i: number; c: CatalogColumn };
   colRef(i: number, c: CatalogColumn): string;
   label(i: number, c: CatalogColumn): string;
+  /** Base for a generated total name (default: the column name). */
+  baseName?(i: number, c: CatalogColumn): string;
 }
 
 const bad = (code: string, message: string) => new AppError(400, code, message);
@@ -324,7 +326,7 @@ export function buildWhere(
 // Aggregates and HAVING
 // ---------------------------------------------------------------------------
 
-const OUTPUT_NAME = /^[A-Za-z][A-Za-z0-9_ ]{0,63}$/;
+export const OUTPUT_NAME = /^[A-Za-z][A-Za-z0-9_ ]{0,63}$/;
 
 export interface BuiltAggregate {
   fn: AggregateFn;
@@ -351,7 +353,7 @@ export function buildAggregates(list: AggregateSpec[], ctx: BuildContext): Built
     if (hasColumn) {
       const { i, c } = ctx.resolve({ table: a.table, column: a.column }, 'Total column');
       col = c;
-      base = c.name;
+      base = ctx.baseName?.(i, c) ?? c.name;
       const cat = typeCategory(c.type);
       if ((fn === 'SUM' || fn === 'AVG') && cat !== 'numeric')
         throw bad(

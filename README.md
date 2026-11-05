@@ -257,7 +257,7 @@ sends is ignored for builder reports. Reports written as SQL keep working unchan
 If a table or column has since disappeared, the button is disabled and shows the server's reason. See
 [`docs/IBMI_SETUP.md`](docs/IBMI_SETUP.md#migration-004--report-builder-definitions) for applying the migration (no new grants needed).
 
-Limitations: joins only on column equality; no computed columns or expressions; one level of filter groups;
+Limitations: joins only on column equality; calculated fields have their own limits (see below); one level of filter groups;
 filters on totals only compare numbers; changing a builder report's SQL by hand in the SQL editor detaches it
 from the builder (the definition is dropped on that save, so it can no longer be reopened in the builder). Views, logical files, aliases
 and MQTs are listed alongside physical tables, and whether they are read-only depends on the object itself;
@@ -266,6 +266,45 @@ LOB/XML/DATALINK/ROWID columns are listed but may be awkward to display; the tab
 with the catalog's spelling (`SYSTEM_TABLE_NAME`/`SYSTEM_TABLE_SCHEMA` are used for the authority check), and a
 name that differs only by case from another object is treated as ambiguous. Like the rest of the app, this has
 been tested with fakes only — not against a live IBM i.
+
+### Calculated fields (builder definition version 2)
+
+**Calculated fields** (Report Builder, under the column list) add named expressions such as
+`QTY * UNIT_PRICE` or `CASE WHEN AMOUNT > 1000 THEN 'Big' ELSE 'Small' END`. Each one has a name, an expression box
+with an **Insert field** picker, a live server check (inline error with a caret at the position, or a
+`Result: number (decimal)`-style type hint) and a **Show as a column** switch. A calculated field is marked **ƒ** in
+every picker and can be used as an output column, a sort key, a filter, a group-by column, the column of a total
+(and so in total filters/`HAVING`), a chart axis or series, a drill column (including drill-to-report) and in Excel
+export.
+
+- **Grammar** (hand-written parser, no `eval`, no new dependencies): column names (`COL`, or `T2.COL` when tables are
+  joined; `"quoted"` names allowed), numbers, `'strings'`, `DATE 'YYYY-MM-DD'`, `NULL`, `+ - * /`, `||`, parentheses,
+  `CASE WHEN … THEN … [ELSE …] END` with `= <> != < <= > >=`, `AND`/`OR`/`NOT` and `IS [NOT] NULL` in conditions, and
+  the functions `COALESCE`, `NULLIF`, `ROUND`, `ABS`, `UPPER`, `LOWER`, `TRIM`, `SUBSTR` (also spelled `SUBSTRING`),
+  `LENGTH`, `YEAR`, `MONTH`, `DAY`. Every column is checked against the QSYS2 catalog for the tables in the report.
+- **The browser never sends SQL.** It sends the expression text; the server parses it, type-checks it and generates the
+  SQL itself, and recomputes the stored result type on save.
+- **Literals are re-serialized, not copied.** Numbers and strings are inlined into the generated SQL in a canonical
+  form the server writes itself (strings re-quoted with `'` doubled, numbers normalised), not as `?` markers, so the
+  order of the report's other bound parameters never changes. Nothing the user typed is pasted into the SQL verbatim.
+- **Division uses `NULLIF`:** `a / b` becomes `(a) / NULLIF((b), 0)`, so dividing by zero gives `NULL` instead of an
+  error. When both sides are integers the result is wrapped in `INTEGER(…)` so the type is predictable.
+- `SUBSTR` is generated as `SUBSTRING`, which does not fail when the range runs past the end of the value.
+- **Limits:** 1,000 characters per expression, nesting depth 20, 500 tokens, string literals up to 200 characters,
+  numbers up to 31 digits, 20 calculated fields per report.
+- **Not supported:** TIME, LOB, XML and binary columns; one calculated field referring to another; date arithmetic
+  (`date + 1`, date differences); aggregate functions inside an expression (use a total instead); a bare condition
+  as a value (use `CASE`).
+- **Saving:** a definition with calculated fields is saved as `{ version: 2, spec }`; definitions without them stay
+  version 1, and a version 1 definition that contains calculated fields is rejected. Both live in the existing
+  `QF_REPORTS.BUILDER_DEF` JSON column, so **no database migration is needed**. Older app builds will refuse to
+  reopen a version 2 definition rather than misread it.
+- **Excel export** writes the computed values only, never Excel formulas.
+- **Demo mode** computes calculated fields from the demo rows itself (the demo `ORDER_LINES` table has `UNIT_PRICE`
+  and some `NULL` quantities to exercise this).
+- Like the rest of the app, calculated fields have been tested with fakes and the demo engine only. **Nothing here
+  has been tested against a real IBM i**; in particular the generated Db2 for i SQL (e.g. `SUBSTRING`, `INTEGER`,
+  `DECIMAL` precision of results) has not been run on a real system.
 
 ## Charts
 

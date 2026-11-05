@@ -94,7 +94,8 @@ export interface Report {
   drill?: DrillInfo;
 }
 export interface BuilderDef {
-  version: 1;
+  /** 1 = original; 2 = may contain calculated fields (1 is still read unchanged). */
+  version: 1 | 2;
   spec: ReportSpec;
 }
 
@@ -334,7 +335,26 @@ export interface ReportSpec {
   groupBy?: ReportColumnRef[];
   aggregates?: ReportAggregate[];
   having?: ReportHaving[];
+  /** Named calculated fields; referenced elsewhere as { table: '@CALC', column: id }. */
+  calculated?: CalculatedField[];
 }
+
+/** Pseudo table for calculated-field references. */
+export const CALC_TABLE = '@CALC';
+export type CalcType = 'integer' | 'decimal' | 'char' | 'date' | 'timestamp';
+export interface CalculatedField {
+  /** Stable identifier (letters, digits, _), unique in the report. */
+  id: string;
+  /** Output column name. */
+  name: string;
+  /** Expression in the calculated-field language (never SQL from the browser). */
+  expression: string;
+  /** Result type inferred by the server (ignored on input). */
+  type?: CalcType;
+}
+export type CalcValidation =
+  | { ok: true; type: CalcType; hint: string; sql: string; columns: string[] }
+  | { ok: false; error: { message: string; position: number | null } };
 
 export type FilterLogic = 'AND' | 'OR';
 export type FilterOp =
@@ -402,6 +422,8 @@ export interface ReportSqlPreview {
   warnings?: string[];
   /** Bound values in marker order: fixed filter values and "Ask when run" parameters. */
   parameters?: ParameterDef[];
+  /** Calculated fields with their server-inferred types. */
+  calculated?: CalculatedField[];
 }
 
 export interface ReportBuilderRun extends RunResponse {

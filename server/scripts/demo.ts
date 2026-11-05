@@ -18,6 +18,7 @@ import bcrypt from 'bcryptjs';
 import { ReportRepository } from '../src/reports/reports.js';
 import { FakeMetadataDb } from '../test/helpers/fake-metadata-db.js';
 import { col, fakeFactory, type Scripted } from '../test/helpers/fake-mapepire.js';
+import { evaluate, parse as parseCalc, type CalcValue } from '../src/catalog/calc-expr.js';
 import { fileURLToPath } from 'node:url';
 import { FakeLdap, FakeOidc } from '../test/helpers/fake-auth.js';
 import { MemoryMailer } from '../src/mail/mailer.js';
@@ -140,6 +141,7 @@ const catalogTables = [
       ['ORDER_ID', 'INTEGER', 4, 10, 0, 'N', 'Order number'],
       ['ITEM', 'CHAR', 8, null, null, 'N', 'Item code'],
       ['QTY', 'INTEGER', 4, 10, 0, 'Y', 'Quantity'],
+      ['UNIT_PRICE', 'DECIMAL', 9, 9, 2, 'Y', 'Unit price'],
       ['EXTENDED', 'DECIMAL', 13, 13, 2, 'Y', 'Extended price'],
     ],
   },
@@ -356,13 +358,19 @@ function builderScript(sql: string, parameters: unknown[] = []): Scripted | null
   const havingSql = clause('HAVING');
   const orderSql = clause('ORDER BY');
 
+  const numericKeys = new Set(
+    allCols
+      .filter((c) => /INT|DEC|NUM|FLOAT|DOUBLE|REAL/i.test(String(c.col.type)))
+      .map((c) => c.key),
+  );
+  const px = (t: string, next: () => unknown = () => null) => parseExpr(t, next, numericKeys);
   // Bound values are consumed in marker order: SELECT has none, then WHERE, then HAVING.
   let pi = 0;
-  const where = whereSql ? parseExpr(whereSql, () => parameters[pi++]) : null;
-  const having = havingSql ? parseExpr(havingSql, () => parameters[pi++]) : null;
+  const where = whereSql ? px(whereSql, () => parameters[pi++]) : null;
+  const having = havingSql ? px(havingSql, () => parameters[pi++]) : null;
   const items = splitTop(head[1]).map((it) => {
     const m = new RegExp(String.raw`^([\s\S]+?)(?: AS ${ident})?$`).exec(it.trim())!;
-    const e = parseExpr(m[1], () => null);
+    const e = px(m[1]);
     const name = m[2] ? unq(m[2]) : (e.ref?.split('.')[1] ?? it.trim());
     return { e, name };
   });
@@ -372,7 +380,7 @@ function builderScript(sql: string, parameters: unknown[] = []): Scripted | null
   const hasAgg = items.some((i) => i.e.agg);
   let groups: Row[][];
   if (groupSql) {
-    const keys = splitTop(groupSql).map((g) => parseExpr(g, () => null));
+    const keys = splitTop(groupSql).map((g) => px(g));
     const by = new Map<string, Row[]>();
     for (const r of rows) {
       const k = JSON.stringify(keys.map((e) => e.eval([r])));
@@ -384,7 +392,7 @@ function builderScript(sql: string, parameters: unknown[] = []): Scripted | null
   if (orderSql) {
     const keys = splitTop(orderSql).map((k) => {
       const m = /^([\s\S]+) (ASC|DESC)$/.exec(k.trim())!;
-      return { e: parseExpr(m[1], () => null), dir: m[2] === 'DESC' ? -1 : 1 };
+      return { e: px(m[1]), dir: m[2] === 'DESC' ? -1 : 1 };
     });
     groups = [...groups].sort((a, b) => {
       for (const k of keys) {
@@ -411,13 +419,31 @@ function builderScript(sql: string, parameters: unknown[] = []): Scripted | null
           : it.e.agg === 'AVG' || it.e.agg === 'SUM'
             ? col(it.name, 'DECIMAL', 15, 2)
             : (src ?? col(it.name, 'VARCHAR', 40))
-        : (src ?? col(it.name, 'VARCHAR', 40));
+        : it.e.calc
+          ? calcColumn(
+              it.name,
+              groups.map((g) => it.e.eval(g)),
+            )
+          : (src ?? col(it.name, 'VARCHAR', 40));
       return { ...c, name: it.name };
     }),
     rows: groups.map((g) => items.map((it) => (it.e.eval(g) ?? null) as never)),
     delayMs: 80,
   };
 }
+
+/** Result metadata for a calculated column, from the values it produced. */
+function calcColumn(name: string, values: unknown[]) {
+  const v = values.filter((x) => x !== null && x !== undefined);
+  if (v.length && v.every((x) => typeof x === 'number'))
+    return v.every((x) => Number.isInteger(x))
+      ? col(name, 'INTEGER')
+      : col(name, 'DECIMAL', 31, Math.min(6, Math.max(...v.map((x) => decimals(x as number)))));
+  if (v.length && v.every((x) => typeof x === 'string' && /^\d{4}-\d\d-\d\d$/.test(x)))
+    return col(name, 'DATE');
+  return col(name, 'VARCHAR', 200);
+}
+const decimals = (x: number) => (String(x).split('.')[1] ?? '').length;
 
 /** Split on top-level commas (outside parentheses and quotes). */
 function splitTop(text: string): string[] {
@@ -448,6 +474,8 @@ interface Expr {
   eval(rows: Map<string, unknown>[]): Val;
   ref?: string;
   agg?: string;
+  /** A calculated field (its column type is inferred from the values). */
+  calc?: boolean;
 }
 const truthy = (v: Val) => v === true;
 const num = (v: Val) => (typeof v === 'number' ? v : Number(v));
@@ -469,18 +497,60 @@ function likeRe(pattern: string) {
 }
 
 /** Tiny recursive-descent parser for the predicates and operands the builder writes. */
-function parseExpr(text: string, nextParam: () => unknown): Expr {
+function parseExpr(
+  text: string,
+  nextParam: () => unknown,
+  numericKeys: ReadonlySet<string> = new Set(),
+): Expr {
   const toks = [
     ...text.matchAll(
       /"((?:[^"]|"")*)"|'((?:[^']|'')*)'|<>|<=|>=|[=<>(),.*?]|[A-Za-z_][A-Za-z0-9_]*|\S/g,
     ),
-  ].map((m) =>
-    m[1] !== undefined
+  ].map((m) => ({
+    at: m.index!,
+    end: m.index! + m[0].length,
+    ...(m[1] !== undefined
       ? { id: unq(m[1]) }
       : m[2] !== undefined
         ? { str: m[2] }
-        : { kw: m[0].toUpperCase() },
-  );
+        : { kw: m[0].toUpperCase() }),
+  }));
+  const PRED_OPS = ['=', '<>', '<', '<=', '>', '>=', 'IS', 'BETWEEN', 'IN', 'LIKE'];
+  /** Index of the token closing the parenthesis opened at token `open`. */
+  const closing = (open: number) => {
+    let d = 0;
+    for (let k = open; k < toks.length; k++) {
+      const kw = (toks[k] as { kw?: string }).kw;
+      if (kw === '(') d++;
+      else if (kw === ')' && --d === 0) return k;
+    }
+    throw new Error(`demo SQL: unbalanced parentheses in ${text}`);
+  };
+  /**
+   * A calculated field: the server always emits it as one parenthesised expression.
+   * It is evaluated with the same parser the server compiled it with, so the demo
+   * computes real values (NULL propagation, divide-by-zero to NULL, integer division).
+   */
+  const calculated = (): Expr => {
+    const end = closing(i);
+    const src = text.slice(toks[i].at, toks[end].end);
+    i = end + 1;
+    const ast = parseCalc(src, { internal: true });
+    return {
+      calc: true,
+      eval: (rows) => {
+        const r = first(rows);
+        if (!r) return null;
+        const out = evaluate(ast, (ref) => {
+          const key = `${ref.table}.${ref.column}`;
+          const v = r.get(key) as CalcValue | undefined;
+          return typeof v === 'string' && numericKeys.has(key) ? Number(v) : (v ?? null);
+        });
+        // JS floats are binary; Db2 decimal arithmetic is exact, so trim float noise (24.990000000000002)
+        return typeof out === 'number' && !Number.isInteger(out) ? Number(out.toFixed(10)) : out;
+      },
+    };
+  };
   let i = 0;
   const peek = (k: string) => (toks[i] as { kw?: string })?.kw === k;
   const take = (k: string) => {
@@ -489,6 +559,7 @@ function parseExpr(text: string, nextParam: () => unknown): Expr {
   };
   const first = (rows: Map<string, unknown>[]) => rows[0];
   const operand = (): Expr => {
+    if (peek('(')) return calculated();
     const t = toks[i++] as { id?: string; kw?: string };
     if (t.kw === '?') {
       const v = nextParam();
@@ -529,7 +600,7 @@ function parseExpr(text: string, nextParam: () => unknown): Expr {
     throw new Error(`demo SQL: unexpected ${JSON.stringify(t)} in ${text}`);
   };
   const predicate = (): Expr => {
-    if (peek('(')) {
+    if (peek('(') && !PRED_OPS.includes((toks[closing(i) + 1] as { kw?: string })?.kw ?? '')) {
       i++;
       const e = or();
       take(')');
@@ -615,11 +686,14 @@ function parseExpr(text: string, nextParam: () => unknown): Expr {
     return e;
   };
   // SELECT items / GROUP BY keys / ORDER BY keys are single operands
-  const startsPredicate = toks.some((t) =>
-    ['=', '<>', '<', '<=', '>', '>=', 'IS', 'BETWEEN', 'IN', 'LIKE'].includes(
-      (t as { kw?: string }).kw ?? '',
-    ),
-  );
+  // (a calculated operand is one parenthesised span, so only top-level tokens count)
+  let depth = 0;
+  const startsPredicate = toks.some((t) => {
+    const kw = (t as { kw?: string }).kw ?? '';
+    if (kw === '(') depth++;
+    else if (kw === ')') depth--;
+    return depth === 0 && PRED_OPS.includes(kw);
+  });
   const e = startsPredicate ? or() : operand();
   if (i !== toks.length) throw new Error(`demo SQL: trailing tokens in ${text}`);
   return e;
@@ -688,15 +762,22 @@ function dataScript(sql: string): Scripted {
         col('ORDER_ID', 'INTEGER'),
         col('ITEM', 'CHAR', 8),
         col('QTY', 'INTEGER'),
+        col('UNIT_PRICE', 'DECIMAL', 9, 2),
         col('EXTENDED', 'DECIMAL', 13, 2),
       ],
-      rows: Array.from({ length: 1200 }, (_, i) => [
-        i + 1,
-        50001 + (i % 64),
-        `SKU-${String((i % 12) + 1).padStart(4, '0')}`,
-        (i % 9) + 1,
-        (((i * 131) % 9000) / 3 + 5).toFixed(2),
-      ]),
+      rows: Array.from({ length: 1200 }, (_, i) => {
+        // every 50th line has no quantity, so calculated fields show NULL handling
+        const qty = i % 50 === 49 ? null : (i % 9) + 1;
+        const unit = (((i * 131) % 900) / 3 + 5).toFixed(2);
+        return [
+          i + 1,
+          50001 + (i % 64),
+          `SKU-${String((i % 12) + 1).padStart(4, '0')}`,
+          qty,
+          unit,
+          qty === null ? null : (qty * Number(unit)).toFixed(2),
+        ];
+      }),
       delayMs: 60,
     };
   }

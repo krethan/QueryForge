@@ -19,6 +19,7 @@ import {
   type SortDirection,
 } from './sql-builder.js';
 import {
+  OUTPUT_NAME,
   buildAggregates,
   buildHaving,
   buildWhere,
@@ -29,6 +30,18 @@ import {
   type HavingSpec,
 } from './filter-builder.js';
 import type { ParameterDef } from '../reports/parameters.js';
+import {
+  CALC_ID,
+  CALC_TABLE,
+  CalcError,
+  calcCatalogType,
+  calcTypeOf,
+  compile,
+  MAX_CALCULATED,
+  parse,
+  type CalcType,
+  type ColumnResolver,
+} from './calc-expr.js';
 
 export const MAX_JOINS = 8;
 export const MAX_CONDITIONS_PER_JOIN = 16;
@@ -86,6 +99,117 @@ export interface JoinedReportSpec {
   groupBy?: ColumnRef[];
   aggregates?: AggregateSpec[];
   having?: HavingSpec[];
+  /**
+   * Named calculated fields. Elsewhere in the spec a calculated field is referred to
+   * as `{ table: '@CALC', column: <id> }`.
+   */
+  calculated?: CalculatedFieldSpec[];
+}
+
+export interface CalculatedFieldSpec {
+  id: string;
+  name: string;
+  expression: string;
+  /** Inferred result type (recomputed by the server; informational on input). */
+  type?: CalcType;
+}
+
+export interface CompiledCalculated {
+  id: string;
+  name: string;
+  expression: string;
+  sql: string;
+  type: CalcType;
+  /** Synthetic catalog column standing for the field (name = id). */
+  column: CatalogColumn;
+}
+
+/**
+ * Parse, type-check and compile every calculated field of a report. `column` resolves
+ * a column reference written in an expression (no alias = base table) against the
+ * catalog and returns its SQL text and catalog column.
+ */
+export function compileCalculated(
+  list: unknown,
+  column: (ref: { table?: string; column: string }) => {
+    sql: string;
+    c: CatalogColumn;
+    label: string;
+  },
+): CompiledCalculated[] {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) throw bad('INVALID_CALCULATION', 'Calculated fields must be a list.');
+  if (list.length > MAX_CALCULATED)
+    throw bad(
+      'TOO_MANY_CALCULATIONS',
+      `A report can have at most ${MAX_CALCULATED} calculated fields.`,
+    );
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  return list.map((d: Partial<CalculatedFieldSpec> | null, k) => {
+    const id = d?.id;
+    const name = typeof d?.name === 'string' ? d.name.trim() : '';
+    if (typeof id !== 'string' || !CALC_ID.test(id))
+      throw bad('INVALID_CALCULATION', `Calculated field ${k + 1} has an invalid id.`);
+    if (!OUTPUT_NAME.test(name))
+      throw bad(
+        'INVALID_CALCULATION',
+        `Calculated field name ${JSON.stringify(d?.name ?? '')} must start with a letter and use letters, digits, spaces or _ (max 64).`,
+      );
+    if (ids.has(id.toUpperCase()))
+      throw bad('INVALID_CALCULATION', `Calculated field id ${JSON.stringify(id)} is used twice.`);
+    if (names.has(name.toUpperCase()))
+      throw bad('DUPLICATE_OUTPUT_NAME', `The calculated field name "${name}" is used twice.`);
+    ids.add(id.toUpperCase());
+    names.add(name.toUpperCase());
+    const expression = typeof d?.expression === 'string' ? d.expression : '';
+    const resolver: ColumnResolver = (ref, pos) => {
+      if (ref.table === CALC_TABLE)
+        throw new CalcError('A calculated field cannot refer to another calculated field.', pos);
+      let r: { sql: string; c: CatalogColumn; label: string };
+      try {
+        r = column(ref);
+      } catch (e) {
+        if (e instanceof AppError) throw new CalcError(`${e.message} (position ${pos + 1})`, pos);
+        throw e;
+      }
+      const type = calcTypeOf(r.c.type, r.c.scale);
+      if (!type)
+        throw new CalcError(
+          `${r.label} (${r.c.type}) cannot be used in a calculated field (position ${pos + 1}).`,
+          pos,
+        );
+      return { sql: r.sql, type, label: r.label };
+    };
+    try {
+      const out = compile(parse(expression), resolver);
+      const t = calcCatalogType(out.type);
+      return {
+        id,
+        name,
+        expression,
+        sql: out.sql,
+        type: out.type,
+        column: {
+          name: id,
+          type: t.type,
+          scale: t.scale,
+          length: null,
+          precision: null,
+          nullable: true,
+          text: name,
+          ordinal: k + 1,
+        },
+      };
+    } catch (e) {
+      if (e instanceof CalcError)
+        throw new AppError(400, 'INVALID_CALCULATION', `Calculated field "${name}": ${e.message}`, {
+          calculated: id,
+          position: e.position,
+        });
+      throw e;
+    }
+  });
 }
 
 /** Catalog metadata for one table of the report, in spec order (base first). */
@@ -112,6 +236,8 @@ export interface BuiltJoinQuery {
   warnings: string[];
   /** One definition per `?` marker, in order (fixed filter values and ask-when-run ones). */
   parameters: ParameterDef[];
+  /** Calculated fields with their server-inferred types. */
+  calculated: CalculatedFieldSpec[];
 }
 
 type Category = 'numeric' | 'char' | 'date' | 'time' | 'timestamp' | 'binary' | 'other';
@@ -266,7 +392,30 @@ export function buildJoinedReportSql(
   });
 
   // ---- WHERE (filters are resolved before anything is grouped) ----
+  const calcs = compileCalculated(spec.calculated, (ref) => {
+    const i = ref.table === undefined || ref.table === null ? 0 : indexOfAlias(ref.table);
+    if (i < 0)
+      throw bad(
+        'UNKNOWN_ALIAS',
+        `${JSON.stringify(ref.table)} is not a table alias in this report.`,
+      );
+    const c = findColumn(i, ref.column);
+    return { sql: colRef(i, c), c, label: `${aliases[i]}.${c.name}` };
+  });
+  const isCalc = (i: number) => i >= sources.length;
+  const calcAt = (i: number) => calcs[i - sources.length];
   const resolveRef = (ref: { table?: string; column: unknown }, what: string) => {
+    if (ref?.table === CALC_TABLE) {
+      const k = calcs.findIndex(
+        (x) => typeof ref.column === 'string' && x.id.toUpperCase() === ref.column.toUpperCase(),
+      );
+      if (k < 0)
+        throw bad(
+          'UNKNOWN_COLUMN',
+          `${what} refers to calculated field ${JSON.stringify(ref?.column)}, which is not in this report.`,
+        );
+      return { i: sources.length + k, c: calcs[k].column };
+    }
     const i = ref?.table === undefined || ref?.table === null ? 0 : indexOfAlias(ref.table);
     if (i < 0)
       throw bad(
@@ -275,10 +424,14 @@ export function buildJoinedReportSql(
       );
     return { i, c: findColumn(i, ref?.column) };
   };
+  const anyRef = (i: number, c: CatalogColumn) => (isCalc(i) ? calcAt(i).sql : colRef(i, c));
+  const labelOf = (i: number, c: CatalogColumn) =>
+    isCalc(i) ? calcAt(i).name : `${aliases[i]}.${c.name}`;
   const ctx: BuildContext = {
     resolve: resolveRef,
-    colRef,
-    label: (i, c) => `${aliases[i]}.${c.name}`,
+    colRef: anyRef,
+    label: labelOf,
+    baseName: (i, c) => (isCalc(i) ? calcAt(i).name.replace(/ /g, '_') : c.name),
   };
   const params = new ParamCollector();
   const where = buildWhere(spec.filters, spec.filterLogic, ctx, params);
@@ -297,7 +450,7 @@ export function buildJoinedReportSql(
     const r: ColumnRef = typeof ref === 'string' ? { column: ref } : (ref ?? { column: '' });
     const { i, c } = resolveRef(r, 'Column');
     if (chosen.some((x) => x.i === i && x.c.name === c.name))
-      throw bad('DUPLICATE_COLUMN', `Column ${aliases[i]}.${c.name} is selected more than once.`);
+      throw bad('DUPLICATE_COLUMN', `Column ${labelOf(i, c)} is selected more than once.`);
     chosen.push({ i, c });
   }
   const groupCols: { i: number; c: CatalogColumn }[] = [];
@@ -305,7 +458,7 @@ export function buildJoinedReportSql(
     for (const ref of groupRefs) {
       const { i, c } = resolveRef(ref, 'Group-by column');
       if (groupCols.some((x) => x.i === i && x.c.name === c.name))
-        throw bad('DUPLICATE_COLUMN', `${aliases[i]}.${c.name} is grouped more than once.`);
+        throw bad('DUPLICATE_COLUMN', `${labelOf(i, c)} is grouped more than once.`);
       groupCols.push({ i, c });
     }
     // Every selected, non-aggregated column must be a group-by column: add it.
@@ -313,7 +466,7 @@ export function buildJoinedReportSql(
     for (const x of chosen)
       if (!groupCols.some((g) => g.i === x.i && g.c.name === x.c.name)) {
         groupCols.push(x);
-        if (groupRefs.length) added.push(`${aliases[x.i]}.${x.c.name}`);
+        if (groupRefs.length) added.push(labelOf(x.i, x.c));
       }
     if (added.length)
       warnings.push(
@@ -324,9 +477,13 @@ export function buildJoinedReportSql(
       if (!chosen.some((x) => x.i === g.i && x.c.name === g.c.name)) chosen.push(g);
   }
   const counts = new Map<string, number>();
-  for (const x of chosen) counts.set(x.c.name, (counts.get(x.c.name) ?? 0) + 1);
-  const used = new Set(chosen.filter((x) => counts.get(x.c.name) === 1).map((x) => x.c.name));
+  for (const x of chosen) if (!isCalc(x.i)) counts.set(x.c.name, (counts.get(x.c.name) ?? 0) + 1);
+  const used = new Set(
+    chosen.filter((x) => !isCalc(x.i) && counts.get(x.c.name) === 1).map((x) => x.c.name),
+  );
+  for (const x of chosen) if (isCalc(x.i)) used.add(calcAt(x.i).name);
   const out: OutputColumn[] = chosen.map(({ i, c }) => {
+    if (isCalc(i)) return { alias: CALC_TABLE, table: '', column: c.name, name: calcAt(i).name };
     let name = c.name;
     if ((counts.get(c.name) ?? 0) > 1) {
       const candidates = [
@@ -339,7 +496,12 @@ export function buildJoinedReportSql(
     }
     return { alias: aliases[i], table: sources[i].table.name, column: c.name, name };
   });
-  const outNames = new Set(out.map((o) => o.name.toUpperCase()));
+  const outNames = new Set<string>();
+  for (const o of out) {
+    if (outNames.has(o.name.toUpperCase()))
+      throw bad('DUPLICATE_OUTPUT_NAME', `The output name "${o.name}" is used more than once.`);
+    outNames.add(o.name.toUpperCase());
+  }
   for (const a of aggs) {
     if (outNames.has(a.name.toUpperCase()))
       throw bad('DUPLICATE_OUTPUT_NAME', `The output name "${a.name}" is used more than once.`);
@@ -354,7 +516,11 @@ export function buildJoinedReportSql(
   }
   const select = [
     ...chosen.map(({ i, c }, k) =>
-      out[k].name === c.name ? colRef(i, c) : `${colRef(i, c)} AS ${q(out[k].name)}`,
+      isCalc(i)
+        ? `${calcAt(i).sql} AS ${q(out[k].name)}`
+        : out[k].name === c.name
+          ? colRef(i, c)
+          : `${colRef(i, c)} AS ${q(out[k].name)}`,
     ),
     ...aggs.map((a) => `${a.expr} AS ${q(a.name)}`),
   ].join(',\n       ');
@@ -391,32 +557,26 @@ export function buildJoinedReportSql(
       sorts.push(`${a.expr} ${direction}`);
       continue;
     }
-    const i = row.table === undefined ? 0 : indexOfAlias(row.table);
-    if (i < 0)
-      throw bad(
-        'UNKNOWN_ALIAS',
-        `Sort column ${JSON.stringify(row.column)} refers to an unknown table alias.`,
-      );
-    const c = findColumn(i, row.column);
+    const { i, c } = resolveRef({ table: row.table, column: row.column }, 'Sort column');
     if (grouping && !groupCols.some((g) => g.i === i && g.c.name === c.name))
       throw bad(
         'INVALID_SORT_COLUMN',
-        `${aliases[i]}.${c.name} is not grouped, so it cannot be used to sort grouped results; sort by a group-by column or a total.`,
+        `${labelOf(i, c)} is not grouped, so it cannot be used to sort grouped results; sort by a group-by column or a total.`,
       );
     const key = `${i}.${c.name}`;
     if (sortSeen.has(key))
       throw bad(
         'DUPLICATE_SORT_COLUMN',
-        `Column ${aliases[i]}.${c.name} is used more than once in the sort order.`,
+        `Column ${labelOf(i, c)} is used more than once in the sort order.`,
       );
     sortSeen.add(key);
-    sorts.push(`${colRef(i, c)} ${direction}`);
+    sorts.push(`${anyRef(i, c)} ${direction}`);
   }
 
   const clauses = [...lines];
   if (where) clauses.push(`WHERE ${where}`);
   if (grouping && groupCols.length)
-    clauses.push(`GROUP BY ${groupCols.map(({ i, c }) => colRef(i, c)).join(', ')}`);
+    clauses.push(`GROUP BY ${groupCols.map(({ i, c }) => anyRef(i, c)).join(', ')}`);
   if (having) clauses.push(`HAVING ${having}`);
   if (sorts.length) clauses.push(`ORDER BY ${sorts.join(', ')}`);
   return {
@@ -425,7 +585,42 @@ export function buildJoinedReportSql(
     columns: out,
     warnings,
     parameters: params.defs,
+    calculated: calcs.map(({ id, name, expression, type }) => ({ id, name, expression, type })),
   };
+}
+
+/**
+ * Live validation for the calculated-field editor: parse and type-check one expression
+ * against the report's tables (base + joins, with the same alias rules as the builder).
+ */
+export function validateCalculation(
+  spec: { alias?: string; joins?: { alias?: string }[] },
+  sources: ResolvedSource[],
+  expression: string,
+): { type: CalcType; sql: string; columns: string[] } {
+  const aliases = [spec.alias, ...(spec.joins ?? []).map((j) => j.alias)].map((a, i) =>
+    typeof a === 'string' && ALIAS_PATTERN.test(a) ? a : `T${i + 1}`,
+  );
+  const columns: string[] = [];
+  const [c] = compileCalculated([{ id: 'CHECK', name: 'Check', expression }], (ref) => {
+    const i = ref.table === undefined || ref.table === null ? 0 : aliases.indexOf(ref.table);
+    if (i < 0 || i >= sources.length)
+      throw bad(
+        'UNKNOWN_ALIAS',
+        `${JSON.stringify(ref.table)} is not a table alias in this report.`,
+      );
+    const col = resolveEntry(
+      sources[i].columns,
+      (x) => x.name,
+      ref.column,
+      'UNKNOWN_COLUMN',
+      'Column',
+    );
+    const label = `${aliases[i]}.${col.name}`;
+    if (!columns.includes(label)) columns.push(label);
+    return { sql: `${quoteIdentifier(aliases[i])}.${quoteIdentifier(col.name)}`, c: col, label };
+  });
+  return { type: c.type, sql: c.sql, columns };
 }
 
 /** Suggested saved-report name, e.g. `ORDERS + CUSTOMERS: ORDER_ID, NAME`. */

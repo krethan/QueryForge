@@ -3,7 +3,9 @@ import { AppError } from '../util/errors.js';
 import { chartDefSchema, type ChartDef } from '../charts/chart-def.js';
 import type { FilterItem, FilterSpec, Scalar } from '../catalog/filter-builder.js';
 import { isGroup, MAX_FILTERS } from '../catalog/filter-builder.js';
+import { CALC_TABLE } from '../catalog/calc-expr.js';
 import type {
+  CalculatedFieldSpec,
   ColumnRef,
   JoinedReportSpec,
   OutputColumn,
@@ -154,8 +156,17 @@ export interface DetailColumn {
 }
 
 /** All columns of all tables, for the drill panel's column picker. */
-export function availableColumns(aliases: string[], sources: ResolvedSource[]): DetailColumn[] {
-  const out: DetailColumn[] = [];
+export function availableColumns(
+  aliases: string[],
+  sources: ResolvedSource[],
+  calculated: CalculatedFieldSpec[] = [],
+): DetailColumn[] {
+  const out: DetailColumn[] = calculated.map((c) => ({
+    table: CALC_TABLE,
+    column: c.id,
+    label: `ƒ ${c.name}`,
+    type: c.type ?? '',
+  }));
   sources.forEach((s, i) =>
     s.columns.forEach((c) =>
       out.push({
@@ -182,6 +193,13 @@ export function defaultDetailColumns(
   const seen = new Set<string>();
   const add = (table: string | undefined, column: string | null | undefined) => {
     if (!column) return;
+    if (table === CALC_TABLE) {
+      const k = keyOf({ table, column });
+      if (seen.has(k) || !spec.calculated?.some((c) => c.id === column)) return;
+      seen.add(k);
+      out.push({ table, column });
+      return;
+    }
     const t = table || aliases[0];
     const i = aliases.indexOf(t);
     if (i < 0) return;
@@ -265,6 +283,7 @@ export function deriveDetailSpec(
       table: spec.table,
       ...(spec.alias ? { alias: spec.alias } : {}),
       ...(spec.joins?.length ? { joins: spec.joins } : {}),
+      ...(spec.calculated?.length ? { calculated: spec.calculated } : {}),
       columns,
       sort: (spec.sort ?? []).filter((s) => !s.aggregate && s.column),
       filters,
