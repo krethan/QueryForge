@@ -35,6 +35,7 @@ import {
 import { sharesInputSchema, type AccessService } from '../sharing/access.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
 import type { Report } from '../reports/reports.js';
+import { folderInputSchema, type FolderRepository } from '../reports/folders.js';
 import type { HistoryRepository } from '../history/history.js';
 import {
   reportInputSchema,
@@ -88,6 +89,7 @@ export interface ApiDeps {
   access: AccessService;
   groups: GroupRepository;
   schedules: ScheduleRepository;
+  folders: FolderRepository;
   scheduler: Scheduler;
   mailer?: Mailer;
   oidc?: OidcProvider;
@@ -840,7 +842,66 @@ export function apiRouter(d: ApiDeps): Router {
           (!needle || x.name.toUpperCase().includes(needle)) &&
           (!category?.trim() || x.category === category.trim()),
       );
-      res.json({ reports: owned.map((x) => ({ ...x, access: 'OWNER' as const })), shared });
+      // Folders and favorites are the viewing user's own (migration 006).
+      const prefs = await d.folders.prefs(user(req).id);
+      const withPref = <R extends { id: string }>(x: R) => ({
+        ...x,
+        folderId: prefs.get(x.id)?.folderId ?? null,
+        favorite: prefs.get(x.id)?.favorite ?? false,
+      });
+      res.json({
+        reports: owned.map((x) => withPref({ ...x, access: 'OWNER' as const })),
+        shared: shared.map(withPref),
+      });
+    }),
+  );
+
+  // ---- Per-user folders and favorites. Every query is scoped to the signed-in user. ----
+  const folderId = (req: Request) => {
+    const r = uuid.safeParse(req.params.folderId);
+    if (!r.success) throw new AppError(404, 'FOLDER_NOT_FOUND', 'Folder not found.');
+    return r.data;
+  };
+  r.get(
+    '/folders',
+    h(async (req, res) => {
+      res.json({ folders: await d.folders.list(user(req).id) });
+    }),
+  );
+  r.post(
+    '/folders',
+    h(async (req, res) => {
+      const { name } = folderInputSchema.parse(req.body ?? {});
+      res.status(201).json({ folder: await d.folders.create(user(req).id, name) });
+    }),
+  );
+  r.put(
+    '/folders/:folderId',
+    h(async (req, res) => {
+      const id = folderId(req);
+      const { name } = folderInputSchema.parse(req.body ?? {});
+      res.json({ folder: await d.folders.rename(user(req).id, id, name) });
+    }),
+  );
+  r.delete(
+    '/folders/:folderId',
+    h(async (req, res) => {
+      const id = folderId(req);
+      res.json(await d.folders.remove(user(req).id, id));
+    }),
+  );
+  const prefSchema = z
+    .object({ folderId: uuid.nullable().optional(), favorite: z.boolean().optional() })
+    .strict()
+    .refine((v) => v.folderId !== undefined || v.favorite !== undefined, 'Nothing to change.');
+  r.put(
+    '/reports/:id/prefs',
+    h(async (req, res) => {
+      const id = reportId(req);
+      const change = prefSchema.parse(req.body ?? {});
+      // Anyone who can see a report may file or star it for themselves; nobody else's view changes.
+      await d.access.require(user(req), id, 'VIEW');
+      res.json({ prefs: await d.folders.setPref(user(req).id, id, change) });
     }),
   );
   /**

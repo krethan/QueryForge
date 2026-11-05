@@ -28,6 +28,8 @@ import type {
   SchemaColumnsResponse,
   SchemaTablesResponse,
   User,
+  Folder,
+  ReportPrefs,
 } from './types';
 
 export class ApiError extends Error {
@@ -162,6 +164,16 @@ export const api = {
       `/reports${q.size ? `?${q}` : ''}`,
     ).then((r) => ({ owned: r.reports, shared: r.shared ?? [] }));
   },
+  listFolders: () => json<{ folders: Folder[] }>('GET', '/folders').then((r) => r.folders),
+  createFolder: (name: string) =>
+    json<{ folder: Folder }>('POST', '/folders', { name }).then((r) => r.folder),
+  renameFolder: (id: string, name: string) =>
+    json<{ folder: Folder }>('PUT', `/folders/${id}`, { name }).then((r) => r.folder),
+  /** Deletes the folder; its reports become Unfiled (reports are never deleted). */
+  deleteFolder: (id: string) => json<{ moved: number }>('DELETE', `/folders/${id}`),
+  /** Change the caller's own folder and/or star for a report. */
+  setReportPrefs: (id: string, change: Partial<ReportPrefs>) =>
+    json<{ prefs: ReportPrefs }>('PUT', `/reports/${id}/prefs`, change).then((r) => r.prefs),
   getReport: (id: string) =>
     json<{ report: Report; builder?: Report['builder']; drill?: DrillInfo }>(
       'GET',
