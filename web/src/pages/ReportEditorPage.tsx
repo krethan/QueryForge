@@ -16,6 +16,7 @@ import type {
   DrillKeys,
   ParameterDef,
   ParameterValues,
+  PivotRun,
   Report,
   RunResponse,
   ScheduleSettings,
@@ -34,6 +35,8 @@ import { SqlEditor } from '../components/SqlEditor';
 import { newExecutionId } from '../utils/format';
 import { DrillPanel } from '../components/DrillPanel';
 import { DrillSettings } from '../components/DrillSettings';
+import { PivotTable } from '../components/PivotTable';
+import { pivotChartDefault, pivotChartable } from '../utils/pivot';
 import { decodeDrill, drillFields, keysForRow } from '../utils/drill';
 
 export function ReportEditorPage() {
@@ -45,6 +48,7 @@ export function ReportEditorPage() {
   const [loading, setLoading] = useState(Boolean(id));
   const [sql, setSql] = useState('');
   const [result, setResult] = useState<RunResponse | null>(null);
+  const [pivotRun, setPivotRun] = useState<PivotRun | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [running, setRunning] = useState<string | null>(null);
   const runningRef = useRef(false);
@@ -74,6 +78,8 @@ export function ReportEditorPage() {
   const dirty = canEdit && (report ? sql !== report.sql || defsChanged : sql.trim().length > 0);
   // drill runs the saved definition, so it is off while there are unsaved edits
   const fields = report && !dirty ? drillFields(report.drill) : null;
+  // a saved pivot report is run (and exported) as a crosstab; edited SQL runs as plain SQL
+  const isPivot = Boolean(report?.builderDef?.spec.pivot) && !dirty;
 
   useEffect(() => {
     if (!id) {
@@ -81,6 +87,7 @@ export function ReportEditorPage() {
       setSql('');
       setDefs([]);
       setResult(null);
+      setPivotRun(null);
       setLoading(false);
       return;
     }
@@ -114,6 +121,16 @@ export function ReportEditorPage() {
       setError(null);
       setNotice(null);
       try {
+        if (report && isPivot) {
+          const pr = await api.runReportPivot(report.id, execId, undefined, values);
+          setPivotRun(pr);
+          setResult(null);
+          setAskParams(false);
+          setLastValues(values);
+          setChart((c) => c ?? pivotChartDefault(pr.pivot));
+          return;
+        }
+        setPivotRun(null);
         // A clean saved report is re-executed from its stored definition; otherwise run the editor text.
         const r =
           report && !dirty
@@ -140,13 +157,16 @@ export function ReportEditorPage() {
         }
         setAskParams(false);
         setError(e);
-        if (!(e instanceof ApiError && e.code === 'CANCELLED')) setResult(null);
+        if (!(e instanceof ApiError && e.code === 'CANCELLED')) {
+          setResult(null);
+          setPivotRun(null);
+        }
       } finally {
         runningRef.current = false;
         setRunning(null);
       }
     },
-    [sql, report, dirty, defs, askParams],
+    [sql, report, dirty, defs, askParams, isPivot],
   );
 
   // Parameterized reports show the Carbon run form first.
@@ -444,6 +464,63 @@ export function ReportEditorPage() {
                   />
                 }
               />
+            }
+          />
+        </section>
+      )}
+      {pivotRun && report && (
+        <section className="qf-section" aria-label="Pivot results">
+          <ChartPanel
+            columns={pivotRun.pivot.long.columns}
+            rows={pivotRun.pivot.long.rows}
+            hasMore={false}
+            def={chart}
+            onChange={setChart}
+            view={view}
+            onViewChange={setView}
+            saved={report.chartDef ?? null}
+            storedError={report.chartError}
+            onSave={
+              canEdit
+                ? async (def) => {
+                    const r = await api.setReportChart(report.id, def);
+                    setReport((p) =>
+                      p ? { ...p, chartDef: r.chartDef ?? null, chartError: undefined } : p,
+                    );
+                    if (!def) setChart(null);
+                  }
+                : undefined
+            }
+            saveHint={
+              pivotChartable(pivotRun.pivot)
+                ? 'Stacked or grouped bars: one bar per row, one series per column value.'
+                : 'With several row fields each bar adds up the rows that share the first row field.'
+            }
+            table={
+              <>
+                <div className="qf-pivot-toolbar">
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    disabled={Boolean(running)}
+                    onClick={() =>
+                      api
+                        .exportPivot({
+                          reportId: report.id,
+                          ...(lastValues ? { values: lastValues } : {}),
+                        })
+                        .then(() => setNotice('Exported the pivot to Excel.'))
+                        .catch((e) => setError(e))
+                    }
+                  >
+                    Export pivot to Excel
+                  </Button>
+                </div>
+                <PivotTable
+                  pivot={pivotRun.pivot}
+                  onCellDrill={report.drill ? (keys) => openDrill(keys) : undefined}
+                />
+              </>
             }
           />
         </section>

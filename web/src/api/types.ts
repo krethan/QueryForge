@@ -110,8 +110,11 @@ export interface ReportPrefs {
   favorite: boolean;
 }
 export interface BuilderDef {
-  /** 1 = original; 2 = may contain calculated fields (1 is still read unchanged). */
-  version: 1 | 2;
+  /**
+   * 1 = original; 2 = may contain calculated fields; 3 = may contain a pivot.
+   * Older versions are still read unchanged.
+   */
+  version: 1 | 2 | 3;
   spec: ReportSpec;
 }
 
@@ -353,6 +356,46 @@ export interface ReportSpec {
   having?: ReportHaving[];
   /** Named calculated fields; referenced elsewhere as { table: '@CALC', column: id }. */
   calculated?: CalculatedField[];
+  /** Pivot / crosstab layout (builder definition version 3). */
+  pivot?: PivotDef;
+}
+
+export type PivotFn = 'SUM' | 'COUNT' | 'AVG' | 'MIN' | 'MAX';
+export interface PivotDef {
+  rows: ReportColumnRef[];
+  column: ReportColumnRef;
+  value: { fn: PivotFn; table?: string; column?: string | null };
+}
+export type PivotKey = string | number | null;
+export interface PivotField {
+  name: string;
+  label: string;
+  kind: ColumnKind;
+  scale: number;
+}
+/** Server-pivoted grid (POST /schema/pivot, /reports/:id/pivot). */
+export interface PivotResult {
+  rowFields: PivotField[];
+  columnField: PivotField;
+  value: { fn: PivotFn; label: string; kind: ColumnKind; scale: number };
+  columns: { label: string; value: PivotKey }[];
+  rows: { keys: PivotKey[]; labels: string[]; cells: Cell[]; present: boolean[]; total: Cell }[];
+  columnTotals: Cell[];
+  grandTotal: Cell;
+  groupCount: number;
+  exact: boolean;
+  long: { columns: ResultColumn[]; rows: Cell[][] };
+}
+export interface PivotRun {
+  pivot: PivotResult;
+  executionId: string;
+  completedAt: string;
+  durationMs: number;
+  parameters?: Record<string, string | number | null>;
+  dataSource?: string;
+  builder: { name: string; sql: string };
+  warnings?: string[];
+  report?: { id: string; name: string };
 }
 
 /** Pseudo table for calculated-field references. */

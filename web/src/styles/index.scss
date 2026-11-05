@@ -761,3 +761,54 @@ body {
   flex: 1;
   font-size: 0.875rem;
 }
+
+// Pivot / crosstab
+.qf-pivot-scroll {
+  overflow: auto;
+  max-height: 70vh;
+
+  td,
+  th {
+    white-space: nowrap;
+  }
+  td.qf-num,
+  th.qf-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .qf-pivot-sticky {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--cds-layer-accent);
+  }
+  .qf-pivot-total {
+    font-weight: 600;
+  }
+  .qf-pivot-total-row td {
+    border-top: 2px solid var(--cds-border-strong);
+    background: var(--cds-layer-accent);
+  }
+  .qf-pivot-cell {
+    all: unset;
+    cursor: pointer;
+    color: var(--cds-link-primary);
+    &:hover,
+    &:focus-visible {
+      text-decoration: underline;
+      outline: 2px solid var(--cds-focus);
+      outline-offset: 1px;
+    }
+  }
+}
+.qf-pivot-meta {
+  margin-top: 0.5rem;
+  color: var(--cds-text-secondary);
+  font-size: 0.875rem;
+}
+.qf-pivot-toolbar {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}

@@ -9,6 +9,7 @@ import type {
   DrillTargetOption,
   ParameterDef,
   ParameterValues,
+  PivotRun,
   Schedule,
   ScheduleInput,
   ScheduleSettings,
@@ -330,6 +331,32 @@ export const api = {
       signal,
     ),
 
+  /** Pivot: the server builds the grouped SQL and reshapes it; the browser sends no SQL. */
+  runPivot: (
+    spec: ReportSpec,
+    executionId: string,
+    signal?: AbortSignal,
+    values?: ParameterValues,
+  ) =>
+    json<PivotRun>(
+      'POST',
+      '/schema/pivot',
+      { ...spec, executionId, ...(values ? { values } : {}) },
+      signal,
+    ),
+  runReportPivot: (
+    id: string,
+    executionId: string,
+    signal?: AbortSignal,
+    values?: ParameterValues,
+  ) =>
+    json<PivotRun>(
+      'POST',
+      `/reports/${id}/pivot`,
+      { executionId, ...(values ? { values } : {}) },
+      signal,
+    ),
+
   dataSource: (check = false) =>
     json<DataSourceInfo>('GET', `/datasource${check ? '?check=1' : ''}`),
 
@@ -344,6 +371,28 @@ export const api = {
     chart?: ChartDef | null;
   }) {
     return download(await raw('POST', '/export', src));
+  },
+  /** Downloads a pivot in its on-screen layout (values only). */
+  async exportPivot(
+    src:
+      | { reportId: string; values?: ParameterValues }
+      | { spec: ReportSpec; name?: string; values?: ParameterValues },
+  ) {
+    if ('reportId' in src)
+      return download(
+        await raw(
+          'POST',
+          `/reports/${src.reportId}/pivot/export`,
+          src.values ? { values: src.values } : {},
+        ),
+      );
+    return download(
+      await raw('POST', '/schema/pivot/export', {
+        ...src.spec,
+        ...(src.name ? { name: src.name } : {}),
+        ...(src.values ? { values: src.values } : {}),
+      }),
+    );
   },
   /** Downloads the drilled detail rows as XLSX. */
   async exportDrill(id: string, req: DrillRequest) {
