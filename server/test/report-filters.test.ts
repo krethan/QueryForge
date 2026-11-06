@@ -586,7 +586,7 @@ describe('builder API', () => {
     const api = await login();
     const save = (builderDef: unknown) =>
       api.post('/api/reports').send({ name: `R${Math.random()}`, sql: 'x', builderDef });
-    expect((await save({ version: 3, spec })).body.error.code).toBe('INVALID_BUILDER_DEF');
+    expect((await save({ version: 4, spec })).body.error.code).toBe('INVALID_BUILDER_DEF');
     expect((await save({ spec })).body.error.code).toBe('INVALID_BUILDER_DEF');
     expect((await save({ version: 1, spec: { ...spec, table: 'SECRET' } })).status).toBe(404);
     expect(

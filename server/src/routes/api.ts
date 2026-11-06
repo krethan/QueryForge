@@ -14,6 +14,7 @@ import {
   parameterValuesSchema,
   resolveParameters,
   type ParameterDef,
+  type RawValues,
 } from '../reports/parameters.js';
 import {
   AGGREGATE_FNS,
@@ -75,6 +76,16 @@ import type { QueryExecutor } from '../sql/executor.js';
 import type { MetadataDb } from '../db/types.js';
 import { AppError, DbError, sanitizeErrorMessage } from '../util/errors.js';
 import { chartDefSchema } from '../charts/chart-def.js';
+import {
+  MAX_PIVOT_GROUPS,
+  MAX_PIVOT_ROW_FIELDS,
+  PIVOT_FNS,
+  PIVOT_FN_LABELS,
+  expandPivot,
+  pivotRows,
+  pivotTable,
+  type PivotSpec,
+} from '../reports/pivot.js';
 
 export interface ApiDeps {
   cfg: AppConfig;
@@ -220,9 +231,24 @@ const reportSpecBase = z.object({
     .optional(),
   /** Calculated fields (expression text is parsed and checked server-side, never run as SQL). */
   calculated: z.array(calculatedSchema).max(MAX_CALCULATED).optional(),
+  /** Pivot / crosstab layout; the server builds the GROUP BY and reshapes the rows. */
+  pivot: z
+    .object({
+      rows: z.array(columnRef).min(1).max(MAX_PIVOT_ROW_FIELDS),
+      column: columnRef,
+      value: z.object({
+        fn: z.enum(PIVOT_FNS),
+        table: alias.optional(),
+        column: name128.nullable().optional(),
+      }),
+    })
+    .optional(),
 });
-const needsOutput = (s: { columns: unknown[]; aggregates?: unknown[] }, ctx: z.RefinementCtx) => {
-  if (s.columns.length === 0 && !s.aggregates?.length)
+const needsOutput = (
+  s: { columns: unknown[]; aggregates?: unknown[]; pivot?: unknown },
+  ctx: z.RefinementCtx,
+) => {
+  if (s.columns.length === 0 && !s.aggregates?.length && !s.pivot)
     ctx.addIssue({ code: 'custom', path: ['columns'], message: 'Choose at least one column.' });
 };
 const reportSpecSchema = reportSpecBase.superRefine(needsOutput);
@@ -256,6 +282,7 @@ type BuilderInput = z.infer<typeof reportSpecSchema>;
 
 /** Single-table selections without aliases, filters or totals keep the original, unqualified SQL. */
 const isSimple = (spec: BuilderInput) =>
+  !spec.pivot &&
   !spec.calculated?.length &&
   !spec.joins?.length &&
   !spec.alias &&
@@ -285,13 +312,15 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
       columns: undefined as OutputColumn[] | undefined,
       sources: [resolved] as ResolvedSource[],
       calculated: [] as CalculatedFieldSpec[],
+      effective: spec as JoinedReportSpec,
     };
   }
   const joins = spec.joins ?? [];
   const sources = [];
   for (const t of [{ schema: spec.schema, table: spec.table }, ...joins])
     sources.push(await d.catalog.resolveTable(ownerId, t.schema, t.table));
-  const joined = spec as JoinedReportSpec;
+  // a pivot runs as an ordinary grouped query; drill-down works on that expanded spec
+  const joined = expandPivot(spec as JoinedReportSpec & { pivot?: PivotSpec });
   const built = buildJoinedReportSql(joined, sources);
   d.executor.validate(built.sql);
   return {
@@ -304,6 +333,7 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
     columns: built.columns as OutputColumn[] | undefined,
     sources: sources as ResolvedSource[],
     calculated: built.calculated,
+    effective: joined,
   };
 }
 
@@ -313,17 +343,31 @@ async function buildQuery(d: ApiDeps, ownerId: string, spec: BuilderInput) {
  *  - v1: the original shape; it cannot carry calculated fields.
  *  - v2: adds `spec.calculated` ({ id, name, expression, type }). Written only when a
  *    report has calculated fields, so reports without them keep saving as v1.
+ *  - v3: adds `spec.pivot` ({ rows, column, value }). Written only for pivot reports;
+ *    v1 and v2 definitions load unchanged.
  */
-export const BUILDER_DEF_VERSION = 2;
+export const BUILDER_DEF_VERSION = 3;
 const builderDefSchema = z.union([
   z.object({
     version: z.literal(1),
-    spec: reportSpecSchema.refine((s) => !s.calculated?.length, {
-      message: 'Version 1 definitions cannot contain calculated fields; use version 2.',
-      path: ['calculated'],
+    spec: reportSpecSchema
+      .refine((s) => !s.calculated?.length, {
+        message: 'Version 1 definitions cannot contain calculated fields; use version 2.',
+        path: ['calculated'],
+      })
+      .refine((s) => !s.pivot, {
+        message: 'Only version 3 definitions can contain a pivot.',
+        path: ['pivot'],
+      }),
+  }),
+  z.object({
+    version: z.literal(2),
+    spec: reportSpecSchema.refine((s) => !s.pivot, {
+      message: 'Only version 3 definitions can contain a pivot.',
+      path: ['pivot'],
     }),
   }),
-  z.object({ version: z.literal(2), spec: reportSpecSchema }),
+  z.object({ version: z.literal(3), spec: reportSpecSchema }),
 ]);
 export type BuilderDef = z.infer<typeof builderDefSchema>;
 
@@ -344,9 +388,14 @@ async function rebuildFromDef(d: ApiDeps, ownerId: string, raw: unknown) {
         .join('; ')}`,
     );
   const built = await buildQuery(d, ownerId, parsed.data.spec);
-  const def: BuilderDef = built.calculated.length
-    ? { version: 2, spec: { ...parsed.data.spec, calculated: built.calculated } }
-    : parsed.data;
+  const spec = built.calculated.length
+    ? { ...parsed.data.spec, calculated: built.calculated }
+    : parsed.data.spec;
+  const def: BuilderDef = spec.pivot
+    ? { version: 3, spec }
+    : built.calculated.length
+      ? { version: 2, spec }
+      : parsed.data;
   return { def, ...built };
 }
 
@@ -783,6 +832,149 @@ export function apiRouter(d: ApiDeps): Router {
     }),
   );
 
+  // ---- pivot / crosstab: grouped SQL built here, reshaped here (no dynamic column SQL) ----
+  type Built = Awaited<ReturnType<typeof buildQuery>>;
+  const pivotOf = (spec: { pivot?: PivotSpec }) => {
+    if (!spec.pivot) throw new AppError(400, 'NOT_PIVOT', 'This report is not a pivot.');
+    return spec.pivot;
+  };
+  const pivotValueLabel = (p: PivotSpec, calculated: CalculatedFieldSpec[]) => {
+    const fn = PIVOT_FN_LABELS[p.value.fn];
+    if (!p.value.column) return `${fn} of rows`;
+    const calc =
+      p.value.table === '@CALC' ? calculated.find((c) => c.id === p.value.column) : undefined;
+    return `${fn} of ${calc?.name ?? p.value.column}`;
+  };
+  async function runPivot(
+    u: AppUser,
+    built: Built,
+    p: PivotSpec,
+    src: {
+      values?: Record<string, unknown>;
+      executionId?: string;
+      report?: Report;
+      kind?: 'RUN' | 'EXPORT';
+    },
+  ) {
+    const max = Math.min(MAX_PIVOT_GROUPS, cfg.limits.maxResultRows);
+    const out = await d.execution.runGrouped(
+      u,
+      {
+        sql: built.sql,
+        definitions: built.parameters,
+        values: (src.values ?? {}) as RawValues,
+        executionId: src.executionId,
+        reportId: src.report?.id,
+        reportOwnerId: src.report?.ownerId,
+        kind: src.kind,
+      },
+      max,
+    );
+    if (out.truncated)
+      throw new AppError(
+        400,
+        'PIVOT_TOO_LARGE',
+        `This pivot has more than ${max.toLocaleString('en-US')} row and column combinations. Add a filter or use fewer row fields.`,
+        { limit: max },
+      );
+    const pivot = pivotRows(
+      out.columns,
+      out.rows,
+      p.rows.length,
+      p.value.fn,
+      pivotValueLabel(p, built.calculated),
+    );
+    return { out, pivot };
+  }
+  const pivotJson = (built: Built, run: Awaited<ReturnType<typeof runPivot>>) => ({
+    pivot: run.pivot,
+    executionId: run.out.executionId,
+    completedAt: run.out.completedAt,
+    durationMs: run.out.durationMs,
+    parameters: run.out.parameters,
+    dataSource: run.out.dataSource,
+    builder: { name: built.name, sql: built.sql },
+    warnings: built.warnings,
+  });
+  async function savedPivot(u: AppUser, id: string) {
+    const { report } = await d.access.require(u, id, 'VIEW');
+    if (report.builderDef === null)
+      throw new AppError(400, 'NOT_PIVOT', 'This report is not a pivot.');
+    const rebuilt = await rebuildFromDef(d, u.id, report.builderDef);
+    return { report, built: rebuilt as Built, pivot: pivotOf(rebuilt.def.spec) };
+  }
+  const pivotRunBody = z.object({
+    executionId: uuid.optional(),
+    values: parameterValuesSchema.optional(),
+  });
+  async function sendPivotXlsx(
+    res: Response,
+    u: AppUser,
+    built: Built,
+    run: Awaited<ReturnType<typeof runPivot>>,
+    title: string,
+    description?: string | null,
+  ) {
+    const file = await d.execution.writeTableXlsx(u, pivotTable(run.pivot), {
+      title,
+      description,
+      sql: built.sql,
+      executedAt: run.out.completedAt,
+      definitions: built.parameters,
+      parameters: run.out.parameters,
+      note: `Pivot: ${run.pivot.value.label} by ${run.pivot.rowFields.map((f) => f.label).join(', ')} and ${run.pivot.columnField.label} (values only)`,
+    });
+    await sendXlsx(res, file);
+  }
+  r.post(
+    '/schema/pivot',
+    execLimiter,
+    h(async (req, res) => {
+      const body = builderQuerySchema.parse(req.body);
+      const p = pivotOf(body);
+      const built = await buildQuery(d, user(req).id, body);
+      const run = await runPivot(user(req), built, p, body);
+      res.json(pivotJson(built, run));
+    }),
+  );
+  r.post(
+    '/schema/pivot/export',
+    execLimiter,
+    h(async (req, res) => {
+      const body = builderQuerySchema
+        .and(z.object({ name: z.string().max(128).optional() }))
+        .parse(req.body);
+      const p = pivotOf(body);
+      const built = await buildQuery(d, user(req).id, body);
+      const run = await runPivot(user(req), built, p, { ...body, kind: 'EXPORT' });
+      await sendPivotXlsx(res, user(req), built, run, body.name?.trim() || built.name);
+    }),
+  );
+  r.post(
+    '/reports/:id/pivot',
+    execLimiter,
+    h(async (req, res) => {
+      const body = pivotRunBody.parse(req.body ?? {});
+      const s = await savedPivot(user(req), reportId(req));
+      const run = await runPivot(user(req), s.built, s.pivot, { ...body, report: s.report });
+      res.json({ ...pivotJson(s.built, run), report: { id: s.report.id, name: s.report.name } });
+    }),
+  );
+  r.post(
+    '/reports/:id/pivot/export',
+    execLimiter,
+    h(async (req, res) => {
+      const body = pivotRunBody.parse(req.body ?? {});
+      const s = await savedPivot(user(req), reportId(req));
+      const run = await runPivot(user(req), s.built, s.pivot, {
+        ...body,
+        report: s.report,
+        kind: 'EXPORT',
+      });
+      await sendPivotXlsx(res, user(req), s.built, run, s.report.name, s.report.description);
+    }),
+  );
+
   // ---- server-side result paging (cursor owned by the caller, short TTL) ----
   r.post(
     '/results/:cursorId/next',
@@ -945,8 +1137,7 @@ export function apiRouter(d: ApiDeps): Router {
         try {
           const rebuilt = await rebuildFromDef(d, user(req).id, report.builderDef);
           builder = { valid: true };
-          if (rebuilt.columns)
-            fields = groupFields(rebuilt.def.spec as JoinedReportSpec, rebuilt.columns);
+          if (rebuilt.columns) fields = groupFields(rebuilt.effective, rebuilt.columns);
         } catch (e) {
           builder = {
             valid: false,
@@ -1058,8 +1249,7 @@ export function apiRouter(d: ApiDeps): Router {
       if (report.builderDef !== null)
         try {
           const rebuilt = await rebuildFromDef(d, u.id, report.builderDef);
-          if (rebuilt.columns)
-            fields = groupFields(rebuilt.def.spec as JoinedReportSpec, rebuilt.columns);
+          if (rebuilt.columns) fields = groupFields(rebuilt.effective, rebuilt.columns);
         } catch {
           fields = [];
         }
@@ -1106,7 +1296,7 @@ export function apiRouter(d: ApiDeps): Router {
     const rebuilt = await rebuildFromDef(d, u.id, report.builderDef);
     if (!rebuilt.columns || !rebuilt.aliases)
       throw new AppError(400, 'NOT_DRILLABLE', 'This report is not grouped.');
-    const spec = rebuilt.def.spec as JoinedReportSpec;
+    const spec = rebuilt.effective;
     const fields = groupFields(spec, rebuilt.columns);
     const columns =
       body.columns ?? defaultDetailColumns(spec, rebuilt.aliases, rebuilt.sources, fields);

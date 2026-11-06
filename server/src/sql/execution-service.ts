@@ -28,7 +28,7 @@ import {
 } from '../charts/chart-def.js';
 import { renderChartPng } from '../charts/render.js';
 import type { ResultColumn, Cell } from './results.js';
-import type { PagedOutcome, PageOutcome, QueryExecutor } from './executor.js';
+import type { ExecutionOutcome, PagedOutcome, PageOutcome, QueryExecutor } from './executor.js';
 
 export interface RunResponse extends PagedOutcome {
   report?: Pick<
@@ -314,6 +314,88 @@ export class ExecutionService {
         cleanup,
         chart,
         ...(chartNote ? { chartNote } : {}),
+      };
+    } catch (e) {
+      await cleanup();
+      throw e;
+    }
+  }
+  /**
+   * Runs a grouped (pivot) query in full, up to `maxRows` rows, with history tracking.
+   * The caller reshapes the rows; nothing is paged or cached.
+   */
+  async runGrouped(
+    user: AppUser,
+    src: {
+      sql: string;
+      definitions: ParameterDef[];
+      values?: RawValues;
+      reportId?: string;
+      reportOwnerId?: string;
+      executionId?: string;
+      kind?: 'RUN' | 'EXPORT';
+    },
+    maxRows: number,
+  ): Promise<ExecutionOutcome & { parameters: ResolvedParameters['used']; dataSource: string }> {
+    this.executor.validate(src.sql);
+    const p = resolveParameters(src.sql, src.definitions, src.values ?? {});
+    const id = src.executionId ?? randomUUID();
+    const out = await this.tracked(
+      {
+        id,
+        userId: user.id,
+        reportId: src.reportId ?? null,
+        reportOwnerId: src.reportOwnerId ?? null,
+        kind: src.kind ?? 'RUN',
+        sql: src.sql,
+        parameters: p.used,
+      },
+      () => this.executor.run(src.sql, user.id, { executionId: id, maxRows, parameters: p.bound }),
+    );
+    return { ...out, parameters: p.used, dataSource: this.cfg.mapepire.displayName };
+  }
+
+  /** Writes an already computed table (e.g. a pivot) to an XLSX file: values only. */
+  async writeTableXlsx(
+    user: AppUser,
+    table: { columns: ResultColumn[]; rows: Cell[][] },
+    meta: {
+      title: string;
+      description?: string | null;
+      sql: string;
+      executedAt: string;
+      definitions: ParameterDef[];
+      parameters: ResolvedParameters['used'];
+      note?: string;
+    },
+  ): Promise<ExportFile> {
+    const dir = await mkdtemp(join(tmpdir(), 'qf-export-'));
+    const path = join(dir, 'export.xlsx');
+    const cleanup = () => rm(dir, { recursive: true, force: true });
+    try {
+      const writer = new XlsxResultWriter(path, meta.title, this.cfg.xlsxFormulaEscape);
+      writer.setColumns(table.columns);
+      writer.addRows(table.rows);
+      await writer.finish({
+        title: meta.title,
+        description: meta.description,
+        sql: meta.sql,
+        executedAt: meta.executedAt,
+        executedBy: user.username,
+        dataSource: this.cfg.mapepire.displayName,
+        rowCount: table.rows.length,
+        truncated: false,
+        maxRows: table.rows.length,
+        parameters: labelled(meta.definitions, meta.parameters),
+        trigger: meta.note,
+      });
+      return {
+        path,
+        filename: sanitizeFileName(meta.title),
+        rowCount: writer.rowsWritten,
+        truncated: false,
+        cleanup,
+        chart: null,
       };
     } catch (e) {
       await cleanup();

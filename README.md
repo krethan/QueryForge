@@ -306,6 +306,51 @@ export.
   has been tested against a real IBM i**; in particular the generated Db2 for i SQL (e.g. `SUBSTRING`, `INTEGER`,
   `DECIMAL` precision of results) has not been run on a real system.
 
+### Pivot reports (builder definition version 3)
+
+Turn on **Pivot** in the Report Builder to show a crosstab: one to five **row fields**, one
+**column field**, and one **value** (Sum, Count, Average, Minimum or Maximum of a field, or
+Count of rows). Calculated fields can be used as row, column or value fields; filters, prompts
+(parameters) and joins apply as usual. While a pivot is on, the builder's own grouping, totals
+and sort are replaced by the pivot.
+
+How it works:
+
+- The browser sends only the pivot definition (field names). The server builds one ordinary
+  `GROUP BY` query over the row and column fields (Average also selects a hidden `SUM` and
+  `COUNT` so totals are exact) and pivots the grouped rows in memory. There is no dynamic
+  column SQL: the column values never become SQL text.
+- **Column cap:** if the column field has more than **50** distinct values the run stops with
+  a message naming the field and suggesting a filter (or a column field with fewer values).
+  The grouped query is also limited to 10,000 groups (or the configured row limit, if lower);
+  beyond that the run stops with "too large" rather than showing partial totals.
+- Row, column and grand totals are computed on the server with exact decimal arithmetic for
+  Sum, Count, Minimum and Maximum. Average totals are total sum ÷ total count (not an average
+  of averages); integer averages are truncated like Db2's `AVG` on integers.
+- `NULL` column values get their own `(null)` column (shown last); `NULL` row values show as
+  `(null)`. Empty cells mean no rows for that combination and are not clickable.
+- Click any cell or total on a **saved** report to open the existing drill-down with those row
+  and column values (`IS NULL` for the `(null)` column). The grand total drills with no keys.
+- **Export pivot to Excel** writes the same layout (row fields, one column per value, Total
+  column and Total row) as plain values, no formulas.
+- The chart panel offers a stacked bar (Sum/Count) or grouped bar (other functions) by default,
+  drawn from the grouped rows: first row field on the axis, column values as series.
+
+Storage: the pivot is saved in the builder definition JSON, which is saved as **version 3**
+only when a pivot is used; version 1/2 reports load and save unchanged, so **no database
+migration is needed** (the definition is already a JSON column). The server rejects a pivot in a
+version 1 or 2 definition. The demo engine runs the same grouped SQL, so demo pivots are real
+results of the demo data, not mock grids.
+
+Limits:
+
+- Column order is the server's sort (numbers numerically, other values by code point, `(null)`
+  last), which may differ from Db2 for i collation for accented or mixed-case text.
+- Plain **Run** of the SQL, schedules and dashboards run the grouped (long) form, not the grid.
+- One value field and one column field per pivot; at most 50 columns and 5 row fields.
+- **Not tested against a real IBM i.** Pivots have only been run against the demo engine and
+  the unit tests.
+
 ## Charts
 
 Results in the SQL editor and the Report Builder can be shown as a **Table**, a **Chart** or **Both**.

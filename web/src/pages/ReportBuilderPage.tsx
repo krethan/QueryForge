@@ -45,9 +45,18 @@ import type {
   SchemaTable,
   SortDirection,
   CalcType,
+  PivotRun,
 } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
+import {
+  BuilderPivot,
+  emptyPivot,
+  pivotProblem,
+  type PivotState,
+} from '../components/BuilderPivot';
+import { PivotTable } from '../components/PivotTable';
+import { pivotChartDefault } from '../utils/pivot';
 import { ResultsTable } from '../components/ResultsTable';
 import { ChartPanel } from '../components/charts/ChartPanel';
 import { cleanChartDef, type ChartDef, type ChartView } from '../utils/chartData';
@@ -264,10 +273,22 @@ export async function hydrate(spec: ReportSpec): Promise<Hydration> {
     status: c.type ? 'ok' : 'idle',
     type: c.type,
   }));
+  const pivot: PivotState = spec.pivot
+    ? {
+        enabled: true,
+        rows: spec.pivot.rows.map((x) => pick(x)),
+        column: pick(spec.pivot.column),
+        fn: spec.pivot.value.fn,
+        value: spec.pivot.value.column
+          ? pick({ table: spec.pivot.value.table, column: spec.pivot.value.column })
+          : '',
+      }
+    : emptyPivot();
   return {
     table,
     columns: base.columns,
     joins,
+    pivot,
     calcs,
     picked,
     sort,
@@ -290,6 +311,7 @@ interface Hydration {
   table: SchemaTable;
   columns: SchemaColumn[];
   joins: JoinedTable[];
+  pivot: PivotState;
   calcs: CalcRow[];
   picked: ColPick[];
   sort: SortRow[];
@@ -332,6 +354,8 @@ export function ReportBuilderPage() {
   const [groupBy, setGroupBy] = useState<GroupRow[]>([]);
   const [aggregates, setAggregates] = useState<AggRow[]>([]);
   const [having, setHaving] = useState<HavingRow[]>([]);
+  const [pivot, setPivotState] = useState<PivotState>(emptyPivot);
+  const [pivotRun, setPivotRun] = useState<PivotRun | null>(null);
   const [previewParams, setPreviewParams] = useState<ParameterDef[]>([]);
   const [askOpen, setAskOpen] = useState(false);
   const [askErrors, setAskErrors] = useState<Record<string, string> | null>(null);
@@ -441,6 +465,7 @@ export function ReportBuilderPage() {
       setGroupBy(h.groupBy);
       setAggregates(h.aggregates);
       setHaving(h.having);
+      setPivotState(h.pivot);
       return;
     }
     let cancelled = false;
@@ -454,6 +479,8 @@ export function ReportBuilderPage() {
     setFilters([]);
     setFilterLogic('AND');
     setGroupBy([]);
+    setPivotState(emptyPivot());
+    setPivotRun(null);
     setAggregates([]);
     setHaving([]);
     setSql('');
@@ -566,7 +593,21 @@ export function ReportBuilderPage() {
       })),
     [calcKey],
   );
-  const spec = useMemo<ReportSpec>(() => {
+  const pivotOn = pivot.enabled && !pivotProblem(pivot);
+  const pivotDef = useMemo(
+    () =>
+      pivot.enabled && !pivotProblem(pivot)
+        ? {
+            rows: pivot.rows.map((x) => refOf(x)),
+            column: refOf(pivot.column),
+            value: pivot.value
+              ? { fn: pivot.fn, ...refOf(pivot.value) }
+              : { fn: pivot.fn, column: null },
+          }
+        : null,
+    [pivot, refOf],
+  );
+  const baseSpec = useMemo<ReportSpec>(() => {
     if (!selected) return { schema: '', table: '', columns: [] };
     const calc = calculated.length ? { calculated } : {};
     if (joins.length === 0)
@@ -605,8 +646,18 @@ export function ReportBuilderPage() {
       ...calc,
     };
   }, [selected, picked, joins, aliasOf, extras, sortSpec, calculated]);
+  /** With a pivot the server builds the grouping, totals and sort; filters, joins and calcs stay. */
+  const spec = useMemo<ReportSpec>(() => {
+    if (!pivotDef) return baseSpec;
+    const { sort: _s, groupBy: _g, aggregates: _a, having: _h, ...rest } = baseSpec;
+    void _s;
+    void _g;
+    void _a;
+    void _h;
+    return { ...rest, columns: [], pivot: pivotDef };
+  }, [baseSpec, pivotDef]);
 
-  const hasOutput = picked.length > 0 || aggregates.length > 0;
+  const hasOutput = pivot.enabled ? pivotOn : picked.length > 0 || aggregates.length > 0;
 
   // ---- live preview: the server builds the SQL for the current selection ----
   useEffect(() => {
@@ -851,6 +902,20 @@ export function ReportBuilderPage() {
       setError(null);
       setNotice(null);
       try {
+        if (spec.pivot) {
+          const pr = values
+            ? await api.runPivot(spec, execId, undefined, values)
+            : await api.runPivot(spec, execId);
+          setPivotRun(pr);
+          setChart((c) => c ?? pivotChartDefault(pr.pivot));
+          setResult(null);
+          setLastValues(values);
+          setAskOpen(false);
+          setAskErrors(null);
+          if (pr.builder?.sql) setSql(pr.builder.sql);
+          return;
+        }
+        setPivotRun(null);
         const r = values
           ? await api.runReportBuilder(spec, execId, undefined, values)
           : await api.runReportBuilder(spec, execId);
@@ -868,6 +933,7 @@ export function ReportBuilderPage() {
           setError(e);
         }
         setResult(null);
+        setPivotRun(null);
       } finally {
         runningRef.current = false;
         setRunning(null);
@@ -904,8 +970,15 @@ export function ReportBuilderPage() {
         // The server re-validates the definition and regenerates SQL and parameters from it.
         sql,
         parameters: previewParams,
-        // version 2 only when calculated fields are used; older definitions stay version 1
-        builderDef: { version: spec.calculated?.length ? (2 as const) : (1 as const), spec },
+        // version 3 only with a pivot, 2 with calculated fields; older definitions stay version 1
+        builderDef: {
+          version: spec.pivot
+            ? (3 as const)
+            : spec.calculated?.length
+              ? (2 as const)
+              : (1 as const),
+          spec,
+        },
       };
       // a chart is saved with the report only when it is shown (Chart or Both)
       const chartDef =
@@ -1226,6 +1299,13 @@ export function ReportBuilderPage() {
     const gone = new Set(aggregates.filter((a) => a.pick === k).map((a) => a.key));
     setAggregates((rows) => rows.filter((a) => a.pick !== k));
     setHaving((rows) => rows.filter((h) => !gone.has(h.aggregate)));
+    setPivotState((pv) => ({
+      ...pv,
+      rows: pv.rows.filter((x) => x !== k),
+      column: pv.column === k ? '' : pv.column,
+      value: pv.value === k ? '' : pv.value,
+    }));
+    setPivotRun(null);
     setFilters((nodes) =>
       nodes
         .map((n) => (n.kind === 'group' ? { ...n, rows: n.rows.filter((r) => r.pick !== k) } : n))
@@ -1632,26 +1712,38 @@ export function ReportBuilderPage() {
                     }}
                     onLogic={setFilterLogic}
                   />
-                  <BuilderGrouping
-                    groupBy={groupBy}
-                    aggregates={aggregates}
-                    having={having}
+                  <BuilderPivot
+                    pivot={pivot}
                     columns={columnChoices}
                     kindOf={kindOf}
-                    columnName={columnName}
-                    autoGrouped={autoGrouped}
-                    onGroupBy={(g) => {
-                      setGroupBy(g);
+                    onChange={(pv) => {
+                      setPivotState(pv);
+                      setPivotRun(null);
                       setResult(null);
                     }}
-                    onAggregates={(a) => {
-                      setAggregates(a);
-                      const keys = new Set(a.map((x) => x.key));
-                      setSort((rows) => rows.filter((r) => !r.agg || keys.has(r.agg)));
-                      setResult(null);
-                    }}
-                    onHaving={setHaving}
                   />
+                  {!pivot.enabled && (
+                    <BuilderGrouping
+                      groupBy={groupBy}
+                      aggregates={aggregates}
+                      having={having}
+                      columns={columnChoices}
+                      kindOf={kindOf}
+                      columnName={columnName}
+                      autoGrouped={autoGrouped}
+                      onGroupBy={(g) => {
+                        setGroupBy(g);
+                        setResult(null);
+                      }}
+                      onAggregates={(a) => {
+                        setAggregates(a);
+                        const keys = new Set(a.map((x) => x.key));
+                        setSort((rows) => rows.filter((r) => !r.agg || keys.has(r.agg)));
+                        setResult(null);
+                      }}
+                      onHaving={setHaving}
+                    />
+                  )}
                 </>
               )}
             </>
@@ -1812,6 +1904,47 @@ export function ReportBuilderPage() {
                   />
                 }
               />
+            }
+          />
+        </section>
+      )}
+
+      {pivotRun && (
+        <section className="qf-section" aria-label="Pivot results">
+          <ChartPanel
+            columns={pivotRun.pivot.long.columns}
+            rows={pivotRun.pivot.long.rows}
+            hasMore={false}
+            def={chart}
+            onChange={setChart}
+            view={chartView}
+            onViewChange={setChartView}
+            dashboardOptions
+            saveHint="The chart is drawn from the grouped (long) rows and saved with the report (Chart or Both view)."
+            table={
+              <>
+                <div className="qf-pivot-toolbar">
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    disabled={Boolean(running)}
+                    onClick={() =>
+                      api
+                        .exportPivot({
+                          spec,
+                          name: suggestedName || selected?.name || 'Pivot',
+                          ...(lastValues ? { values: lastValues } : {}),
+                        })
+                        .then(() => setNotice('Exported the pivot to Excel.'))
+                        .catch((e) => setError(e))
+                    }
+                  >
+                    Export pivot to Excel
+                  </Button>
+                  <span className="qf-muted">Save the report to drill into a cell.</span>
+                </div>
+                <PivotTable pivot={pivotRun.pivot} />
+              </>
             }
           />
         </section>

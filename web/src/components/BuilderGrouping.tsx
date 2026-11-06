@@ -44,7 +44,7 @@ const HAVING_LABELS: Record<HavingOp, string> = {
   BETWEEN: 'between',
 };
 
-function ColumnSelect({
+export function ColumnSelect({
   id,
   label,
   value,
