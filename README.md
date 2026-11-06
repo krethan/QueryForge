@@ -351,6 +351,16 @@ Limits:
 - **Not tested against a real IBM i.** Pivots have only been run against the demo engine and
   the unit tests.
 
+## Date range presets
+
+SQL date parameters and Report Builder date filters can use a rolling range instead of a fixed date: **Today, Yesterday, This/Last week, This/Last month, This/Last quarter, Year to date, Last year, Last N days (1–3650, including today), or Custom**. For an "Ask when run" date filter, the preset is the default at each run. Saved schedules keep the preset, not the date that happened to be current when the schedule was saved; previously cached literal schedule values are ignored for rolling definitions.
+
+The server resolves every range just before binding its `?` markers. The configured **`DATE_PRESET_TIMEZONE`** (default `SCHEDULE_DEFAULT_TIMEZONE`, which defaults to `UTC`) determines the calendar date, independently of the browser's time zone. **UTC is the default deployment zone**: this week is Monday–Sunday and quarters are calendar quarters. A single-date preset becomes an inclusive `BETWEEN` covering the appropriate calendar day(s). Last N days includes today, so N=1 means Today.
+
+The definition stores the preset in the existing `PARAMETERS_JSON` and `BUILDER_DEF` JSON. There is **no database migration**. Existing literal date defaults and reports continue through the old binding path. Resolved values remain parameters, never SQL text, and invalid or tampered presets are rejected.
+
+Limits: rolling filters apply to date columns, not timestamps; there is no fiscal calendar, relative timestamps or arbitrary day-of-week offset. Presets are not evaluated in the browser. A standalone SQL date parameter receives the range start; the generated Builder/SQL range pair receives both bounds. On each interactive or scheduled run the server resolves the stored preset again; schedules contain no resolved preset dates. **Not tested against a real IBM i**: date handling has only been checked with unit/API tests and the demo, never with Db2 for i.
+
 ## Charts
 
 Results in the SQL editor and the Report Builder can be shown as a **Table**, a **Chart** or **Both**.

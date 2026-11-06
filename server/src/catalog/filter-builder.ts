@@ -14,6 +14,7 @@ import {
   type ParameterDef,
   type ParameterType,
 } from '../reports/parameters.js';
+import { datePresetValue, parseDatePreset } from '../reports/date-presets.js';
 import type { CatalogColumn } from './sql-builder.js';
 import { typeCategory } from './join-builder.js';
 
@@ -57,6 +58,8 @@ export interface AskSpec {
   defaultValue?: Scalar | null;
   /** Second bound for BETWEEN (parameters `<name>_FROM` and `<name>_TO`). */
   defaultValue2?: Scalar | null;
+  /** Rolling date filter: stored in the definition, resolved to bounds on each run. */
+  preset?: unknown;
 }
 
 export interface FilterSpec {
@@ -67,6 +70,8 @@ export interface FilterSpec {
   value2?: Scalar | null;
   values?: Scalar[];
   ask?: AskSpec | null;
+  /** Rolling date filter for fixed and ask-when-run filters. */
+  preset?: unknown;
 }
 /** One optional level of grouping: `( a OR b )` inside a top-level AND (or vice versa). */
 export interface FilterGroup {
@@ -218,6 +223,16 @@ function buildFilter(f: FilterSpec, ctx: BuildContext, p: ParamCollector): strin
   if (op === 'IS_NULL') return `${ref} IS NULL`;
   if (op === 'IS_NOT_NULL') return `${ref} IS NOT NULL`;
 
+  const preset = parseDatePreset(f.preset);
+  if (f.preset !== undefined && f.preset !== null && !preset)
+    throw bad('INVALID_DATE_PRESET', `${what} has an invalid date preset.`);
+  if (preset) {
+    if (typeCategory(c.type) !== 'date')
+      throw bad('INVALID_DATE_PRESET', `${what} is not a date column.`);
+    if (!['BETWEEN', '=', '>=', '<', '<=', '>'].includes(op))
+      throw bad('INVALID_DATE_PRESET', `${what} cannot use a date preset with this operator.`);
+  }
+
   const type = parameterTypeFor(c);
   if (!type)
     throw bad(
@@ -252,6 +267,29 @@ function buildFilter(f: FilterSpec, ctx: BuildContext, p: ParamCollector): strin
     return `${ref} IN (${markers.join(', ')})`;
   }
 
+  if (preset && op === 'BETWEEN') {
+    const encoded = datePresetValue(preset);
+    if (ask) {
+      if (typeof ask.name !== 'string' || ask.name.length > 25)
+        throw bad(
+          'INVALID_PARAMETER_NAME',
+          `${what}: a BETWEEN parameter name must be at most 25 characters (_FROM / _TO are added).`,
+        );
+      const label = typeof ask.label === 'string' && ask.label.trim() ? ask.label.trim() : ask.name;
+      const a = p.ask(`${ask.name}_FROM`, `${label} (from)`, type, null);
+      const b = p.ask(`${ask.name}_TO`, `${label} (to)`, type, null);
+      for (const d of p.defs.slice(-2)) {
+        d.defaultValue = encoded;
+        d.datePreset = preset;
+      }
+      return `${ref} BETWEEN ${a} AND ${b}`;
+    }
+    const a = p.fixed('F', type, encoded, ctx.label(i, c));
+    const b = p.fixed('F', type, encoded, ctx.label(i, c));
+    for (const d of p.defs.slice(-2)) d.datePreset = preset;
+    return `${ref} BETWEEN ${a} AND ${b}`;
+  }
+
   if (op === 'BETWEEN') {
     if (ask) {
       if (typeof ask.name !== 'string' || ask.name.length > 25)
@@ -272,6 +310,23 @@ function buildFilter(f: FilterSpec, ctx: BuildContext, p: ParamCollector): strin
     const a = p.fixed('F', type, checkValue(c, type, f.value, `${what} (from)`), ctx.label(i, c));
     const b = p.fixed('F', type, checkValue(c, type, f.value2, `${what} (to)`), ctx.label(i, c));
     return `${ref} BETWEEN ${a} AND ${b}`;
+  }
+
+  if (preset) {
+    const encoded = datePresetValue(preset);
+    if (ask) {
+      const lo = p.ask(ask.name, ask.label, type, null);
+      const hi = p.ask(`${String(ask.name).slice(0, 27)}_TO`, ask.label, type, null);
+      for (const d of p.defs.slice(-2)) {
+        d.defaultValue = encoded;
+        d.datePreset = preset;
+      }
+      return `${ref} BETWEEN ${lo} AND ${hi}`;
+    }
+    const lo = p.fixed('F', type, encoded, ctx.label(i, c));
+    const hi = p.fixed('F', type, encoded, ctx.label(i, c));
+    for (const d of p.defs.slice(-2)) d.datePreset = preset;
+    return `${ref} BETWEEN ${lo} AND ${hi}`;
   }
 
   const marker = ask

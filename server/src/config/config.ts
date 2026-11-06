@@ -107,6 +107,19 @@ const schema = z.object({
   SCHEDULE_MAX_RECIPIENTS: int(20),
   SCHEDULE_RECIPIENT_DOMAINS: z.string().optional(),
   SCHEDULE_DEFAULT_TIMEZONE: z.string().default('UTC'),
+  /** IANA zone used to resolve rolling date presets (defaults to the schedule zone). */
+  DATE_PRESET_TIMEZONE: z
+    .string()
+    .optional()
+    .refine((v) => {
+      if (!v) return true;
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: v });
+        return true;
+      } catch {
+        return false;
+      }
+    }, 'DATE_PRESET_TIMEZONE must be an IANA time zone'),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: int(587),
   SMTP_SECURE: bool.default(false),
@@ -158,6 +171,8 @@ export interface AppConfig {
   session: { secret: string; ttlMinutes: number; cookieSecure: boolean };
   protectedSchemas: string[];
   xlsxFormulaEscape: 'prefix' | 'none';
+  /** Documented IANA zone for all server-resolved rolling dates. */
+  datePresetTimezone: string;
   auth: {
     localEnabled: boolean;
     oidc?: {
@@ -327,6 +342,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     protectedSchemas: Array.from(new Set([metaSchema, ...list(e.PROTECTED_SCHEMAS)])),
     xlsxFormulaEscape: e.XLSX_FORMULA_ESCAPE,
+    datePresetTimezone: e.DATE_PRESET_TIMEZONE ?? e.SCHEDULE_DEFAULT_TIMEZONE,
     auth: {
       localEnabled: e.AUTH_LOCAL_ENABLED,
       oidc: e.OIDC_ISSUER_URL

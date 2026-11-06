@@ -2,6 +2,8 @@ import type React from 'react';
 import { Button, Checkbox, Select, SelectItem, TextInput } from '@carbon/react';
 import { Add, TrashCan } from '@carbon/icons-react';
 import type { ParameterDef, ParameterType } from '../api/types';
+import { DatePresetSelect, presetChoice } from './DatePresetFields';
+import { encodePresetChoice } from './datePresetState';
 
 const TYPES: { value: ParameterType; text: string }[] = [
   { value: 'string', text: 'Text' },
@@ -119,12 +121,34 @@ export function ParameterEditor({ sql, value, onChange, readOnly }: Props) {
               labelText="Default"
               size="sm"
               placeholder={p.type === 'date' ? 'YYYY-MM-DD' : ''}
-              value={p.defaultValue ?? ''}
+              value={p.defaultValue?.startsWith('$preset:') ? '' : (p.defaultValue ?? '')}
+              disabled={Boolean(p.datePreset || p.defaultValue?.startsWith('$preset:')) || readOnly}
               readOnly={readOnly}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 set(i, { defaultValue: e.target.value === '' ? null : e.target.value })
               }
             />
+            {p.type === 'date' && (
+              <div data-testid={'date-preset-editor'}>
+                <DatePresetSelect
+                  id={`ppreset-${i}`}
+                  label="Rolling default"
+                  value={presetChoice(p)}
+                  onChange={(v) =>
+                    set(i, {
+                      datePreset: v.choice
+                        ? { preset: v.choice, ...(v.choice === 'LAST_N_DAYS' ? { n: v.n } : {}) }
+                        : null,
+                      defaultValue: encodePresetChoice(v),
+                    })
+                  }
+                />
+                <p className="qf-muted">
+                  A rolling preset is resolved on the server in the configured zone at each run;
+                  Custom uses an ordinary literal default. Saved schedules keep rolling.
+                </p>
+              </div>
+            )}
             {p.type === 'list' && (
               <TextInput
                 id={`poptions-${i}`}

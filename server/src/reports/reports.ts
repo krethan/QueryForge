@@ -6,6 +6,7 @@ import { AppError, DbError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
 import type { ChartDef } from '../charts/chart-def.js';
 import { parsePresentation, presentationJson, type DrillDef } from './drill.js';
+import { parametersUseDatePresets } from './parameters.js';
 import {
   countMarkers,
   parameterListSchema,
@@ -40,6 +41,8 @@ export interface Report {
   /** Configured "Drill to report" target (stored in the CHART_DEF envelope, version 2). */
   drillDef: DrillDef | null;
   drillError?: string;
+  /** Rolling dates force the schedule form to keep its saved values, not freeze dates. */
+  hasDatePresets: boolean;
 }
 
 export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
@@ -128,6 +131,7 @@ const toReport = (r: Row): Report => {
         ? null
         : Number(r.LAST_DURATION_MS),
     parameters: parseStoredParameters(r.PARAMETERS_JSON),
+    hasDatePresets: parametersUseDatePresets(parseStoredParameters(r.PARAMETERS_JSON)),
     builderDef: parseBuilderDef(r.BUILDER_DEF),
     chartDef: chart.chart,
     ...(chart.chartError ? { chartError: chart.chartError } : {}),

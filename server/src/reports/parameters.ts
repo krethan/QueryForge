@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { tokenize } from '../sql/lexer.js';
 import { AppError } from '../util/errors.js';
+import { datePresetRange, isDatePreset, parseDatePreset } from './date-presets.js';
 
 export const PARAMETER_TYPES = ['string', 'integer', 'decimal', 'date', 'list'] as const;
 export type ParameterType = (typeof PARAMETER_TYPES)[number];
@@ -44,6 +45,27 @@ export const parameterDefSchema = z
      * on the server, for a marker written as `LIKE ? ESCAPE '\'`.
      */
     match: z.enum(['contains', 'startsWith', 'endsWith']).optional(),
+    /** Rolling date preset; resolved in the configured time zone at each run, not stored as a fixed date. */
+    datePreset: z
+      .object({
+        preset: z.enum([
+          'TODAY',
+          'YESTERDAY',
+          'THIS_WEEK',
+          'LAST_WEEK',
+          'THIS_MONTH',
+          'LAST_MONTH',
+          'THIS_QUARTER',
+          'LAST_QUARTER',
+          'YTD',
+          'LAST_YEAR',
+          'LAST_N_DAYS',
+        ]),
+        n: z.number().int().min(1).max(3650).optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .superRefine((p, ctx) => {
     if (p.fixed && p.defaultValue === null)
@@ -53,7 +75,11 @@ export const parameterDefSchema = z
         code: 'custom',
         message: `Parameter "${p.name}" needs at least one list value.`,
       });
-    if (p.defaultValue !== null) {
+    if (p.datePreset && p.type !== 'date')
+      ctx.addIssue({ code: 'custom', message: `Date presets only apply to date parameters.` });
+    if (p.datePreset && !p.defaultValue?.startsWith('$preset:'))
+      ctx.addIssue({ code: 'custom', message: `The encoded date preset is missing.` });
+    if (p.defaultValue !== null && !(p.type === 'date' && isDatePreset(p.defaultValue))) {
       const r = coerce(p as ParameterDef, p.defaultValue);
       if (!r.ok)
         ctx.addIssue({ code: 'custom', message: `Default for "${p.label}": ${r.message}` });
@@ -68,6 +94,8 @@ export type ParameterDef = {
   options?: { value: string; label?: string }[];
   fixed?: boolean;
   match?: LikeMatch;
+  /** Optional editor metadata; the stored $preset: defaultValue is authoritative. */
+  datePreset?: { preset: string; n?: number } | null;
 };
 export type LikeMatch = 'contains' | 'startsWith' | 'endsWith';
 
@@ -165,10 +193,17 @@ export interface ResolvedParameters {
  * Server-side validation: checks marker count, required values, types and list
  * membership, applying defaults. Throws a 400 AppError listing every problem.
  */
+export function parametersUseDatePresets(defs: ParameterDef[]): boolean {
+  return defs.some(
+    (d) => d.type === 'date' && (Boolean(d.datePreset) || isDatePreset(d.defaultValue)),
+  );
+}
+
 export function resolveParameters(
   sql: string,
   defs: ParameterDef[],
   raw: RawValues = {},
+  options: { now?: Date; timeZone?: string } = {},
 ): ResolvedParameters {
   const markers = countMarkers(sql);
   if (markers > 0 && defs.length === 0)
@@ -193,6 +228,25 @@ export function resolveParameters(
     let v = d.fixed ? d.defaultValue : raw[d.name];
     if (v === undefined || v === null || (typeof v === 'string' && v.trim() === ''))
       v = d.defaultValue;
+    // Rolling presets are server-owned: any client value is ignored. Legacy literal
+    // date defaults continue to go through the original required/default path below.
+    if (d.type === 'date' && v !== null && v !== undefined) {
+      // A generated fixed upper marker follows the generated lower marker, not _TO.
+      const generatedUpper =
+        d.fixed &&
+        d.name.startsWith('QF_F') &&
+        /(?:^|[^0-9])([1-9]\d*)$/.exec(d.name) &&
+        Number(d.name.slice(4)) % 2 === 0;
+      const upper = d.name.toUpperCase().endsWith('_TO') || Boolean(generatedUpper);
+      const preset = parseDatePreset(v);
+      if (preset) {
+        const range = datePresetRange(preset, options.now, options.timeZone);
+        v = upper ? range.to : range.from;
+      } else if (d.datePreset) {
+        const range = datePresetRange(d.datePreset as never, options.now, options.timeZone);
+        v = upper ? range.to : range.from;
+      }
+    }
     if (v === null || v === undefined) {
       if (d.required) errors[d.name] = `${d.label} is required`;
       bound.push(null);

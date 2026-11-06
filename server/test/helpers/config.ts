@@ -19,5 +19,5 @@ export const baseEnv = {
 };
 
 export function testConfig(over: Record<string, string> = {}): AppConfig {
-  return loadConfig({ ...baseEnv, ...over } as NodeJS.ProcessEnv);
+  return { ...loadConfig({ ...baseEnv, ...over } as NodeJS.ProcessEnv), datePresetTimezone: 'UTC' };
 }
