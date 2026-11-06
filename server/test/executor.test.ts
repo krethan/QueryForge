@@ -115,3 +115,35 @@ describe('QueryExecutor (Mapepire)', () => {
     expect(jobs[0].closed).toBe(true);
   });
 });
+
+it('keeps report formatting attached to each fetched page', async () => {
+  const { factory } = fakeFactory(() => table(4));
+  const ex = new QueryExecutor(testConfig({ RESULT_PAGE_SIZE: '2' }), factory);
+  const first = await ex.openPaged('SELECT ID, AMT, NAME FROM T', 'u1', {
+    formatPage: (columns, rows) =>
+      rows.map((row) => [row[0] === 3 ? { color: 'green', scope: 'row' } : null, null, null]),
+  });
+  expect(first.rows).toHaveLength(2);
+  const next = await ex.fetchPage(first.cursor!.id, 'u1');
+  expect(next.rows.map((r) => r[0])).toEqual([3, 4]);
+  expect(next.formatStyles?.[0]?.[0]).toEqual({ color: 'green', scope: 'row' });
+  expect(next.formatStyles?.[1]?.[0]).toBeNull();
+  expect(next.hasMore).toBe(false);
+  await ex.shutdown();
+});
+
+it('keeps report formatting attached to each fetched page', async () => {
+  const { factory } = fakeFactory(() => table(4));
+  const ex = new QueryExecutor(testConfig({ RESULT_PAGE_SIZE: '2' }), factory);
+  const first = await ex.openPaged('SELECT ID, AMT, NAME FROM T', 'u1', {
+    formatPage: (columns, rows) =>
+      rows.map((row) => [row[0] === 3 ? { color: 'green', scope: 'row' } : null, null, null]),
+  });
+  expect(first.rows).toHaveLength(2);
+  const next = await ex.fetchPage(first.cursor!.id, 'u1');
+  expect(next.rows.map((r) => r[0])).toEqual([3, 4]);
+  expect(next.formatStyles?.[0]?.[0]).toEqual({ color: 'green', scope: 'row' });
+  expect(next.formatStyles?.[1]?.[0]).toBeNull();
+  expect(next.hasMore).toBe(false);
+  await ex.shutdown();
+});

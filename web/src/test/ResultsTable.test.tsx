@@ -95,3 +95,26 @@ describe('ResultsTable', () => {
     expect(screen.getByText('No rows returned')).toBeInTheDocument();
   });
 });
+
+describe('conditional formatting display', () => {
+  it('uses server-computed cell/row palette on the original sorted row', async () => {
+    const r = {
+      ...base,
+      formatStyles: [
+        [null, null, { color: 'red' as const, scope: 'cell' as const }],
+        [{ color: 'green' as const, scope: 'row' as const }, null, null],
+        [{ color: 'blue' as const, scope: 'row' as const }, null, null],
+      ],
+    };
+    const { container } = render(<ResultsTable result={r} />);
+    expect(
+      (container.querySelector('[data-format-color="red"]') as HTMLElement).style.backgroundColor,
+    ).toBe('rgb(255, 241, 241)');
+    expect((container.querySelector('[data-format-color="red"]') as HTMLElement).style.color).toBe(
+      'rgb(162, 25, 31)',
+    );
+    expect(container.querySelector('[data-format-color="green"]')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /AMT/ }));
+    expect(container.querySelector('[data-format-color="red"]')).toHaveTextContent('');
+  });
+});

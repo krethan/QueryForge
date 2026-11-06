@@ -7,6 +7,8 @@ import { Semaphore } from '../util/semaphore.js';
 import { normalizeRow, toColumns, type Cell, type ResultColumn } from './results.js';
 import { validateReportingSql } from './validator.js';
 import { ResultCursorStore, type CursorCloseReason, type CursorEntry } from './cursors.js';
+import type { FormatStyle } from '../reports/formatting.js';
+export type PageFormatter = (columns: ResultColumn[], rows: Cell[][]) => (FormatStyle | null)[][];
 import { PROTECTED_METADATA_OBJECTS } from '../db/schema.js';
 
 export interface ExecutionOutcome {
@@ -33,6 +35,8 @@ export interface PagedOutcome extends ExecutionOutcome {
 
 export interface PageOutcome {
   cursorId: string;
+  /** Server-evaluated presentation for this page, aligned with rows. */
+  formatStyles?: (FormatStyle | null)[][];
   rows: Cell[][];
   /** Rows delivered so far through this cursor, including this page. */
   rowCount: number;
@@ -301,6 +305,8 @@ export class QueryExecutor {
       parameters?: (string | number | null)[];
       pageSize?: number;
       maxRows?: number;
+      /** Validated saved-report rules; never interpreted as SQL. */
+      formatPage?: PageFormatter;
     } & PagedHooks = {},
   ): Promise<PagedOutcome> {
     const rows: Cell[][] = [];
@@ -332,6 +338,7 @@ export class QueryExecutor {
             columns: cols,
             rowCount,
             maxRows,
+            formatPage: opts.formatPage,
             onClose: opts.onClose
               ? (e, reason) =>
                   opts.onClose!({
@@ -390,7 +397,14 @@ export class QueryExecutor {
       const limit = !done && e.rowCount >= e.maxRows;
       if (done || limit) {
         await this.cursors.close(e.id, done ? 'COMPLETE' : 'LIMIT');
-        return { cursorId, rows, rowCount: e.rowCount, hasMore: false, truncated: limit };
+        return {
+          cursorId,
+          rows,
+          rowCount: e.rowCount,
+          hasMore: false,
+          truncated: limit,
+          formatStyles: e.formatPage?.(e.columns, rows),
+        };
       }
       this.cursors.checkin(e);
       return {
@@ -400,6 +414,7 @@ export class QueryExecutor {
         hasMore: true,
         truncated: false,
         expiresAt: new Date(e.expiresAt).toISOString(),
+        formatStyles: e.formatPage?.(e.columns, rows),
       };
     } catch (err) {
       // a failed or timed-out fetch leaves the job in an unknown state: never reuse it

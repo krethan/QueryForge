@@ -15,7 +15,7 @@ import {
 import { WarningAlt } from '@carbon/icons-react';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ApiError, api } from '../api/client';
-import type { Cell, RunResponse } from '../api/types';
+import { colorStyle, type Cell, type FormatStyle, type RunResponse } from '../api/types';
 import {
   NUMERIC_KINDS,
   cellText,
@@ -40,6 +40,7 @@ interface Props {
 interface Loaded {
   executionId: string;
   rows: Cell[][];
+  formatStyles: (FormatStyle | null)[][];
   hasMore: boolean;
   truncated: boolean;
   cursorId?: string;
@@ -50,6 +51,7 @@ interface Loaded {
 const initial = (r: RunResponse): Loaded => ({
   executionId: r.executionId,
   rows: r.rows,
+  formatStyles: r.formatStyles ?? [],
   hasMore: !!r.hasMore && !!r.cursor,
   truncated: r.truncated,
   cursorId: r.cursor?.id,
@@ -103,6 +105,7 @@ export function ResultsTable({
           : {
               ...l,
               rows: [...l.rows, ...p.rows],
+              formatStyles: [...l.formatStyles, ...(p.formatStyles ?? [])],
               hasMore: p.hasMore,
               truncated: p.truncated,
               error: undefined,
@@ -281,6 +284,12 @@ export function ResultsTable({
                       <TableCell
                         key={columns[ci].key}
                         className={NUMERIC_KINDS.has(columns[ci].kind) ? 'qf-num' : undefined}
+                        data-format-color={current.formatStyles[i]?.[ci]?.color}
+                        style={
+                          current.formatStyles[i]?.[ci]
+                            ? colorStyle(current.formatStyles[i]?.[ci]!.color)
+                            : undefined
+                        }
                       >
                         {renderCell(v, ci)}
                       </TableCell>

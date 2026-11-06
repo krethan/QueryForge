@@ -67,9 +67,10 @@ describe('ResultsTable server paging', () => {
       rowCount: 3,
       hasMore: false,
       truncated: false,
+      formatStyles: [[{ color: 'green', scope: 'row' }]],
     });
     vi.spyOn(api, 'closeCursor').mockResolvedValue(undefined);
-    render(<ResultsTable result={paged} />);
+    render(<ResultsTable result={{ ...paged, formatStyles: paged.rows.map(() => [null]) }} />);
     expect(screen.getByText(/more available/)).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Precision may be reduced' })).toBeInTheDocument();
     expect(screen.getByText('12345678901234567890.01')).toBeInTheDocument();
@@ -79,6 +80,7 @@ describe('ResultsTable server paging', () => {
     expect(screen.queryByRole('button', { name: /Load next/ })).not.toBeInTheDocument();
     const table = screen.getByRole('table', { name: 'Query results' });
     expect(within(table).getAllByRole('row')).toHaveLength(4);
+    expect(screen.getByText('3.00').closest('td')).toHaveAttribute('data-format-color', 'green');
   });
 
   it('explains an expired cursor', async () => {

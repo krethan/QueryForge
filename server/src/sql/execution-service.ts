@@ -30,7 +30,10 @@ import { renderChartPng } from '../charts/render.js';
 import type { ResultColumn, Cell } from './results.js';
 import type { ExecutionOutcome, PagedOutcome, PageOutcome, QueryExecutor } from './executor.js';
 
+import { matchFormatting, type Formatting, type FormatStyle } from '../reports/formatting.js';
 export interface RunResponse extends PagedOutcome {
+  formatting?: Formatting;
+  formatStyles?: (FormatStyle | null)[][];
   report?: Pick<
     Report,
     'id' | 'name' | 'description' | 'category' | 'sql' | 'version' | 'parameters'
@@ -149,10 +152,17 @@ export class ExecutionService {
         parameters: p.used,
       },
       p.bound,
+      report.formatting ?? null,
     );
     const { id, name, description, category, sql, version, parameters } = report;
     return {
       ...out,
+      ...(report.formatting
+        ? {
+            formatting: report.formatting,
+            formatStyles: matchFormatting(report.formatting, out.columns, out.rows),
+          }
+        : {}),
       report: { id, name, description, category, sql, version, parameters },
       parameters: p.used,
       dataSource: this.cfg.mapepire.displayName,
@@ -163,12 +173,17 @@ export class ExecutionService {
    * Interactive run through a paging cursor. History is finished after the first
    * page and updated again with the final row count when the cursor closes.
    */
-  private paged(ctx: ExecContext, bound: (string | number | null)[]): Promise<PagedOutcome> {
+  private paged(
+    ctx: ExecContext,
+    bound: (string | number | null)[],
+    formatting: Formatting | null = null,
+  ): Promise<PagedOutcome> {
     const t0 = Date.now();
     return this.tracked(ctx, () =>
       this.executor.openPaged(ctx.sql, ctx.userId, {
         executionId: ctx.id,
         parameters: bound,
+        formatPage: (columns, rows) => matchFormatting(formatting, columns, rows),
         onClose: (info) =>
           this.history
             .finish(ctx, {
@@ -248,7 +263,7 @@ export class ExecutionService {
             {
               onColumns: (c) => {
                 cols = c;
-                writer.setColumns(c);
+                writer.setColumns(c, report?.formatting ?? null);
               },
               onRows: (r) => {
                 if (chartDef)
@@ -375,6 +390,7 @@ export class ExecutionService {
       definitions: ParameterDef[];
       parameters: ResolvedParameters['used'];
       note?: string;
+      formatting?: Formatting | null;
     },
   ): Promise<ExportFile> {
     const dir = await mkdtemp(join(tmpdir(), 'qf-export-'));
@@ -382,7 +398,7 @@ export class ExecutionService {
     const cleanup = () => rm(dir, { recursive: true, force: true });
     try {
       const writer = new XlsxResultWriter(path, meta.title, this.cfg.xlsxFormulaEscape);
-      writer.setColumns(table.columns);
+      writer.setColumns(table.columns, meta.formatting, table.rows);
       writer.addRows(table.rows);
       await writer.finish({
         title: meta.title,

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { QueryLike, SqlJobLike } from '../db/types.js';
 import { AppError } from '../util/errors.js';
 import type { ResultColumn } from './results.js';
+import type { PageFormatter } from './executor.js';
 
 /** Why a cursor was closed; passed to the onClose hook (history bookkeeping). */
 export type CursorCloseReason =
@@ -16,6 +17,8 @@ export interface CursorEntry {
   columns: ResultColumn[];
   rowCount: number;
   maxRows: number;
+  /** Bound at run creation so later pages use that run's validated report rules. */
+  formatPage?: PageFormatter;
   createdAt: number;
   /** Sliding idle expiry, never later than createdAt + max lifetime. */
   expiresAt: number;

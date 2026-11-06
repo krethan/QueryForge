@@ -1,5 +1,11 @@
 import { Table, TableCell, TableHead, TableHeader, TableRow } from '@carbon/react';
-import type { Cell, PivotKey, PivotResult } from '../api/types';
+import {
+  colorStyle,
+  type Cell,
+  type FormatStyle,
+  type PivotKey,
+  type PivotResult,
+} from '../api/types';
 
 export type PivotDrillKeys = Record<string, PivotKey>;
 
@@ -7,6 +13,7 @@ interface Props {
   pivot: PivotResult;
   /** Makes cells and totals clickable; called with the row/column fields to filter on. */
   onCellDrill?(keys: PivotDrillKeys, label: string): void;
+  styles?: (FormatStyle | null)[][];
 }
 
 const text = (v: Cell) => (v === null ? '' : typeof v === 'object' ? '[binary]' : String(v));
@@ -16,7 +23,7 @@ const text = (v: Cell) => (v === null ? '' : typeof v === 'object' ? '[binary]' 
  * distinct column-field value (NULL gets its own "(null)" column), a Total
  * column and a Total row. Values are shown exactly as the server returned them.
  */
-export function PivotTable({ pivot, onCellDrill }: Props) {
+export function PivotTable({ pivot, onCellDrill, styles }: Props) {
   const nRow = pivot.rowFields.length;
   const colName = pivot.columnField.name;
   const rowKeys = (keys: PivotKey[]) =>
@@ -27,8 +34,13 @@ export function PivotTable({ pivot, onCellDrill }: Props) {
     label: string,
     total = false,
     key?: string,
+    style?: FormatStyle | null,
   ) => (
-    <TableCell key={key} className={`qf-num${total ? ' qf-pivot-total' : ''}`}>
+    <TableCell
+      key={key}
+      className={`qf-num${total ? ' qf-pivot-total' : ''}`}
+      style={style ? colorStyle(style.color) : undefined}
+    >
       {keys && onCellDrill ? (
         <button
           type="button"
@@ -69,7 +81,15 @@ export function PivotTable({ pivot, onCellDrill }: Props) {
             return (
               <TableRow key={r.labels.join('\u0001') + r.keys.map(String).join('\u0001')}>
                 {r.labels.map((l, i) => (
-                  <TableCell key={i} className={i === 0 ? 'qf-pivot-sticky' : undefined}>
+                  <TableCell
+                    key={i}
+                    className={i === 0 ? 'qf-pivot-sticky' : undefined}
+                    style={
+                      styles?.[pivot.rows.indexOf(r)]?.[i]
+                        ? colorStyle(styles[pivot.rows.indexOf(r)][i]!.color)
+                        : undefined
+                    }
+                  >
                     {r.keys[i] === null ? <span className="qf-null">{l}</span> : l}
                   </TableCell>
                 ))}
@@ -80,9 +100,17 @@ export function PivotTable({ pivot, onCellDrill }: Props) {
                     `${rowLabel}, ${c.label}`,
                     false,
                     `c${ci}`,
+                    styles?.[pivot.rows.indexOf(r)]?.[nRow + ci],
                   ),
                 )}
-                {cell(r.total, rk, `${rowLabel} (all ${pivot.columnField.label})`, true, 'total')}
+                {cell(
+                  r.total,
+                  rk,
+                  `${rowLabel} (all ${pivot.columnField.label})`,
+                  true,
+                  'total',
+                  styles?.[pivot.rows.indexOf(r)]?.[nRow + pivot.columns.length],
+                )}
               </TableRow>
             );
           })}
@@ -98,9 +126,17 @@ export function PivotTable({ pivot, onCellDrill }: Props) {
                 `${c.label} (all rows)`,
                 true,
                 `t${ci}`,
+                styles?.[pivot.rows.length]?.[nRow + ci],
               ),
             )}
-            {cell(pivot.grandTotal, {}, 'the grand total', true, 'grand')}
+            {cell(
+              pivot.grandTotal,
+              {},
+              'the grand total',
+              true,
+              'grand',
+              styles?.[pivot.rows.length]?.[nRow + pivot.columns.length],
+            )}
           </TableRow>
         </tbody>
       </Table>

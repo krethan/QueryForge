@@ -37,6 +37,12 @@ import {
 import { sharesInputSchema, type AccessService } from '../sharing/access.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
 import type { Report } from '../reports/reports.js';
+import {
+  formattingSchema,
+  matchFormatting,
+  matchPivotFormatting,
+  pivotExportFormatting,
+} from '../reports/formatting.js';
 import { folderInputSchema, type FolderRepository } from '../reports/folders.js';
 import type { HistoryRepository } from '../history/history.js';
 import {
@@ -888,6 +894,7 @@ export function apiRouter(d: ApiDeps): Router {
     );
     return { out, pivot };
   }
+  const pivotReports = new WeakMap<object, Report>();
   const pivotJson = (built: Built, run: Awaited<ReturnType<typeof runPivot>>) => ({
     pivot: run.pivot,
     executionId: run.out.executionId,
@@ -897,6 +904,12 @@ export function apiRouter(d: ApiDeps): Router {
     dataSource: run.out.dataSource,
     builder: { name: built.name, sql: built.sql },
     warnings: built.warnings,
+    ...(pivotReports.get(run.pivot)
+      ? {
+          formatting: pivotReports.get(run.pivot)!.formatting,
+          formatStyles: matchPivotFormatting(pivotReports.get(run.pivot)!.formatting, run.pivot),
+        }
+      : {}),
   });
   async function savedPivot(u: AppUser, id: string) {
     const { report } = await d.access.require(u, id, 'VIEW');
@@ -917,13 +930,22 @@ export function apiRouter(d: ApiDeps): Router {
     title: string,
     description?: string | null,
   ) {
-    const file = await d.execution.writeTableXlsx(u, pivotTable(run.pivot), {
+    const table = pivotTable(run.pivot);
+    const report = pivotReports.get(run.pivot);
+    const excelFormatting = report ? pivotExportFormatting(report.formatting, run.pivot) : null;
+    // The flattened pivot uses row-field names and a single PIVOT_VALUE name.
+    table.columns = table.columns.map((c, i) => ({
+      ...c,
+      name: i < run.pivot.rowFields.length ? run.pivot.rowFields[i].name : 'PIVOT_VALUE',
+    }));
+    const file = await d.execution.writeTableXlsx(u, table, {
       title,
       description,
       sql: built.sql,
       executedAt: run.out.completedAt,
       definitions: built.parameters,
       parameters: run.out.parameters,
+      formatting: excelFormatting,
       note: `Pivot: ${run.pivot.value.label} by ${run.pivot.rowFields.map((f) => f.label).join(', ')} and ${run.pivot.columnField.label} (values only)`,
     });
     await sendXlsx(res, file);
@@ -959,6 +981,7 @@ export function apiRouter(d: ApiDeps): Router {
       const body = pivotRunBody.parse(req.body ?? {});
       const s = await savedPivot(user(req), reportId(req));
       const run = await runPivot(user(req), s.built, s.pivot, { ...body, report: s.report });
+      pivotReports.set(run.pivot, s.report);
       res.json({ ...pivotJson(s.built, run), report: { id: s.report.id, name: s.report.name } });
     }),
   );
@@ -973,6 +996,7 @@ export function apiRouter(d: ApiDeps): Router {
         report: s.report,
         kind: 'EXPORT',
       });
+      pivotReports.set(run.pivot, s.report);
       await sendPivotXlsx(res, user(req), s.built, run, s.report.name, s.report.description);
     }),
   );
@@ -1191,6 +1215,20 @@ export function apiRouter(d: ApiDeps): Router {
       res.json({ report: { ...updated, access } });
     }),
   );
+  r.put(
+    '/reports/:id/formatting',
+    h(async (req, res) => {
+      const body = z.object({ formatting: formattingSchema.nullable() }).strict().parse(req.body);
+      const { report, access } = await d.access.require(user(req), reportId(req), 'EDIT');
+      res.json({
+        report: {
+          ...(await d.reports.setFormatting(report.ownerId, report.id, body.formatting)),
+          access,
+        },
+      });
+    }),
+  );
+
   r.delete(
     '/reports/:id',
     h(async (req, res) => {
@@ -1324,6 +1362,7 @@ export function apiRouter(d: ApiDeps): Router {
       const label = drillLabel(plan.applied);
       if (plan.kind === 'target') {
         const out = await d.execution.runReport(user(req), plan.target.id, execId, plan.values);
+
         res.json({
           ...out,
           drill: {
@@ -1345,6 +1384,12 @@ export function apiRouter(d: ApiDeps): Router {
       });
       res.json({
         ...out,
+        ...(plan.report.formatting
+          ? {
+              formatting: plan.report.formatting,
+              formatStyles: matchFormatting(plan.report.formatting, out.columns, out.rows),
+            }
+          : {}),
         drill: {
           mode: 'builder',
           sourceId: plan.report.id,
