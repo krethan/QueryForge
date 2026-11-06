@@ -42,7 +42,10 @@ export function SchedulesPage() {
       const [s, r] = await Promise.all([api.listSchedules(), api.listAllReports()]);
       setSchedules(s.schedules);
       setSettings(s.settings);
-      setReports([...r.owned, ...r.shared.filter((x) => x.access === 'EDITOR')]);
+      setReports([
+        ...r.owned,
+        ...r.shared.filter((x) => x.access === 'EDITOR' || x.access === 'ADMIN'),
+      ]);
     } catch (e) {
       setError(e);
       setSchedules([]);

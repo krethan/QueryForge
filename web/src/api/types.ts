@@ -210,7 +210,7 @@ export interface ReportInput {
 }
 
 export type AuthSource = 'LOCAL' | 'OIDC' | 'LDAP';
-export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
+export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER' | 'ADMIN';
 
 export type ParameterType = 'string' | 'integer' | 'decimal' | 'date' | 'list';
 export interface ParameterDef {

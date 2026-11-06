@@ -482,6 +482,16 @@ Rules live in the existing `CHART_DEF` presentation JSON with chart and drill se
 
 **This feature has not been tested on a real IBM i.** Tests use fake query results, an in-process API and generated/read-back Excel files.
 
+## Report sharing and roles
+
+Owners can share a saved report with individual users or app groups as **Viewer** (run, export, drill, per-user folder/favorite) or **Editor** (also update SQL/report definitions, charts and schedules), and revoke any grant from the Share dialog. Lower roles cannot edit/delete or manage shares. Hierarchy: owner > Editor > Viewer; the strongest matching direct/group grant applies. Audit grant, role-change and revoke events are shown to owners and administrators. An incoming external group can map into an application group through `GROUP_MAP`.
+
+Administrators inherit read/Editor-equivalent access to every report without an explicit user or group share, including dashboard lists, drill targets, run/export, schedules and their own personal folders/favorites. They see an **Admin** access badge. ADMIN is an application role from the authenticated server-side session, not accepted from the browser.
+
+**Migration 007 adds three supporting indexes** to the existing `QF_REPORT_SHARES` (002) and `QF_SCHEDULES` (002): `(PRINCIPAL_ID, PRINCIPAL_TYPE, SHARE_ROLE, REPORT_ID)`, `(REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE)` and `(CREATED_BY, REPORT_ID)`. It also refreshes the `QF_REPORT_SHARES` table label. No sharing table is recreated and no business-data schema is touched. Every saved-report endpoint authorizes through `AccessService`; dashboard and schedule listings use equivalent owner/share filtering. `QF_REPORTS.OWNER_ID`, `QF_REPORT_SHARES` and `QF_USER_GROUPS` are the owner, direct/group grants and membership records; there is no separate grant store for dashboard or folders. Sharing and deletion remain owner-only; administrators may inspect current grants and audit history but cannot alter grants or delete a report they do not own. Shares have no expiry. Existing schedules stop when their creator loses Editor access. Server tests cover unrelated users, Viewer/Editor direct+group roles, denial and immediate revocation plus admin behavior.
+
+**This feature has not been tested on a real IBM i.** API access tests and schedules run against the fake metadata/query adapters; migration 007 is additive but has never been applied to Db2 for i. The sharing UI screenshots are demos of that same local API, not live system validation.
+
 ## Known limitations
 
 - Drill-down: not available in the unsaved Report Builder preview or while a report has
@@ -507,6 +517,6 @@ Rules live in the existing `CHART_DEF` presentation JSON with chart and drill se
 - Schedules use 5-field cron; one scheduler runner at a time (DB lease). Missed runs while stopped are not
   back-filled; the next future time is used.
 - Attachments are capped by `MAX_EXPORT_ROWS`; very large exports may exceed mail-server size limits.
-- Sharing has no expiry. The audit records changes made through Uncle Bob only (not direct SQL edits), and
+- Sharing/global-admin visibility has no expiry. The audit records changes made through Uncle Bob only (not direct SQL edits), and
   is not written for shares removed by report deletion.
-- Saved Reports page lists owned reports; shared reports appear under “Shared with me” on the dashboard.
+- Shared and administrator visibility has no automatic expiry; individual grants can be revoked. Folders and favorites cannot be shared with another user.

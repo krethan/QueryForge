@@ -80,7 +80,7 @@ export const sharesInputSchema = z.object({
     .max(200),
 });
 
-const RANK: Record<AccessRole, number> = { VIEWER: 1, EDITOR: 2, OWNER: 3 };
+const RANK: Record<AccessRole, number> = { VIEWER: 1, EDITOR: 2, OWNER: 3, ADMIN: 2 };
 export type Need = 'VIEW' | 'EDIT' | 'OWNER';
 const NEED_RANK: Record<Need, number> = { VIEW: 1, EDIT: 2, OWNER: 3 };
 
@@ -105,7 +105,8 @@ export class AccessService {
     this.users = q(schema, T.users);
   }
 
-  async roleFor(user: Pick<AppUser, 'id'>, report: Report): Promise<AccessRole | null> {
+  async roleFor(user: Pick<AppUser, 'id' | 'role'>, report: Report): Promise<AccessRole | null> {
+    if (user.role === 'ADMIN' && report.ownerId !== user.id) return 'ADMIN';
     if (report.ownerId === user.id) return 'OWNER';
     const rows = await this.db.query<{
       PRINCIPAL_TYPE: string;
@@ -130,9 +131,15 @@ export class AccessService {
     return best;
   }
 
+  /** Global admins are editor-equivalent, not owners, except that they may
+   * inspect grants and audit history without altering either one. */
+  canViewAudit(user: Pick<AppUser, 'id' | 'role'>, report: Report): boolean {
+    return report.ownerId === user.id || user.role === 'ADMIN';
+  }
+
   /** Load a report and require at least `need`. Throws 404 when invisible, 403 when visible but insufficient. */
   async require(
-    user: Pick<AppUser, 'id'>,
+    user: Pick<AppUser, 'id' | 'role'>,
     reportId: string,
     need: Need,
   ): Promise<{ report: Report; access: AccessRole }> {
@@ -224,7 +231,7 @@ export class AccessService {
     return this.listShares(report.id);
   }
 
-  /** Sharing audit trail for one report, newest first (owner-only; caller has checked). */
+  /** Sharing audit trail for one report, newest first (owner/admin; caller has checked). */
   async listAudit(reportId: string, limit = 100): Promise<ShareAuditEvent[]> {
     const n = Math.max(1, Math.min(Math.floor(limit) || 100, 500));
     const rows = await this.db.query<Record<string, unknown>>(

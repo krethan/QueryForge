@@ -70,6 +70,7 @@ beforeEach(() => {
   db.addUser({ id: 'u-alice', username: 'alice', hash, displayName: 'Alice' });
   db.addUser({ id: 'u-bob', username: 'bob', hash, displayName: 'Bob' });
   db.addUser({ id: 'u-eve', username: 'eve', hash, displayName: 'Eve' });
+  db.addUser({ id: 'u-admin', username: 'root', hash, displayName: 'Root', role: 'ADMIN' });
   db.addGroup('u-eve', 'finance');
   mailer = new MemoryMailer();
   oidc = new FakeOidc();
@@ -214,18 +215,52 @@ describe('sharing and access control', () => {
     const rep = await createReport(await login());
     const bob = await login('bob');
     expect((await bob.agent.get(`/api/reports/${rep.id}`)).status).toBe(404);
-    expect(
-      (
-        await bob
-          .send('post', `/api/reports/${rep.id}/execute`)
-          .send({ values: { since: '2026-01-01' } })
-      ).status,
-    ).toBe(404);
-    expect((await bob.send('post', '/api/export').send({ reportId: rep.id })).status).toBe(404);
-    expect(
-      (await bob.send('put', `/api/reports/${rep.id}/shares`).send({ shares: [] })).status,
-    ).toBe(404);
-    expect((await bob.agent.get(`/api/reports/${rep.id}/schedules`)).status).toBe(404);
+    const beforeJobs = jobs.length;
+    const deniedWrites = [
+      bob.send('post', `/api/reports/${rep.id}/execute`).send({ values: { since: '2026-01-01' } }),
+      bob.send('post', '/api/export').send({ reportId: rep.id }),
+      bob
+        .send('put', `/api/reports/${rep.id}`)
+        .send({ name: 'Denied', sql: PSQL, parameters: PARAMS, version: rep.version }),
+      bob.send('delete', `/api/reports/${rep.id}`),
+      bob.send('put', `/api/reports/${rep.id}/shares`).send({ shares: [] }),
+      bob.send('put', `/api/reports/${rep.id}/drill`).send({
+        drillDef: {
+          version: 1,
+          targetReportId: rep.id,
+          mapping: [{ field: 'REGION', parameter: 'since' }],
+        },
+      }),
+      bob.send('post', `/api/reports/${rep.id}/schedules`).send({
+        cron: '0 7 * * 1',
+        timezone: 'UTC',
+        recipients: ['bob@example.com'],
+        parameters: { since: '2026-01-01' },
+      }),
+      bob.send('post', `/api/reports/${rep.id}/pivot`).send({}),
+      bob.send('post', `/api/reports/${rep.id}/pivot/export`).send({}),
+      bob.send('post', `/api/reports/${rep.id}/drill`).send({ keys: { region: 'North' } }),
+      bob.send('post', `/api/reports/${rep.id}/drill/export`).send({ keys: { region: 'North' } }),
+      bob.send('put', `/api/reports/${rep.id}/chart`).send({ chartDef: null }),
+      bob.send('put', `/api/reports/${rep.id}/prefs`).send({ favorite: true }),
+    ];
+    for (const response of await Promise.all(deniedWrites)) expect(response.status).toBe(404);
+    const deniedReads = [
+      `/api/reports/${rep.id}/shares`,
+      `/api/reports/${rep.id}/access`,
+      `/api/reports/${rep.id}/history`,
+      `/api/reports/${rep.id}/schedules`,
+      `/api/reports/${rep.id}/drill-targets`,
+    ];
+    for (const url of deniedReads) expect((await bob.agent.get(url)).status).toBe(404);
+    expect((await bob.agent.get('/api/reports')).body.shared).toHaveLength(0);
+    expect((await bob.agent.get('/api/schedules')).body.schedules).toHaveLength(0);
+    expect(db.reports.get(rep.id)!.REPORT_NAME).toBe('Orders by region');
+    expect(db.shares).toHaveLength(0);
+    expect(db.reportPrefs.size).toBe(0);
+    expect(jobs.slice(beforeJobs).flatMap((job) => job.queries)).not.toContain(
+      String.raw`SELECT * FROM SALESLIB.ORDERS WHERE REGION = ? AND ORDER_DATE >= ? AND TOTAL >= ? AND (CAST(? AS INTEGER) IS NULL OR 1 = 1)`,
+    );
   });
   it('VIEWER can run and export but not edit, delete, share or schedule', async () => {
     const alice = await login();
@@ -250,15 +285,47 @@ describe('sharing and access control', () => {
       .send('put', `/api/reports/${rep.id}`)
       .send({ name: 'Hijack', sql: PSQL, parameters: PARAMS, version: rep.version });
     expect(put.status).toBe(403);
-    expect((await bob.send('delete', `/api/reports/${rep.id}`)).status).toBe(403);
-    expect((await bob.agent.get(`/api/reports/${rep.id}/shares`)).status).toBe(403);
     expect(
       (
         await bob
-          .send('post', `/api/reports/${rep.id}/schedules`)
-          .send({ cron: '0 7 * * 1', timezone: 'UTC', recipients: ['bob@example.com'] })
+          .send('post', '/api/export')
+          .send({ reportId: rep.id, values: { since: '2026-01-01' } })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await bob.send('post', `/api/reports/${rep.id}/drill`).send({ keys: { region: 'North' } }))
+        .status,
+    ).toBe(400); // authorized: rejected only because this report is not drillable
+    expect((await bob.send('delete', `/api/reports/${rep.id}`)).status).toBe(403);
+    expect((await bob.agent.get(`/api/reports/${rep.id}/shares`)).status).toBe(403);
+    expect((await bob.agent.get(`/api/reports/${rep.id}/access`)).status).toBe(403);
+    expect((await bob.agent.get(`/api/reports/${rep.id}/drill-targets`)).status).toBe(403);
+    expect(
+      (await bob.send('put', `/api/reports/${rep.id}/chart`).send({ chartDef: null })).status,
+    ).toBe(403);
+    expect(
+      (
+        await bob.send('put', `/api/reports/${rep.id}/drill`).send({
+          drillDef: {
+            version: 1,
+            targetReportId: rep.id,
+            mapping: [{ field: 'REGION', parameter: 'since' }],
+          },
+        })
       ).status,
     ).toBe(403);
+    expect((await bob.agent.get(`/api/reports/${rep.id}/schedules`)).status).toBe(403);
+    expect(
+      (
+        await bob.send('post', `/api/reports/${rep.id}/schedules`).send({
+          cron: '0 7 * * 1',
+          timezone: 'UTC',
+          recipients: ['bob@example.com'],
+          parameters: { since: '2026-01-01' },
+        })
+      ).status,
+    ).toBe(403);
+    expect(db.reports.get(rep.id)!.REPORT_NAME).toBe('Orders by region');
   });
   it('EDITOR (via a group) can edit but not delete or re-share; owner keeps ownership', async () => {
     const alice = await login();
@@ -280,10 +347,167 @@ describe('sharing and access control', () => {
     expect(
       (await eve.send('put', `/api/reports/${rep.id}/shares`).send({ shares: [] })).status,
     ).toBe(403);
-    // revoking removes access immediately
+    // Personal folders/favorites do not change the owner or grant additional access.
+    expect(
+      (await eve.send('put', `/api/reports/${rep.id}/prefs`).send({ favorite: true })).status,
+    ).toBe(200);
+    expect((await eve.agent.get('/api/reports')).body.shared[0]).toMatchObject({ favorite: true });
+    expect(
+      (await eve.send('post', `/api/reports/${rep.id}/drill`).send({ keys: { region: 'North' } }))
+        .status,
+    ).toBe(400);
+    const schedule = await eve.send('post', `/api/reports/${rep.id}/schedules`).send({
+      cron: '0 7 * * 1',
+      timezone: 'UTC',
+      recipients: ['eve@example.com'],
+      parameters: { since: '2026-01-01' },
+    });
+    expect(schedule.status).toBe(201);
+    expect((await eve.agent.get('/api/schedules')).body.schedules).toHaveLength(1);
+    // revoking all groups removes view, run, schedules and personal-preference access immediately
     await alice.send('put', `/api/reports/${rep.id}/shares`).send({ shares: [] });
     expect((await eve.agent.get(`/api/reports/${rep.id}`)).status).toBe(404);
+    expect((await eve.send('post', `/api/reports/${rep.id}/execute`).send({})).status).toBe(404);
+    expect(
+      (await eve.send('put', `/api/reports/${rep.id}/prefs`).send({ favorite: false })).status,
+    ).toBe(404);
+    expect((await eve.agent.get(`/api/reports/${rep.id}/history`)).status).toBe(404);
+    expect((await eve.agent.get(`/api/reports/${rep.id}/schedules`)).status).toBe(404);
+    expect((await eve.agent.get('/api/schedules')).body.schedules).toEqual([]);
+    expect((await eve.agent.get(`/api/reports/${rep.id}/drill-targets`)).status).toBe(404);
+    for (const result of await Promise.all([
+      eve.send('put', `/api/schedules/${schedule.body.schedule.id}`).send({
+        cron: '0 8 * * 1',
+        timezone: 'UTC',
+        recipients: ['eve@example.com'],
+        parameters: { since: '2026-01-01' },
+        enabled: true,
+        version: schedule.body.schedule.version,
+      }),
+      eve.send('post', `/api/schedules/${schedule.body.schedule.id}/run`).send({}),
+      eve.send('delete', `/api/schedules/${schedule.body.schedule.id}`),
+    ]))
+      expect(result.status).toBe(404);
   });
+  it('uses the strongest direct/group role and downgrades or revokes access immediately', async () => {
+    const alice = await login();
+    const rep = await createReport(alice);
+    await alice.send('put', `/api/reports/${rep.id}/shares`).send({
+      shares: [
+        { type: 'USER', id: 'u-eve', role: 'EDITOR' },
+        { type: 'GROUP', id: 'finance', role: 'VIEWER' },
+      ],
+    });
+    const eve = await login('eve');
+    expect((await eve.agent.get(`/api/reports/${rep.id}`)).body.report.access).toBe('EDITOR');
+    expect(
+      (
+        await eve.send('put', `/api/reports/${rep.id}`).send({
+          name: 'Direct Editor wins',
+          sql: PSQL,
+          parameters: PARAMS,
+          version: rep.version,
+        })
+      ).status,
+    ).toBe(200);
+    await alice.send('put', `/api/reports/${rep.id}/shares`).send({
+      shares: [
+        { type: 'USER', id: 'u-eve', role: 'VIEWER' },
+        { type: 'GROUP', id: 'finance', role: 'VIEWER' },
+      ],
+    });
+    expect((await eve.agent.get(`/api/reports/${rep.id}`)).body.report.access).toBe('VIEWER');
+    expect(
+      (
+        await eve.send('put', `/api/reports/${rep.id}`).send({
+          name: 'Must not land',
+          sql: PSQL,
+          parameters: PARAMS,
+          version: rep.version + 1,
+        })
+      ).status,
+    ).toBe(403);
+    const grant = await alice.send('put', `/api/reports/${rep.id}/shares`).send({
+      shares: [{ type: 'USER', id: 'u-bob', role: 'VIEWER' }],
+    });
+    expect(grant.status).toBe(200);
+    const bob = await login('bob');
+    expect((await bob.agent.get(`/api/reports/${rep.id}`)).status).toBe(200);
+    expect(
+      (await bob.send('put', `/api/reports/${rep.id}/prefs`).send({ favorite: true })).status,
+    ).toBe(200);
+    await alice.send('put', `/api/reports/${rep.id}/shares`).send({ shares: [] });
+    expect((await bob.agent.get(`/api/reports/${rep.id}`)).status).toBe(404);
+    expect((await bob.agent.get('/api/reports')).body.shared).toHaveLength(0);
+    expect(
+      (await bob.send('put', `/api/reports/${rep.id}/prefs`).send({ favorite: false })).status,
+    ).toBe(404);
+    const audit = await alice.agent.get(`/api/reports/${rep.id}/access`);
+    expect(audit.status).toBe(200);
+    expect(audit.body.events.map((e: { action: string }) => e.action)).toEqual([
+      'REVOKE',
+      'REVOKE',
+      'REVOKE',
+      'GRANT',
+      'CHANGE',
+      'GRANT',
+      'GRANT',
+    ]);
+    expect(db.reports.get(rep.id)!.REPORT_NAME).toBe('Direct Editor wins');
+  });
+  it('admins see every report on run/export, schedules, drill and per-user preferences', async () => {
+    const alice = await login();
+    const admin = await login('root');
+    const rep = await createReport(alice);
+    const unread = await admin.agent.get(`/api/reports/${rep.id}`);
+    expect(unread).toMatchObject({ status: 200, body: { report: { access: 'ADMIN' } } });
+    expect(
+      (
+        await admin
+          .send('post', `/api/reports/${rep.id}/execute`)
+          .send({ values: { since: '2026-01-01' } })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await admin
+          .send('post', '/api/export')
+          .send({ reportId: rep.id, values: { since: '2026-01-01' } })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await admin.send('put', `/api/reports/${rep.id}/prefs`).send({ favorite: true })).status,
+    ).toBe(200);
+    expect((await admin.agent.get('/api/folders')).status).toBe(200);
+    const listing = await admin.agent.get('/api/reports');
+    expect(listing.body.shared).toEqual([
+      expect.objectContaining({ id: rep.id, access: 'ADMIN', ownerName: 'Alice', favorite: true }),
+    ]);
+    expect((await admin.agent.get('/api/reports?search=no_such_report')).status).toBe(200);
+    expect((await admin.agent.get(`/api/reports/${rep.id}/access`)).status).toBe(200);
+    expect(
+      (await admin.send('post', `/api/reports/${rep.id}/drill`).send({ keys: {} })).status,
+    ).toBe(400);
+    expect(
+      (await admin.send('put', `/api/reports/${rep.id}/chart`).send({ chartDef: null })).status,
+    ).toBe(200);
+    const schedule = await admin.send('post', `/api/reports/${rep.id}/schedules`).send({
+      cron: '0 7 * * 1',
+      timezone: 'UTC',
+      recipients: ['admin@example.com'],
+      parameters: { since: '2026-01-01' },
+    });
+    expect(schedule.status).toBe(201);
+    expect(
+      (await admin.send('post', `/api/schedules/${schedule.body.schedule.id}/run`).send({})).status,
+    ).toBe(200);
+    expect((await admin.agent.get(`/api/reports/${rep.id}/shares`)).status).toBe(403);
+    expect(
+      (await admin.send('put', `/api/reports/${rep.id}/shares`).send({ shares: [] })).status,
+    ).toBe(403);
+    expect((await admin.send('delete', `/api/reports/${rep.id}`)).status).toBe(403);
+  });
+
   it('validates share targets', async () => {
     const alice = await login();
     const rep = await createReport(alice);
@@ -396,6 +620,23 @@ describe('OIDC and LDAP sign-in', () => {
       ),
     ).toMatchObject({ externalId: 'https://i|s1', username: 'x', groups: ['g'] });
   });
+});
+
+it('migration 007 creates only its bound-schema access indexes and table label', () => {
+  const m = loadMigrations('QFMETA').find((x) => x.version === 7)!;
+  expect(m.statements).toHaveLength(4);
+  const sql = m.statements.join('\n');
+  expect(sql).toContain('CREATE INDEX QFMETA.QF_SHARE_IX_COVERS ON QFMETA.QF_REPORT_SHARES');
+  expect(sql).toContain('(PRINCIPAL_ID, PRINCIPAL_TYPE, SHARE_ROLE, REPORT_ID)');
+  expect(sql).toContain('CREATE INDEX QFMETA.QF_SHARE_IX_REPORT_ROLE ON QFMETA.QF_REPORT_SHARES');
+  expect(sql).toContain('(REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE)');
+  expect(sql).toContain('CREATE INDEX QFMETA.QF_SCHED_IX_CREATOR ON QFMETA.QF_SCHEDULES');
+  expect(sql).toContain('(CREATED_BY, REPORT_ID)');
+  expect(sql).toContain(
+    "LABEL ON TABLE QFMETA.QF_REPORT_SHARES IS 'Uncle Bob user/group Viewer and Editor grants'",
+  );
+  expect(sql).not.toContain('{{SCHEMA}}');
+  expect(sql).not.toMatch(/CREATE TABLE|ADD COLUMN|DROP TABLE/);
 });
 
 describe('scheduled runs', () => {
