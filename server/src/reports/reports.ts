@@ -43,6 +43,9 @@ export interface Report {
   drillError?: string;
   /** Rolling dates force the schedule form to keep its saved values, not freeze dates. */
   hasDatePresets: boolean;
+  /** Presentation-only conditional styles, in the same JSON as chart/drill. */
+  formatting: import('./formatting.js').Formatting | null;
+  formattingError?: string;
 }
 
 export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
@@ -91,6 +94,7 @@ export type ReportInput = Omit<z.infer<typeof reportInputSchema>, 'parameters'> 
   /** Validated chart settings; stored as JSON in CHART_DEF (create only, see setChart). */
   chartDef?: ChartDef | null;
   drillDef?: DrillDef | null;
+  formatting?: import('./formatting.js').Formatting | null;
 };
 
 export const reportUpdateSchema = z.intersection(
@@ -136,7 +140,9 @@ const toReport = (r: Row): Report => {
     chartDef: chart.chart,
     ...(chart.chartError ? { chartError: chart.chartError } : {}),
     drillDef: chart.drill,
+    formatting: chart.formatting,
     ...(chart.drillError ? { drillError: chart.drillError } : {}),
+    ...(chart.formattingError ? { formattingError: chart.formattingError } : {}),
   };
 };
 
@@ -258,7 +264,11 @@ export class ReportRepository {
           input.sql,
           paramsJson(input.parameters),
           builderJson(input.builderDef),
-          presentationJson(input.chartDef ?? null, input.drillDef ?? null),
+          presentationJson(
+            input.chartDef ?? null,
+            input.drillDef ?? null,
+            input.formatting ?? null,
+          ),
         ],
       );
     } catch (e) {
@@ -329,13 +339,22 @@ export class ReportRepository {
    */
   async setChart(ownerId: string, id: string, def: ChartDef | null): Promise<Report> {
     const cur = await this.get(ownerId, id);
-    return this.writePresentation(ownerId, id, def, cur.drillDef);
+    return this.writePresentation(ownerId, id, def, cur.drillDef, cur.formatting);
   }
 
   /** Replace (or clear) the "Drill to report" target; keeps the chart settings. */
   async setDrill(ownerId: string, id: string, drill: DrillDef | null): Promise<Report> {
     const cur = await this.get(ownerId, id);
-    return this.writePresentation(ownerId, id, cur.chartDef, drill);
+    return this.writePresentation(ownerId, id, cur.chartDef, drill, cur.formatting);
+  }
+
+  async setFormatting(
+    ownerId: string,
+    id: string,
+    formatting: import('./formatting.js').Formatting | null,
+  ): Promise<Report> {
+    const cur = await this.get(ownerId, id);
+    return this.writePresentation(ownerId, id, cur.chartDef, cur.drillDef, formatting);
   }
 
   private async writePresentation(
@@ -343,10 +362,11 @@ export class ReportRepository {
     id: string,
     chart: ChartDef | null,
     drill: DrillDef | null,
+    formatting: import('./formatting.js').Formatting | null,
   ): Promise<Report> {
     const n = await this.db.update(
       `UPDATE ${this.table} SET CHART_DEF = ?, UPDATED_AT = ${NOW_UTC} WHERE REPORT_ID = ? AND OWNER_ID = ?`,
-      [presentationJson(chart, drill), id, ownerId],
+      [presentationJson(chart, drill, formatting), id, ownerId],
     );
     if (n === 0) throw NOT_FOUND();
     return this.get(ownerId, id);

@@ -474,6 +474,14 @@ real IBM i or Db2 for i yet.
   history (kind SCHEDULE), and mail only to allow-listed domains over TLS.
 - XLSX built server-side with formula-injection escaping. Credentials only in env, never sent to the browser.
 
+## Conditional formatting
+
+Owners and editors can choose **Conditional formatting** in a saved report’s result toolbar. Up to 20 ordered rules support `>`, `>=`, `<`, `<=`, `=`, `<>`, between, contains, and is null, each with a Cell or Whole row target and a small Carbon-friendly palette. Rules match normal and grouped output columns, calculated fields, pivot row fields and pivot values/totals. On pivots, choose the `PIVOT_VALUE` aggregate output; it is mapped to the friendly measure label in the saved JSON. A matched row rule spans the row; a matched rule on its own column is painted there, so specific-cell colours take precedence over a row colour. Earlier rules win.
+
+Rules live in the existing `CHART_DEF` presentation JSON with chart and drill settings: **no migration is needed**. Version 1 and older version 2 values keep working. Saving needs Editor (and is unavailable in the unsaved SQL/Builder preview). Styling is presentation-only: values never become SQL, Excel formulas or Excel conditional-format expressions. Streaming XLSX, scheduled exports and pivot XLSX receive fixed fills/fonts. Server-computed styles cover the first result page and later pages fetched through a cursor. Rules are evaluated against result values only, so browser filtering and sorting do not change which values match.
+
+**This feature has not been tested on a real IBM i.** Tests use fake query results, an in-process API and generated/read-back Excel files.
+
 ## Known limitations
 
 - Drill-down: not available in the unsaved Report Builder preview or while a report has
@@ -483,6 +491,7 @@ real IBM i or Db2 for i yet.
 
 - Folders and favorites: there is no drag-and-drop or bulk move (one report at a time), no nested
   folders, and no folder sharing. Migration 006 has not been applied to a real Db2 for i.
+- Conditional formatting has not been tested on a real IBM i.
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
   `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).
 - Mapepire 1.0.2 has no statement cancel API; cancel/timeout close the job.

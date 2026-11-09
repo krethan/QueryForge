@@ -67,13 +67,17 @@ const envelopeSchema = z
     version: z.literal(PRESENTATION_VERSION),
     chart: z.unknown().optional(),
     drill: z.unknown().optional(),
+    formatting: z.unknown().optional(),
   })
   .strict();
 
+import { formattingSchema, type Formatting } from './formatting.js';
 export interface Presentation {
   chart: ChartDef | null;
   chartError?: string;
   drill: DrillDef | null;
+  formatting: Formatting | null;
+  formattingError?: string;
   drillError?: string;
 }
 
@@ -81,7 +85,8 @@ const issues = (e: z.ZodError) => e.issues.map((i) => i.message).join('; ');
 
 /** Parse CHART_DEF (version 1 chart, or version 2 envelope). Never throws. */
 export function parsePresentation(raw: unknown): Presentation {
-  if (raw === null || raw === undefined || raw === '') return { chart: null, drill: null };
+  if (raw === null || raw === undefined || raw === '')
+    return { chart: null, drill: null, formatting: null };
   let v: unknown = raw;
   if (typeof raw === 'string') {
     try {
@@ -90,17 +95,28 @@ export function parsePresentation(raw: unknown): Presentation {
       return {
         chart: null,
         drill: null,
+        formatting: null,
         chartError: 'The saved chart settings are not valid JSON.',
       };
     }
   }
-  const out: Presentation = { chart: null, drill: null };
+  const out: Presentation = { chart: null, drill: null, formatting: null };
   let chartRaw: unknown = v;
   if (v && typeof v === 'object' && (v as { version?: unknown }).version === PRESENTATION_VERSION) {
     const env = envelopeSchema.safeParse(v);
     if (!env.success)
-      return { chart: null, drill: null, chartError: 'The saved chart settings are invalid.' };
+      return {
+        chart: null,
+        drill: null,
+        formatting: null,
+        chartError: 'The saved chart settings are invalid.',
+      };
     chartRaw = env.data.chart ?? null;
+    if (env.data.formatting !== undefined && env.data.formatting !== null) {
+      const f = formattingSchema.safeParse(env.data.formatting);
+      if (f.success) out.formatting = f.data;
+      else out.formattingError = `The saved conditional formatting is invalid: ${issues(f.error)}`;
+    }
     if (env.data.drill !== undefined && env.data.drill !== null) {
       const d = drillDefSchema.safeParse(env.data.drill);
       if (d.success) out.drill = d.data;
@@ -116,9 +132,13 @@ export function parsePresentation(raw: unknown): Presentation {
 }
 
 /** Serialize for CHART_DEF: plain version-1 chart JSON unless a drill target is set. */
-export function presentationJson(chart: ChartDef | null, drill: DrillDef | null): string | null {
-  if (!drill) return chart ? JSON.stringify(chart) : null;
-  return JSON.stringify({ version: PRESENTATION_VERSION, chart: chart ?? null, drill });
+export function presentationJson(
+  chart: ChartDef | null,
+  drill: DrillDef | null,
+  formatting: Formatting | null = null,
+): string | null {
+  if (!drill && !formatting) return chart ? JSON.stringify(chart) : null;
+  return JSON.stringify({ version: PRESENTATION_VERSION, chart: chart ?? null, drill, formatting });
 }
 
 // ---------------------------------------------------------------------------

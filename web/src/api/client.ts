@@ -30,6 +30,7 @@ import type {
   SchemaTablesResponse,
   User,
   Folder,
+  Formatting,
   ReportPrefs,
 } from './types';
 
@@ -201,6 +202,10 @@ export const api = {
     json<{ report: Report }>('PUT', `/reports/${id}`, input).then((r) => r.report),
   setReportChart: (id: string, chartDef: ChartDef | null) =>
     json<{ report: Report }>('PUT', `/reports/${id}/chart`, { chartDef }).then((r) => r.report),
+  setReportFormatting: (id: string, formatting: Formatting | null) =>
+    json<{ report: Report }>('PUT', `/reports/${id}/formatting`, { formatting }).then(
+      (r) => r.report,
+    ),
   deleteReport: (id: string) => json<void>('DELETE', `/reports/${id}`),
   reportHistory: (id: string) =>
     json<{ executions: ExecutionRecord[] }>('GET', `/reports/${id}/history`).then(

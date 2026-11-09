@@ -28,6 +28,7 @@ import { ShareModal } from '../components/ShareModal';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
 import { ResultsTable } from '../components/ResultsTable';
+import { FormattingEditor } from '../components/FormattingEditor';
 import { ChartPanel } from '../components/charts/ChartPanel';
 import type { ChartDef, ChartView } from '../utils/chartData';
 import { SaveReportModal, type SaveValues } from '../components/SaveReportModal';
@@ -441,27 +442,45 @@ export function ReportEditorPage() {
                     : 'Show the detail rows behind this row'
                 }
                 toolbar={
-                  <ExportButton
-                    source={
-                      report && !dirty
-                        ? { reportId: report.id, values: lastValues, ...chartSource }
-                        : {
-                            ...chartSource,
-                            sql,
-                            name: report?.name ?? 'Query results',
-                            ...(defs.length ? { parameters: defs, values: lastValues ?? {} } : {}),
-                          }
-                    }
-                    disabled={Boolean(running)}
-                    onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
-                    onDone={(i) =>
-                      setNotice(
-                        `Exported ${i.rowCount.toLocaleString()} rows to ${i.filename}${i.truncated ? ' (limited)' : ''}.` +
-                          (i.chart?.included ? ' The chart is on the Chart sheet.' : '') +
-                          (i.chart?.note ? ` Chart not included: ${i.chart.note}` : ''),
-                      )
-                    }
-                  />
+                  <>
+                    {report && (report.access === 'OWNER' || report.access === 'EDITOR') && (
+                      <FormattingEditor
+                        reportId={report.id}
+                        columns={result.columns.map((c) => c.name)}
+                        formatting={report.formatting}
+                        onSaved={(f) => {
+                          setReport((r) => (r ? { ...r, formatting: f } : r));
+                          setNotice(
+                            'Conditional formatting saved. Run the report to refresh displayed colours.',
+                          );
+                        }}
+                        onError={(e) => setError(new ApiError(500, 'FORMAT_SAVE_FAILED', e))}
+                      />
+                    )}
+                    <ExportButton
+                      source={
+                        report && !dirty
+                          ? { reportId: report.id, values: lastValues, ...chartSource }
+                          : {
+                              ...chartSource,
+                              sql,
+                              name: report?.name ?? 'Query results',
+                              ...(defs.length
+                                ? { parameters: defs, values: lastValues ?? {} }
+                                : {}),
+                            }
+                      }
+                      disabled={Boolean(running)}
+                      onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
+                      onDone={(i) =>
+                        setNotice(
+                          `Exported ${i.rowCount.toLocaleString()} rows to ${i.filename}${i.truncated ? ' (limited)' : ''}.` +
+                            (i.chart?.included ? ' The chart is on the Chart sheet.' : '') +
+                            (i.chart?.note ? ` Chart not included: ${i.chart.note}` : ''),
+                        )
+                      }
+                    />
+                  </>
                 }
               />
             }
@@ -470,6 +489,15 @@ export function ReportEditorPage() {
       )}
       {pivotRun && report && (
         <section className="qf-section" aria-label="Pivot results">
+          {report && (report.access === 'OWNER' || report.access === 'EDITOR') && (
+            <FormattingEditor
+              reportId={report.id}
+              columns={[...pivotRun.pivot.rowFields.map((f) => f.name), 'PIVOT_VALUE']}
+              formatting={report.formatting}
+              onSaved={(f) => setReport((r) => (r ? { ...r, formatting: f } : r))}
+              onError={() => undefined}
+            />
+          )}
           <ChartPanel
             columns={pivotRun.pivot.long.columns}
             rows={pivotRun.pivot.long.rows}
@@ -518,6 +546,7 @@ export function ReportEditorPage() {
                 </div>
                 <PivotTable
                   pivot={pivotRun.pivot}
+                  styles={pivotRun.formatStyles}
                   onCellDrill={report.drill ? (keys) => openDrill(keys) : undefined}
                 />
               </>

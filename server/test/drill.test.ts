@@ -205,14 +205,19 @@ describe('drill settings storage (CHART_DEF envelope)', () => {
     mapping: [{ field: 'REGION', parameter: 'REGION' }],
   };
   it('reads version 1 charts unchanged and round-trips the version 2 envelope', () => {
-    expect(parsePresentation(JSON.stringify(chart))).toEqual({ chart, drill: null });
+    expect(parsePresentation(JSON.stringify(chart))).toEqual({
+      chart,
+      drill: null,
+      formatting: null,
+    });
     expect(presentationJson(chart, null)).toBe(JSON.stringify(chart));
     const env = presentationJson(chart, target)!;
     expect(JSON.parse(env).version).toBe(2);
-    expect(parsePresentation(env)).toEqual({ chart, drill: target });
+    expect(parsePresentation(env)).toEqual({ chart, drill: target, formatting: null });
     expect(parsePresentation(presentationJson(null, target))).toEqual({
       chart: null,
       drill: target,
+      formatting: null,
     });
   });
   it('disables tampered drill settings without losing the chart', () => {

@@ -27,6 +27,39 @@ export interface ResultColumn {
 }
 
 export type BinaryCell = { $binary: true; size: number | null };
+export type FormatColor =
+  'red' | 'orange' | 'yellow' | 'green' | 'teal' | 'blue' | 'purple' | 'gray';
+export interface FormatRule {
+  column: string;
+  op: '>' | '>=' | '<' | '<=' | '=' | '<>' | 'between' | 'contains' | 'is null';
+  value?: string | number | null;
+  value2?: string | number | null;
+  color: FormatColor;
+  scope: 'cell' | 'row';
+}
+export interface Formatting {
+  version: 1;
+  rules: FormatRule[];
+}
+export interface FormatStyle {
+  color: FormatColor;
+  scope: 'cell' | 'row';
+}
+export const FORMAT_COLORS: { id: FormatColor; bg: string; fg: string }[] = [
+  { id: 'red', bg: '#fff1f1', fg: '#a2191f' },
+  { id: 'orange', bg: '#fff2e8', fg: '#8a3800' },
+  { id: 'yellow', bg: '#fcf4d6', fg: '#684e00' },
+  { id: 'green', bg: '#defbe6', fg: '#0e6027' },
+  { id: 'teal', bg: '#d9f4f2', fg: '#005d5d' },
+  { id: 'blue', bg: '#edf5ff', fg: '#0043ce' },
+  { id: 'purple', bg: '#f6f0ff', fg: '#6929c4' },
+  { id: 'gray', bg: '#e0e0e0', fg: '#161616' },
+];
+export const colorStyle = (color: FormatColor) => {
+  const c = FORMAT_COLORS.find((c) => c.id === color)!;
+  return { backgroundColor: c.bg, color: c.fg };
+};
+
 export type Cell = string | number | boolean | null | BinaryCell;
 
 export interface RunResponse {
@@ -42,6 +75,8 @@ export interface RunResponse {
   dataSource: string;
   /** More rows can be fetched through `cursor`. */
   hasMore?: boolean;
+  formatting?: Formatting;
+  formatStyles?: (FormatStyle | null)[][];
   cursor?: { id: string; expiresAt: string; pageSize: number };
   /** More rows exist but the server could not keep a cursor open (limit reached). */
   pagingUnavailable?: boolean;
@@ -89,6 +124,8 @@ export interface Report {
   chartError?: string;
   /** Saved drill target settings; null when none. */
   drillDef?: DrillDef | null;
+  formatting?: Formatting | null;
+  formattingError?: string;
   drillError?: string;
   hasDatePresets?: boolean;
   /** Drill-down options for the caller (GET /reports/:id only). */
@@ -257,6 +294,7 @@ export interface PageResponse {
   hasMore: boolean;
   truncated: boolean;
   expiresAt?: string;
+  formatStyles?: (FormatStyle | null)[][];
 }
 
 export interface ShareAuditEvent {
@@ -390,6 +428,7 @@ export interface PivotResult {
   exact: boolean;
   long: { columns: ResultColumn[]; rows: Cell[][] };
 }
+/** Rule targets: normal/grouped/calculated output names, or aggregate output name (PIVOT_VALUE) on a pivot. */
 export interface PivotRun {
   pivot: PivotResult;
   executionId: string;
@@ -399,6 +438,8 @@ export interface PivotRun {
   dataSource?: string;
   builder: { name: string; sql: string };
   warnings?: string[];
+  formatting?: Formatting;
+  formatStyles?: (FormatStyle | null)[][];
   report?: { id: string; name: string };
 }
 

@@ -348,6 +348,54 @@ describe('chart API', () => {
     expect(m.attachmentData[1].subarray(1, 4).toString()).toBe('PNG');
   });
 
+  it('saves formatting with editor access, denies viewers, runs and exports static colours', async () => {
+    const a = await login();
+    const b = await login('bob');
+    const rep = (await a.send('post', '/api/reports').send({ name: 'Format', sql: SQL })).body
+      .report;
+    const formatting = {
+      version: 1,
+      rules: [{ column: 'REVENUE', op: '>', value: 1000, color: 'green', scope: 'cell' }],
+    };
+    expect(
+      (await b.send('put', `/api/reports/${rep.id}/formatting`).send({ formatting })).status,
+    ).toBe(404);
+    expect(
+      (
+        await a
+          .send('put', `/api/reports/${rep.id}/shares`)
+          .send({ shares: [{ type: 'USER', id: 'u-bob', role: 'VIEWER' }] })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await b.send('put', `/api/reports/${rep.id}/formatting`).send({ formatting })).status,
+    ).toBe(403);
+    expect(
+      (
+        await a
+          .send('put', `/api/reports/${rep.id}/shares`)
+          .send({ shares: [{ type: 'USER', id: 'u-bob', role: 'EDITOR' }] })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await b.send('put', `/api/reports/${rep.id}/formatting`).send({ formatting })).status,
+    ).toBe(200);
+    const run = await b.send('post', `/api/reports/${rep.id}/execute`).send({});
+    expect(run.body.formatStyles[0][1]).toMatchObject({ color: 'green' });
+    const x = await a.send('post', '/api/export').send({ reportId: rep.id }).parse(binary);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(x.body as ArrayBuffer);
+    expect(
+      (wb.getWorksheet('Format')?.getCell('B2').fill as ExcelJS.FillPattern).fgColor?.argb,
+    ).toBe('ffdefbe6');
+    const preserved = await a.send('put', `/api/reports/${rep.id}/chart`).send({ chartDef: bar });
+    expect(preserved.body.report.formatting).toEqual(formatting);
+    const cleared = await a
+      .send('put', `/api/reports/${rep.id}/formatting`)
+      .send({ formatting: null });
+    expect(cleared.body.report.formatting).toBeNull();
+  });
+
   it('sends plain emails when the report has no chart', async () => {
     const a = await login();
     const rep = (await a.send('post', '/api/reports').send({ name: 'R', sql: SQL })).body.report;

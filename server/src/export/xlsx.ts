@@ -136,6 +136,9 @@ export function toExcel(
   }
 }
 
+import { COLOR_HEX, matchFormatting, type Formatting } from '../reports/formatting.js';
+
+/** Numeric and text comparisons never influence the numeric cell type or workbook formulas. */
 export interface WorkbookMeta {
   title: string;
   description?: string | null;
@@ -162,6 +165,8 @@ export class XlsxResultWriter {
   private wb: ExcelJS.stream.xlsx.WorkbookWriter;
   private sheet!: ExcelJS.Worksheet;
   private cols: ResultColumn[] = [];
+  private savedFormatting: Formatting | null = null;
+  private sourceCache: Cell[][] | null = null;
   rowsWritten = 0;
   columnsOmitted = 0;
   /** Exact numeric cells written as text because Excel could not hold them. */
@@ -185,7 +190,13 @@ export class XlsxResultWriter {
     this.wb.created = new Date();
   }
 
-  setColumns(cols: ResultColumn[]) {
+  setColumns(
+    cols: ResultColumn[],
+    formatting: Formatting | null = null,
+    cacheRows: Cell[][] | null = null,
+  ) {
+    this.savedFormatting = formatting;
+    this.sourceCache = cacheRows;
     this.columnsOmitted = Math.max(0, cols.length - EXCEL_MAX_COLS);
     this.cols = cols.slice(0, EXCEL_MAX_COLS);
     this.sheet = this.wb.addWorksheet(sanitizeSheetName(this.sheetName), {
@@ -213,6 +224,7 @@ export class XlsxResultWriter {
   addRows(rows: Cell[][]) {
     for (const r of rows) {
       if (this.rowsWritten >= EXCEL_MAX_ROWS - 1) return;
+
       const cells = this.cols.map((c, i) => toExcel(r[i], c, this.mode));
       const row = this.sheet.addRow(cells.map((x) => x.value));
       cells.forEach((x, i) => {
@@ -221,6 +233,27 @@ export class XlsxResultWriter {
         this.textColumns.add(i);
         if (this.numericAsText <= XlsxResultWriter.MAX_CELL_NOTES)
           row.getCell(i + 1).note = TEXT_NUMBER_NOTE;
+      });
+      const sourceRows = this.sourceCache ? [this.sourceCache[this.rowsWritten]] : [r];
+      const styles = this.savedFormatting
+        ? matchFormatting(this.savedFormatting, this.cols, sourceRows)[0]
+        : [];
+      row.eachCell({ includeEmpty: true }, (_cell, i) => {
+        const style = styles[i - 1];
+        if (!style) return;
+        row.getCell(i).style = {
+          ...row.getCell(i).style,
+          fill: {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: COLOR_HEX[style.color].bg.replace('#', 'ff') },
+          },
+          font: {
+            name: 'Calibri',
+            size: 11,
+            color: { argb: COLOR_HEX[style.color].fg.replace('#', 'ff') },
+          },
+        };
       });
       row.commit();
       this.rowsWritten++;
