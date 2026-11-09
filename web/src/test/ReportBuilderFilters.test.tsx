@@ -130,6 +130,31 @@ describe('builder filter helpers', () => {
     });
   });
 
+  it('preserves literal ask-when-run dates after switching a rolling range to custom', () => {
+    const row = {
+      ...newFilterRow('base|ORDER_DATE'),
+      ask: true,
+      askName: 'SINCE',
+      askLabel: 'Since',
+      value: '2026-01-15',
+      value2: '2026-02-15',
+    };
+    const from = toFilter(
+      { ...row, datePreset: { choice: 'LAST_N_DAYS' as const, n: 30 } },
+      () => ({ column: 'ORDER_DATE' }),
+      'date',
+    );
+    expect(from.preset).toEqual({ preset: 'LAST_N_DAYS', n: 30 });
+    expect(from.ask).toMatchObject({
+      name: 'SINCE',
+      defaultValue: '2026-01-15',
+      defaultValue2: '2026-02-15',
+    });
+    expect(
+      toFilter({ ...row, op: 'BETWEEN' }, () => ({ column: 'ORDER_DATE' }), 'date').ask,
+    ).toMatchObject({ defaultValue2: '2026-02-15' });
+  });
+
   it('describes filters and totals', () => {
     expect(
       describeSelection({

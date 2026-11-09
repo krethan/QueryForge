@@ -12,9 +12,10 @@ import {
 } from '@carbon/react';
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from '../api/client';
-import type { Report, Schedule, ScheduleInput, ScheduleSettings } from '../api/types';
+import type { ParameterDef, Report, Schedule, ScheduleInput, ScheduleSettings } from '../api/types';
 import { ErrorNotice } from './ErrorNotice';
 import { ParameterFields, initialValues, validateValues } from './RunParamsModal';
+import { setPreset } from './datePresetState';
 
 const PRESETS = [
   { cron: '0 7 * * *', text: 'Every day at 07:00' },
@@ -55,6 +56,7 @@ export function ScheduleEditorModal({
   const [recipients, setRecipients] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [presetDefs, setPresetDefs] = useState<ParameterDef[]>([]);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [upcoming, setUpcoming] = useState<string[] | null>(null);
   const [cronError, setCronError] = useState<string | null>(null);
@@ -77,7 +79,10 @@ export function ScheduleEditorModal({
   }, [open, schedule, report, reports, settings]);
 
   useEffect(() => {
-    if (open) setValues(initialValues(defs, schedule?.parameters));
+    if (open) {
+      setValues(initialValues(defs, schedule?.parameters));
+      setPresetDefs(defs);
+    }
   }, [open, defs, schedule]);
 
   useEffect(() => {
@@ -106,16 +111,24 @@ export function ScheduleEditorModal({
 
   const save = async () => {
     if (!target) return;
-    const fe = validateValues(defs, values);
+    const fe = validateValues(presetDefs, values);
     setFieldErrors(fe);
     if (Object.keys(fe).length) return;
+    const presetParams = Object.fromEntries(
+      presetDefs
+        .filter((d) => d.defaultValue?.startsWith('$preset:'))
+        .map((d) => [d.name, d.defaultValue]),
+    );
     const input: ScheduleInput = {
       cron: cron.trim(),
       timezone: tz,
       recipients: recipients.split(/[\s,;]+/).filter(Boolean),
-      parameters: Object.fromEntries(
-        Object.entries(values).map(([k, v]) => [k, v.trim() === '' ? null : v]),
-      ),
+      parameters: {
+        ...presetParams,
+        ...Object.fromEntries(
+          Object.entries(values).map(([k, v]) => [k, v.trim() === '' ? null : v]),
+        ),
+      },
       enabled,
     };
     setBusy(true);
@@ -236,7 +249,11 @@ export function ScheduleEditorModal({
             <Stack gap={4}>
               <ParameterFields
                 idPrefix="sched"
-                parameters={defs}
+                parameters={presetDefs}
+                onChangePreset={(n, v) => {
+                  setPresetDefs((current) => setPreset(current, n, v));
+                  setValues((old) => ({ ...old, [n]: v ?? '' }));
+                }}
                 values={values}
                 errors={fieldErrors}
                 onChange={(n, v) => setValues((p) => ({ ...p, [n]: v }))}

@@ -26,6 +26,7 @@ import {
   MAX_IN_VALUES,
   MAX_VALUE_LENGTH,
 } from '../catalog/filter-builder.js';
+import { datePresetSchema } from '../reports/date-presets.js';
 import { validateCron } from '../scheduler/cron.js';
 import type { Scheduler } from '../scheduler/scheduler.js';
 import {
@@ -142,6 +143,7 @@ const filterSchema = z.object({
     .array(scalar)
     .max(MAX_IN_VALUES + 1)
     .optional(),
+  preset: datePresetSchema.nullable().optional(),
   ask: z
     .object({
       name: z.string().max(30),
@@ -1506,6 +1508,7 @@ export function apiRouter(d: ApiDeps): Router {
     maxRecipients: cfg.scheduler.maxRecipients,
     minIntervalMinutes: cfg.scheduler.minIntervalMinutes,
     defaultTimezone: cfg.scheduler.defaultTimezone,
+    datePresetTimezone: cfg.datePresetTimezone,
     maxFailures: cfg.scheduler.maxFailures,
   });
   const prepareSchedule = (report: Report, input: ScheduleInput) => {
@@ -1513,9 +1516,21 @@ export function apiRouter(d: ApiDeps): Router {
     const rc = checkRecipients(input.recipients, cfg.scheduler);
     if (!rc.ok) throw new AppError(400, 'INVALID_RECIPIENTS', rc.message);
     // validate required parameters now so the schedule doesn't fail at run time
-    const p = resolveParameters(report.sql, report.parameters, input.parameters);
+    const p = resolveParameters(report.sql, report.parameters, input.parameters, {
+      timeZone: cfg.datePresetTimezone,
+    });
     return {
-      input: { ...input, recipients: rc.recipients, parameters: p.used },
+      // Preserve the rolling definition rather than the dates resolved during validation.
+      input: {
+        ...input,
+        recipients: rc.recipients,
+        parameters: {
+          ...p.used,
+          ...Object.fromEntries(
+            report.parameters.filter((d) => d.datePreset).map((d) => [d.name, d.defaultValue]),
+          ),
+        },
+      },
       next: input.enabled ? upcoming[0] : null,
       upcoming,
     };

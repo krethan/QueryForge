@@ -1985,6 +1985,7 @@ export function ReportBuilderPage() {
         serverErrors={askErrors}
         onClose={() => setAskOpen(false)}
         onSubmit={(v) => void runWith(v)}
+        onPresetChange={(next) => setPreviewParams(next)}
       />
     </>
   );

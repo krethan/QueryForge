@@ -26,6 +26,7 @@ import {
   type ValueKind,
 } from '../utils/builderState';
 import { newExecutionId } from '../utils/format';
+import { DatePresetSelect } from './DatePresetFields';
 
 export interface ColumnChoice {
   label: string;
@@ -63,6 +64,7 @@ export function newFilterRow(pick = ''): FilterRow {
     ask: false,
     askName: '',
     askLabel: '',
+    datePreset: { choice: '' },
   };
 }
 
@@ -135,7 +137,12 @@ export function BuilderFilters({
             const pick = e.target.value;
             const k = kindOf(pick);
             const op = opsFor(k).includes(row.op) ? row.op : opsFor(k)[0];
-            patchRow(row.key, { pick, op, ask: row.ask && canAsk(op) });
+            patchRow(row.key, {
+              pick,
+              op,
+              ask: row.ask && canAsk(op),
+              datePreset: k === 'date' ? row.datePreset : { choice: '' },
+            });
           }}
         >
           <SelectItem value="" text="Choose column" />
@@ -165,6 +172,22 @@ export function BuilderFilters({
             <SelectItem key={o} value={o} text={OP_LABELS[o]} />
           ))}
         </Select>
+        {kind === 'date' && row.op !== 'IN' && (
+          <>
+            <DatePresetSelect
+              id={`qf-f-preset-${row.key}`}
+              label="Date range (fixed, or default if asked)"
+              value={row.datePreset ?? { choice: '' }}
+              onChange={(datePreset) => patchRow(row.key, { datePreset })}
+            />
+            {row.datePreset?.choice && (
+              <p className="qf-muted">
+                Resolved by the server on every run in its configured time zone; the preset, not a
+                date, is saved.
+              </p>
+            )}
+          </>
+        )}
         {takesValue(row.op) && row.op === 'IN' && (
           <TextArea
             id={`qf-f-in-${row.key}`}
@@ -175,7 +198,7 @@ export function BuilderFilters({
             onChange={set('values')}
           />
         )}
-        {takesValue(row.op) && row.op !== 'IN' && (
+        {takesValue(row.op) && row.op !== 'IN' && !(kind === 'date' && row.datePreset?.choice) && (
           <TextInput
             id={`qf-f-v-${row.key}`}
             labelText={row.op === 'BETWEEN' ? `${valueLabel}: from` : valueLabel}
@@ -187,7 +210,7 @@ export function BuilderFilters({
             onChange={set('value')}
           />
         )}
-        {row.op === 'BETWEEN' && (
+        {row.op === 'BETWEEN' && !(kind === 'date' && row.datePreset?.choice) && (
           <TextInput
             id={`qf-f-v2-${row.key}`}
             labelText={row.ask ? 'Default: to' : 'to'}

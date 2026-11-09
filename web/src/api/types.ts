@@ -90,6 +90,7 @@ export interface Report {
   /** Saved drill target settings; null when none. */
   drillDef?: DrillDef | null;
   drillError?: string;
+  hasDatePresets?: boolean;
   /** Drill-down options for the caller (GET /reports/:id only). */
   drill?: DrillInfo;
   /** The viewing user's own folder for this report (null = Unfiled; GET /reports only). */
@@ -186,6 +187,8 @@ export interface ParameterDef {
   fixed?: boolean;
   /** Report Builder text match: the value is escaped and wrapped in % on the server. */
   match?: 'contains' | 'startsWith' | 'endsWith';
+  /** Rolling date metadata; the server resolves the stored preset for every run. */
+  datePreset?: DatePresetSpec | null;
 }
 /** Parameters a user is asked for (fixed Report Builder values are not). */
 export const promptable = (defs: ParameterDef[] | undefined) =>
@@ -243,6 +246,7 @@ export interface ScheduleSettings {
   maxRecipients: number;
   minIntervalMinutes: number;
   defaultTimezone: string;
+  datePresetTimezone: string;
   maxFailures: number;
 }
 
@@ -430,6 +434,52 @@ export type FilterOp =
   | 'ENDS_WITH'
   | 'IS_NULL'
   | 'IS_NOT_NULL';
+export type DatePresetType =
+  | 'TODAY'
+  | 'YESTERDAY'
+  | 'THIS_WEEK'
+  | 'LAST_WEEK'
+  | 'THIS_MONTH'
+  | 'LAST_MONTH'
+  | 'THIS_QUARTER'
+  | 'LAST_QUARTER'
+  | 'YTD'
+  | 'LAST_YEAR'
+  | 'LAST_N_DAYS';
+export interface DatePresetSpec {
+  preset: DatePresetType;
+  n?: number;
+}
+/** '' = Custom literal date. */
+export const DATE_PRESET_CHOICES: { value: string; text: string }[] = [
+  { value: '', text: 'Custom' },
+  { value: 'TODAY', text: 'Today' },
+  { value: 'YESTERDAY', text: 'Yesterday' },
+  { value: 'THIS_WEEK', text: 'This week' },
+  { value: 'LAST_WEEK', text: 'Last week' },
+  { value: 'THIS_MONTH', text: 'This month' },
+  { value: 'LAST_MONTH', text: 'Last month' },
+  { value: 'THIS_QUARTER', text: 'This quarter' },
+  { value: 'LAST_QUARTER', text: 'Last quarter' },
+  { value: 'YTD', text: 'Year to date' },
+  { value: 'LAST_YEAR', text: 'Last year' },
+  { value: 'LAST_N_DAYS', text: 'Last N days' },
+];
+/** Decodes the server-persisted opaque preset without inspecting SQL. */
+export function parseDatePresetValue(
+  value: string | null | undefined,
+): { choice: string; n?: number } | null {
+  if (!value?.startsWith('$preset:')) return null;
+  try {
+    const p = JSON.parse(value.slice(8)) as { preset?: string; n?: number };
+    return p.preset && DATE_PRESET_CHOICES.some((c) => c.value === p.preset)
+      ? { choice: p.preset, ...(p.n ? { n: p.n } : {}) }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ReportFilter {
   table?: string;
   column: string;
@@ -438,6 +488,8 @@ export interface ReportFilter {
   value2?: string | number | null;
   values?: (string | number)[];
   /** "Ask when run": becomes a report parameter (BETWEEN: NAME_FROM / NAME_TO). */
+  /** Rolling range (only valid for date fields); the server binds its bounds. */
+  preset?: DatePresetSpec | null;
   ask?: {
     name: string;
     label: string;

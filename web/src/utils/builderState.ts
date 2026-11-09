@@ -78,6 +78,8 @@ export interface FilterRow {
   ask: boolean;
   askName: string;
   askLabel: string;
+  /** Rolling date range instead of fixed literal dates; '' = Custom. */
+  datePreset?: { choice: import('../api/types').DatePresetType | ''; n?: number };
 }
 export interface FilterGroupNode {
   key: string;
@@ -191,6 +193,25 @@ export function toFilter(
   kind: ValueKind,
 ): ReportFilter {
   const f: ReportFilter = { ...ref(row.pick), op: row.op };
+  if (row.datePreset?.choice) {
+    const preset = {
+      preset: row.datePreset.choice,
+      ...(row.datePreset.choice === 'LAST_N_DAYS' ? { n: row.datePreset.n } : {}),
+    } as ReportFilter['preset'];
+    // "Ask when run" is independent of the fixed/default rolling range choice.
+    return row.ask
+      ? {
+          ...f,
+          preset,
+          ask: {
+            name: row.askName,
+            label: row.askLabel.trim() || row.askName,
+            ...(row.value.trim() ? { defaultValue: typed(row.value, kind) } : {}),
+            ...(row.value2.trim() ? { defaultValue2: typed(row.value2, kind) } : {}),
+          },
+        }
+      : { ...f, preset };
+  }
   if (!takesValue(row.op)) return f;
   if (row.op === 'IN') return { ...f, values: splitValues(row.values).map((v) => typed(v, kind)) };
   if (row.ask) {
@@ -200,9 +221,7 @@ export function toFilter(
         name: row.askName,
         label: row.askLabel.trim() || row.askName,
         ...(row.value.trim() ? { defaultValue: typed(row.value, kind) } : {}),
-        ...(row.op === 'BETWEEN' && row.value2.trim()
-          ? { defaultValue2: typed(row.value2, kind) }
-          : {}),
+        ...(row.value2.trim() ? { defaultValue2: typed(row.value2, kind) } : {}),
       },
     };
   }
@@ -268,5 +287,12 @@ export function fromFilter(f: ReportFilter, pick: string, key: () => string): Fi
     ask: Boolean(f.ask),
     askName: f.ask?.name ?? '',
     askLabel: f.ask?.label ?? '',
+    datePreset:
+      f.preset && typeof f.preset === 'object'
+        ? {
+            choice: String(f.preset.preset) as import('../api/types').DatePresetType,
+            ...(f.preset.n ? { n: f.preset.n } : {}),
+          }
+        : { choice: '' },
   };
 }

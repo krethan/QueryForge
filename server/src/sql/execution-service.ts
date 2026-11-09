@@ -117,7 +117,9 @@ export class ExecutionService {
     params: AdhocParameters = {},
   ): Promise<RunResponse> {
     this.executor.validate(sql);
-    const p = resolveParameters(sql, params.definitions ?? [], params.values ?? {});
+    const p = resolveParameters(sql, params.definitions ?? [], params.values ?? {}, {
+      timeZone: this.cfg.datePresetTimezone,
+    });
     const out = await this.paged(
       { id: executionId, userId: user.id, kind: 'RUN', sql, parameters: p.used },
       p.bound,
@@ -133,7 +135,9 @@ export class ExecutionService {
   ): Promise<RunResponse> {
     const { report } = await this.access.require(user, reportId, 'VIEW'); // fresh SQL from Db2 for i
     this.executor.validate(report.sql);
-    const p = resolveParameters(report.sql, report.parameters, values);
+    const p = resolveParameters(report.sql, report.parameters, values, {
+      timeZone: this.cfg.datePresetTimezone,
+    });
     const out = await this.paged(
       {
         id: executionId,
@@ -212,7 +216,9 @@ export class ExecutionService {
       defs = report.parameters;
     }
     this.executor.validate(sql);
-    const p = resolveParameters(sql, defs, src.values ?? {});
+    const p = resolveParameters(sql, defs, src.values ?? {}, {
+      timeZone: this.cfg.datePresetTimezone,
+    });
     const title = report?.name ?? src.name?.trim() ?? 'Query results';
     const dir = await mkdtemp(join(tmpdir(), 'qf-export-'));
     const path = join(dir, 'export.xlsx');
@@ -338,7 +344,9 @@ export class ExecutionService {
     maxRows: number,
   ): Promise<ExecutionOutcome & { parameters: ResolvedParameters['used']; dataSource: string }> {
     this.executor.validate(src.sql);
-    const p = resolveParameters(src.sql, src.definitions, src.values ?? {});
+    const p = resolveParameters(src.sql, src.definitions, src.values ?? {}, {
+      timeZone: this.cfg.datePresetTimezone,
+    });
     const id = src.executionId ?? randomUUID();
     const out = await this.tracked(
       {

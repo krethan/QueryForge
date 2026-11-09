@@ -560,6 +560,7 @@ export function ReportEditorPage() {
         primaryText={running ? 'Running…' : 'Run'}
         onClose={() => setAskParams(false)}
         onSubmit={(v) => void runWith(v)}
+        onPresetChange={setDefs}
       />
       {shareOpen && report && <ShareModal report={report} onClose={() => setShareOpen(false)} />}
       <ScheduleEditorModal
