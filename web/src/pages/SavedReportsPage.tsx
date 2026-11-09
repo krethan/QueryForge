@@ -120,6 +120,7 @@ export function SavedReportsPage() {
         >
           <SelectItem value="all" text="Any access" />
           <SelectItem value="OWNER" text="Owner" />
+          <SelectItem value="ADMIN" text="Admin" />
           <SelectItem value="EDITOR" text="Editor" />
           <SelectItem value="VIEWER" text="Viewer" />
         </Select>
@@ -167,10 +168,20 @@ export function SavedReportsPage() {
                     <Tag
                       size="sm"
                       type={
-                        r.access === 'OWNER' ? 'blue' : r.access === 'EDITOR' ? 'purple' : 'gray'
+                        r.access === 'OWNER' || r.access === 'ADMIN'
+                          ? 'blue'
+                          : r.access === 'EDITOR'
+                            ? 'purple'
+                            : 'gray'
                       }
                     >
-                      {r.access === 'OWNER' ? 'Owner' : r.access === 'EDITOR' ? 'Editor' : 'Viewer'}
+                      {r.access === 'ADMIN'
+                        ? 'Admin'
+                        : r.access === 'OWNER'
+                          ? 'Owner'
+                          : r.access === 'EDITOR'
+                            ? 'Editor'
+                            : 'Viewer'}
                     </Tag>
                   </TableCell>
                   <TableCell>{r.category ?? '—'}</TableCell>
@@ -182,7 +193,12 @@ export function SavedReportsPage() {
                   </TableCell>
                   <TableCell>{formatDateTime(r.updatedAt)}</TableCell>
                   <TableCell>
-                    <OverflowMenu aria-label={`Actions for ${r.name}`} flipped size="sm">
+                    <OverflowMenu
+                      aria-label={`Actions for ${r.name}`}
+                      iconDescription={`Actions for ${r.name}`}
+                      flipped
+                      size="sm"
+                    >
                       <OverflowMenuItem
                         itemText="Run"
                         onClick={() => nav(`/reports/${r.id}?run=1`)}
@@ -191,7 +207,7 @@ export function SavedReportsPage() {
                         itemText={r.access === 'VIEWER' ? 'Open' : 'Edit'}
                         onClick={() => nav(`/reports/${r.id}`)}
                       />
-                      {r.access === 'OWNER' && (
+                      {(r.access === 'OWNER' || r.access === 'ADMIN') && (
                         <OverflowMenuItem
                           itemText="Access and audit"
                           onClick={() => setToAudit(r)}

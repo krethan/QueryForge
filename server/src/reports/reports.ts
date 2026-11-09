@@ -48,7 +48,7 @@ export interface Report {
   formattingError?: string;
 }
 
-export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER';
+export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER' | 'ADMIN';
 export interface AccessibleReport extends Report {
   access: AccessRole;
   ownerName?: string;
@@ -245,6 +245,24 @@ export class ReportRepository {
         byId.set(rep.id, { ...rep, access, ownerName: String(r.OWNER_NAME ?? '') });
     }
     return [...byId.values()];
+  }
+
+  /** Global read access for AppUser role ADMIN; returned through the same access-aware list. */
+  async listAdmin(): Promise<AccessibleReport[]> {
+    const users = q(this.schema, T.users);
+    const rows = await this.db.query<Row>(
+      `SELECT ${COLS.split(',')
+        .map((c) => `R.${c.trim()}`)
+        .join(
+          ', ',
+        )}, U.DISPLAY_NAME AS OWNER_NAME FROM ${this.table} R JOIN ${users} U ON U.USER_ID = R.OWNER_ID ORDER BY R.REPORT_NAME_KEY ASC`,
+      [],
+    );
+    return rows.map((r) => ({
+      ...toReport(r),
+      access: 'ADMIN',
+      ownerName: String(r.OWNER_NAME ?? ''),
+    }));
   }
 
   async create(ownerId: string, input: ReportInput): Promise<Report> {

@@ -6,6 +6,7 @@ import type { Report, RunResponse } from '../api/types';
 import { AccessAuditModal, describeEvent } from '../components/AccessAuditModal';
 import { ResultsTable } from '../components/ResultsTable';
 import { SavedReportsPage } from '../pages/SavedReportsPage';
+import { ShareModal } from '../components/ShareModal';
 import { compareCells, compareDecimalStrings } from '../utils/format';
 
 vi.mock('../auth/AuthContext', () => ({
@@ -153,6 +154,7 @@ describe('Saved Reports with shared reports', () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText('Mine')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Actions for Mine' })).toBeInTheDocument();
     expect(screen.getByText('Bobs viewer')).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText('My access'), 'EDITOR');
     expect(screen.queryByText('Mine')).not.toBeInTheDocument();
@@ -165,6 +167,32 @@ describe('Saved Reports with shared reports', () => {
     await userEvent.selectOptions(screen.getByLabelText('Owner'), 'me');
     expect(screen.getByText('Mine')).toBeInTheDocument();
     expect(screen.queryByText('Bobs viewer')).not.toBeInTheDocument();
+  });
+});
+
+describe('Share dialog', () => {
+  it('edits a Viewer grant and removes it only after saving', async () => {
+    vi.spyOn(api, 'getShares').mockResolvedValue([
+      { type: 'USER', id: 'u-bob', role: 'VIEWER', displayName: 'Bob' },
+    ]);
+    vi.spyOn(api, 'groups').mockResolvedValue(['finance']);
+    const save = vi.spyOn(api, 'putShares').mockResolvedValue([]);
+    const onClose = vi.fn();
+    render(<ShareModal report={rep({ id: '1', name: 'Mine' })} onClose={onClose} />);
+    expect(await screen.findByText('Bob')).toBeInTheDocument();
+    expect(document.getElementById('role-0')).toBeInTheDocument();
+    await userEvent.selectOptions(document.getElementById('role-0')!, 'EDITOR');
+    expect(document.getElementById('role-0')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
+    expect(save).toHaveBeenLastCalledWith('1', [
+      { type: 'USER', id: 'u-bob', role: 'EDITOR', displayName: 'Bob' },
+    ]);
+    expect(onClose).toHaveBeenCalledOnce();
+    onClose.mockClear();
+    await userEvent.click(screen.getByRole('button', { name: 'Remove access' }));
+    expect(screen.queryByText('Bob')).not.toBeInTheDocument();
+    expect(save).toHaveBeenCalledOnce(); // an unsaved edit does not revoke access
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

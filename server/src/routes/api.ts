@@ -1055,7 +1055,11 @@ export function apiRouter(d: ApiDeps): Router {
       const owned = await d.reports.list(user(req).id, { search, category, sort });
       const groups = await d.groups.forUser(user(req).id);
       const needle = search?.trim().toUpperCase();
-      const shared = (await d.reports.listShared(user(req).id, groups)).filter(
+      const shared = (
+        user(req).role === 'ADMIN'
+          ? (await d.reports.listAdmin()).filter((report) => report.ownerId !== user(req).id)
+          : await d.reports.listShared(user(req).id, groups)
+      ).filter(
         (x) =>
           (!needle || x.name.toUpperCase().includes(needle)) &&
           (!category?.trim() || x.category === category.trim()),
@@ -1233,6 +1237,8 @@ export function apiRouter(d: ApiDeps): Router {
     '/reports/:id',
     h(async (req, res) => {
       const { report } = await d.access.require(user(req), reportId(req), 'OWNER');
+      if (user(req).id !== report.ownerId)
+        throw new AppError(403, 'FORBIDDEN', 'Only the report owner can delete it.');
       await d.reports.delete(report.ownerId, report.id);
       res.status(204).end();
     }),
@@ -1433,7 +1439,10 @@ export function apiRouter(d: ApiDeps): Router {
       const { report } = await d.access.require(user(req), reportId(req), 'EDIT');
       const owned = await d.reports.list(user(req).id, { sort: 'name' });
       const groups = await d.groups.forUser(user(req).id);
-      const shared = await d.reports.listShared(user(req).id, groups);
+      const shared =
+        user(req).role === 'ADMIN'
+          ? (await d.reports.listAdmin()).filter((report) => report.ownerId !== user(req).id)
+          : await d.reports.listShared(user(req).id, groups);
       const seen = new Set<string>([report.id]);
       const targets = [];
       for (const x of [...owned, ...shared]) {
@@ -1517,14 +1526,21 @@ export function apiRouter(d: ApiDeps): Router {
     '/reports/:id/access',
     h(async (req, res) => {
       // owner-only: who can reach the report now, and how that changed over time
-      const { report } = await d.access.require(user(req), reportId(req), 'OWNER');
+      const { report } = await d.access.require(user(req), reportId(req), 'EDIT');
+      if (!d.access.canViewAudit(user(req), report))
+        throw new AppError(
+          403,
+          'FORBIDDEN',
+          'Only the report owner or an admin can view access audit.',
+        );
       const limit = Number(req.query.limit) || 100;
+      const owner = await d.users.findById(report.ownerId);
       const [shares, events] = await Promise.all([
         d.access.listShares(report.id),
         d.access.listAudit(report.id, limit),
       ]);
       res.json({
-        owner: { id: report.ownerId, displayName: user(req).displayName },
+        owner: { id: report.ownerId, displayName: owner?.displayName ?? report.ownerId },
         shares,
         events,
       });
@@ -1607,7 +1623,11 @@ export function apiRouter(d: ApiDeps): Router {
     '/schedules',
     h(async (req, res) => {
       res.json({
-        schedules: await d.schedules.listForUser(user(req).id),
+        schedules: await d.schedules.listForUser(
+          user(req).id,
+          await d.groups.forUser(user(req).id),
+          user(req).role === 'ADMIN',
+        ),
         settings: scheduleSettings(),
       });
     }),

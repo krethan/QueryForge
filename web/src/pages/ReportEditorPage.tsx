@@ -260,7 +260,8 @@ export function ReportEditorPage() {
           <p>
             {report && access !== 'OWNER' && (
               <Tag size="sm" type="purple">
-                Shared with you · {access === 'EDITOR' ? 'Editor' : 'Viewer'}
+                Shared with you ·{' '}
+                {access === 'ADMIN' ? 'Admin' : access === 'EDITOR' ? 'Editor' : 'Viewer'}
                 {report.ownerName ? ` · owner ${report.ownerName}` : ''}
               </Tag>
             )}{' '}

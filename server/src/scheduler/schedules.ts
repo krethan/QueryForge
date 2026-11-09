@@ -38,6 +38,8 @@ const COLS = `S.SCHEDULE_ID, S.REPORT_ID, S.CREATED_BY, S.CRON_EXPR, S.TIMEZONE,
   S.NEXT_RUN_AT, S.LAST_RUN_AT, S.LAST_STATUS, S.LAST_ERROR, S.FAILURE_COUNT, S.VERSION, R.REPORT_NAME`;
 
 type Row = Record<string, unknown>;
+const sharesTable = (reports: string) => reports.replace(/\.[^.]+$/, `.${T.shares}`);
+
 const toSchedule = (r: Row): Schedule => {
   let parameters: Schedule['parameters'] = {};
   try {
@@ -102,11 +104,18 @@ export class ScheduleRepository {
     return rows.map(toSchedule);
   }
 
-  /** Schedules on reports the user owns, or that the user created. */
-  async listForUser(userId: string): Promise<Schedule[]> {
+  /** Only schedules whose report remains accessible through the shared access model. */
+  async listForUser(userId: string, groups: string[] = [], admin = false): Promise<Schedule[]> {
+    const shares = sharesTable(this.reports);
+    const auth = admin
+      ? ''
+      : ` WHERE R.OWNER_ID = ? OR (S.CREATED_BY = ? AND R.OWNER_ID = ?) OR EXISTS (
+          SELECT 1 FROM ${shares} X WHERE X.REPORT_ID = R.REPORT_ID AND
+          ((X.PRINCIPAL_TYPE = 'USER' AND X.PRINCIPAL_ID = ?) OR
+           (X.PRINCIPAL_TYPE = 'GROUP' AND X.PRINCIPAL_ID IN (${groups.length ? groups.map(() => '?').join(', ') : "''"}))))`;
     const rows = await this.db.query<Row>(
-      `SELECT ${COLS} FROM ${this.from()} WHERE R.OWNER_ID = ? OR S.CREATED_BY = ? ORDER BY R.REPORT_NAME_KEY, S.CREATED_AT`,
-      [userId, userId],
+      `SELECT ${COLS} FROM ${this.from()}${auth} ORDER BY R.REPORT_NAME_KEY, S.CREATED_AT`,
+      admin ? [] : [userId, userId, userId, userId, ...groups],
     );
     return rows.map(toSchedule);
   }

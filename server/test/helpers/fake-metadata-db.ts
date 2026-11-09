@@ -191,14 +191,37 @@ export class FakeMetadataDb implements MetadataDb {
         String(a.REPORT_NAME_KEY).localeCompare(String(b.REPORT_NAME_KEY)),
       ) as T[];
     }
+    if (/FROM \w+\.QF_REPORTS R JOIN \w+\.QF_USERS U ON U.USER_ID = R.OWNER_ID/.test(s)) {
+      return [...this.reports.values()].map((r) => ({
+        ...r,
+        OWNER_NAME: this.users.get(String(r.OWNER_ID))?.DISPLAY_NAME,
+      })) as T[];
+    }
     if (
-      /FROM \w+\.QF_SCHEDULES S JOIN \w+\.QF_REPORTS R ON R\.REPORT_ID = S\.REPORT_ID WHERE/.test(s)
+      /FROM \w+\.QF_SCHEDULES S JOIN \w+\.QF_REPORTS R ON R\.REPORT_ID = S\.REPORT_ID(?: WHERE| ORDER|$)/.test(
+        s,
+      )
     ) {
       let rows = [...this.schedules.values()].map((x) => this.withReportName(x));
       if (s.includes('WHERE S.SCHEDULE_ID = ?'))
         rows = rows.filter((x) => x.SCHEDULE_ID === params[0]);
       else if (s.includes('WHERE S.REPORT_ID = ?'))
         rows = rows.filter((x) => x.REPORT_ID === params[0]);
+      else if (s.includes('WHERE R.OWNER_ID = ? OR (S.CREATED_BY = ? AND R.OWNER_ID = ?)'))
+        rows = rows.filter((x) => {
+          const r = this.reports.get(String(x.REPORT_ID));
+          if (!r) return false;
+          if (r.OWNER_ID === params[0]) return true;
+          if (x.CREATED_BY === params[1] && r.OWNER_ID === params[2]) return true;
+          const userId = params[3];
+          const groups = params.slice(4);
+          return this.shares.some(
+            (sh) =>
+              sh.REPORT_ID === r.REPORT_ID &&
+              ((sh.PRINCIPAL_TYPE === 'USER' && sh.PRINCIPAL_ID === userId) ||
+                (sh.PRINCIPAL_TYPE === 'GROUP' && groups.includes(sh.PRINCIPAL_ID as string))),
+          );
+        });
       else if (s.includes('WHERE R.OWNER_ID = ? OR S.CREATED_BY = ?'))
         rows = rows.filter(
           (x) =>
