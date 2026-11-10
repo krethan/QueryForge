@@ -19,7 +19,7 @@ await page.getByLabel('Username').fill('demo');
 await page.getByLabel('Password', { exact: true }).fill('demo-password-123');
 await shot('01-login');
 await page.getByRole('button', { name: /sign in/i }).click();
-await page.getByText('Open Orders by Region').first().waitFor();
+await page.getByRole('heading', { name: 'Open Orders by Region' }).first().waitFor();
 // run two reports so tiles show last-run details
 for (const name of ['Open Orders by Region', 'Customer Credit Limits']) {
   await page.goto(`${base}/`);

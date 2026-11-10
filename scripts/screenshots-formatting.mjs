@@ -14,7 +14,7 @@ await page.goto(`${base}/login`);
 await page.getByLabel('Username').fill('demo');
 await page.getByLabel('Password', { exact: true }).fill('demo-password-123');
 await page.getByRole('button', { name: /sign in/i }).click();
-await page.getByText('Open Orders by Region').first().waitFor();
+await page.getByRole('heading', { name: 'Open Orders by Region' }).first().waitFor();
 const csrf = () =>
   page
     .context()

@@ -22,6 +22,8 @@ export class FakeMetadataDb implements MetadataDb {
   folders = new Map<string, Row>();
   /** key `${userId}|${reportId}` */
   reportPrefs = new Map<string, Row>();
+  /** key `${userId}|${reportId}` */
+  tileOrder = new Map<string, Row>();
   statements: { sql: string; params: P }[] = [];
   private clock = 0;
   failNext?: Error;
@@ -293,6 +295,16 @@ export class FakeMetadataDb implements MetadataDb {
       return (f && f.OWNER_ID === params[1] ? [{ ...f }] : []) as T[];
     }
     if (
+      /^SELECT REPORT_ID, TILE_POS FROM \w+\.QF_TILE_ORDER WHERE USER_ID = \? ORDER BY TILE_POS$/.test(
+        s,
+      )
+    ) {
+      return [...this.tileOrder.values()]
+        .filter((t) => t.USER_ID === params[0])
+        .sort((a, b) => Number(a.TILE_POS) - Number(b.TILE_POS))
+        .map((t) => ({ ...t })) as T[];
+    }
+    if (
       /^SELECT REPORT_ID, FOLDER_ID, IS_FAVORITE FROM \w+\.QF_REPORT_PREFS WHERE USER_ID = \?$/.test(
         s,
       )
@@ -398,6 +410,7 @@ export class FakeMetadataDb implements MetadataDb {
       for (const e of this.executions.values()) if (e.REPORT_ID === params[0]) e.REPORT_ID = null; // ON DELETE SET NULL
       for (const [k, v] of this.reportPrefs)
         if (v.REPORT_ID === params[0]) this.reportPrefs.delete(k); // ON DELETE CASCADE
+      for (const [k, v] of this.tileOrder) if (v.REPORT_ID === params[0]) this.tileOrder.delete(k); // ON DELETE CASCADE
       return 1;
     }
     if (s.startsWith('INSERT INTO') && s.includes('.QF_EXECUTIONS')) {
@@ -745,6 +758,34 @@ export class FakeMetadataDb implements MetadataDb {
       });
       return 1;
     }
+    if (/^DELETE FROM \w+\.QF_TILE_ORDER WHERE USER_ID = \?$/.test(s)) {
+      let n = 0;
+      for (const [k, v] of this.tileOrder)
+        if (v.USER_ID === params[0]) {
+          this.tileOrder.delete(k);
+          n++;
+        }
+      return n;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_TILE_ORDER \(USER_ID, REPORT_ID, TILE_POS, UPDATED_AT\) VALUES \(\?, \?, \?, /.test(
+        s,
+      )
+    ) {
+      const [userId, reportId, pos] = params;
+      if (this.tileOrder.has(`${userId}|${reportId}`))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      if (!this.users.has(String(userId)) || !this.reports.has(String(reportId)))
+        throw new DbError('Foreign key violation.', '23503', -530);
+      if (typeof pos !== 'number' || pos < 0) throw new DbError('Check constraint.', '23513', -545);
+      this.tileOrder.set(`${userId}|${reportId}`, {
+        USER_ID: userId,
+        REPORT_ID: reportId,
+        TILE_POS: pos,
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
     throw new Error(`FakeMetadataDb: unsupported update ${s}`);
   }
 
@@ -767,6 +808,7 @@ export class FakeMetadataDb implements MetadataDb {
       locks: new Map([...this.locks].map(([k, v]) => [k, { ...v }])),
       folders: new Map([...this.folders].map(([k, v]) => [k, { ...v }])),
       reportPrefs: new Map([...this.reportPrefs].map(([k, v]) => [k, { ...v }])),
+      tileOrder: new Map([...this.tileOrder].map(([k, v]) => [k, { ...v }])),
     };
     try {
       return await fn(this);
@@ -781,6 +823,7 @@ export class FakeMetadataDb implements MetadataDb {
       this.locks = snapshot.locks;
       this.folders = snapshot.folders;
       this.reportPrefs = snapshot.reportPrefs;
+      this.tileOrder = snapshot.tileOrder;
       throw e;
     }
   }
