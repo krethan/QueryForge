@@ -173,6 +173,29 @@ export const api = {
     json<{ folder: Folder }>('PUT', `/folders/${id}`, { name }).then((r) => r.folder),
   /** Deletes the folder; its reports become Unfiled (reports are never deleted). */
   deleteFolder: (id: string) => json<{ moved: number }>('DELETE', `/folders/${id}`),
+  /** Who a folder is shared with (owner, or admin read-only). */
+  getFolderShares: (id: string) =>
+    json<{ shares: Share[] }>('GET', `/folders/${id}/shares`).then((r) => r.shares),
+  /** Replace a folder's shares (owner only). Sharing a folder never shares its reports. */
+  putFolderShares: (id: string, shares: Share[]) =>
+    json<{ shares: Share[] }>('PUT', `/folders/${id}/shares`, {
+      shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
+    }).then((r) => r.shares),
+  /** Put a report you can see into a folder you can edit. */
+  addToFolder: (folderId: string, reportId: string) =>
+    json<{ folder: Folder }>('POST', `/folders/${folderId}/reports`, { reportId }).then(
+      (r) => r.folder,
+    ),
+  /** Take a report out of a folder you can edit, for everyone (the report is not deleted). */
+  removeFromFolder: (folderId: string, reportId: string) =>
+    json<{ folder: Folder }>('DELETE', `/folders/${folderId}/reports/${reportId}`).then(
+      (r) => r.folder,
+    ),
+  /** Save a shared folder's order; reports you cannot see keep their place. */
+  saveFolderOrder: (folderId: string, reportIds: string[]) =>
+    json<{ folder: Folder }>('PUT', `/folders/${folderId}/order`, { reportIds }).then(
+      (r) => r.folder,
+    ),
   /** Change the caller's own folder and/or star for a report. */
   setReportPrefs: (id: string, change: Partial<ReportPrefs>) =>
     json<{ prefs: ReportPrefs }>('PUT', `/reports/${id}/prefs`, change).then((r) => r.prefs),

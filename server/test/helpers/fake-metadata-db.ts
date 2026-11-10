@@ -24,6 +24,10 @@ export class FakeMetadataDb implements MetadataDb {
   reportPrefs = new Map<string, Row>();
   /** key `${userId}|${reportId}` */
   tileOrder = new Map<string, Row>();
+  folderShares: Row[] = [];
+  /** key `${folderId}|${reportId}` */
+  folderReports = new Map<string, Row>();
+  folderShareAudit: Row[] = [];
   statements: { sql: string; params: P }[] = [];
   private clock = 0;
   failNext?: Error;
@@ -69,6 +73,227 @@ export class FakeMetadataDb implements MetadataDb {
     });
   }
 
+  removeGroup(userId: string, group: string) {
+    this.userGroups.delete(`${userId}|${group}`);
+  }
+
+  private folderQuery(s: string, params: P): Row[] | undefined {
+    if (
+      /^SELECT FOLDER_ID, OWNER_ID, FOLDER_NAME, CREATED_AT, UPDATED_AT FROM \w+\.QF_FOLDERS WHERE FOLDER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const f = this.folders.get(String(params[0]));
+      return f ? [{ ...f }] : [];
+    }
+    if (
+      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \?$/.test(
+        s,
+      )
+    )
+      return this.folderShares.filter((x) => x.FOLDER_ID === params[0]).map((x) => ({ ...x }));
+    if (/^SELECT DISTINCT FOLDER_ID FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID IN \(/.test(s))
+      return [
+        ...new Set(
+          this.folderShares
+            .filter((x) => params.includes(x.FOLDER_ID as string))
+            .map((x) => x.FOLDER_ID),
+        ),
+      ].map((id) => ({ FOLDER_ID: id }));
+    if (
+      /FROM \w+\.QF_FOLDERS F JOIN \w+\.QF_FOLDER_SHARES S ON S\.FOLDER_ID = F\.FOLDER_ID JOIN \w+\.QF_USERS U ON U\.USER_ID = F\.OWNER_ID WHERE F\.OWNER_ID <> \?/.test(
+        s,
+      )
+    ) {
+      const admin = /WHERE F\.OWNER_ID <> \? ORDER BY/.test(s);
+      const [notOwner, uid, ...groups] = params;
+      const out: Row[] = [];
+      for (const sh of this.folderShares) {
+        const f = this.folders.get(String(sh.FOLDER_ID));
+        if (!f || f.OWNER_ID === notOwner) continue;
+        const match =
+          admin ||
+          (sh.PRINCIPAL_TYPE === 'USER' && sh.PRINCIPAL_ID === uid) ||
+          (sh.PRINCIPAL_TYPE === 'GROUP' && groups.includes(sh.PRINCIPAL_ID as string));
+        if (!match) continue;
+        out.push({
+          ...f,
+          SHARE_ROLE: sh.SHARE_ROLE,
+          OWNER_NAME: this.users.get(String(f.OWNER_ID))?.DISPLAY_NAME,
+        });
+      }
+      return out.sort((a, b) => String(a.FOLDER_NAME_KEY).localeCompare(String(b.FOLDER_NAME_KEY)));
+    }
+    if (
+      /FROM \w+\.QF_FOLDER_REPORTS I JOIN \w+\.QF_REPORTS R ON R\.REPORT_ID = I\.REPORT_ID WHERE I\.FOLDER_ID IN \(/.test(
+        s,
+      )
+    )
+      return [...this.folderReports.values()]
+        .filter(
+          (i) => params.includes(i.FOLDER_ID as string) && this.reports.has(String(i.REPORT_ID)),
+        )
+        .map((i) => ({
+          ...i,
+          REPORT_NAME_KEY: this.reports.get(String(i.REPORT_ID))!.REPORT_NAME_KEY,
+        }));
+    if (
+      /FROM \w+\.QF_REPORT_PREFS P JOIN \w+\.QF_REPORTS R ON R\.REPORT_ID = P\.REPORT_ID WHERE P\.FOLDER_ID IN \(/.test(
+        s,
+      )
+    )
+      return [...this.reportPrefs.values()]
+        .filter(
+          (p) =>
+            p.FOLDER_ID !== null &&
+            params.includes(p.FOLDER_ID as string) &&
+            this.reports.has(String(p.REPORT_ID)),
+        )
+        .map((p) => ({
+          ...p,
+          REPORT_NAME_KEY: this.reports.get(String(p.REPORT_ID))!.REPORT_NAME_KEY,
+        }));
+    if (
+      /^SELECT REPORT_ID FROM \w+\.QF_FOLDER_REPORTS WHERE FOLDER_ID = \? AND REPORT_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const i = this.folderReports.get(`${params[0]}|${params[1]}`);
+      return i ? [{ REPORT_ID: i.REPORT_ID }] : [];
+    }
+    if (/FROM \w+\.QF_FOLDER_SHARES S LEFT JOIN \w+\.QF_USERS U .* WHERE S\.FOLDER_ID = \?/.test(s))
+      return this.folderShares
+        .filter((x) => x.FOLDER_ID === params[0])
+        .sort((a, b) =>
+          `${a.PRINCIPAL_TYPE}:${a.PRINCIPAL_ID}`.localeCompare(
+            `${b.PRINCIPAL_TYPE}:${b.PRINCIPAL_ID}`,
+          ),
+        )
+        .map((x) => ({
+          ...x,
+          DISPLAY_NAME:
+            x.PRINCIPAL_TYPE === 'USER'
+              ? (this.users.get(String(x.PRINCIPAL_ID))?.DISPLAY_NAME ?? null)
+              : null,
+        }));
+    if (
+      /FROM \w+\.QF_FOLDER_SHARE_AUDIT A .* WHERE A\.FOLDER_ID = \? ORDER BY A\.OCCURRED_AT DESC/.test(
+        s,
+      )
+    )
+      return this.folderShareAudit
+        .filter((a) => a.FOLDER_ID === params[0])
+        .sort((a, b) => String(b.OCCURRED_AT).localeCompare(String(a.OCCURRED_AT)))
+        .map((a) => ({
+          ...a,
+          ACTOR_NAME: this.users.get(String(a.ACTOR_ID))?.DISPLAY_NAME ?? null,
+          PRINCIPAL_NAME:
+            a.PRINCIPAL_TYPE === 'USER'
+              ? (this.users.get(String(a.PRINCIPAL_ID))?.DISPLAY_NAME ?? null)
+              : null,
+        }));
+    return undefined;
+  }
+
+  private folderUpdate(s: string, params: P): number | undefined {
+    if (
+      /^INSERT INTO \w+\.QF_FOLDER_REPORTS \(FOLDER_ID, REPORT_ID, ITEM_POS, ADDED_BY, ADDED_AT\) VALUES \(\?, \?, (NULL|\?), \?, /.test(
+        s,
+      )
+    ) {
+      const nullPos = /VALUES \(\?, \?, NULL,/.test(s);
+      const [folderId, reportId, ...rest] = params;
+      const pos = nullPos ? null : rest[0];
+      const by = nullPos ? rest[0] : rest[1];
+      if (this.folderReports.has(`${folderId}|${reportId}`))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      if (!this.folders.has(String(folderId)) || !this.reports.has(String(reportId)))
+        throw new DbError('Foreign key violation.', '23503', -530);
+      if (pos !== null && (typeof pos !== 'number' || pos < 0))
+        throw new DbError('Check constraint.', '23513', -545);
+      this.folderReports.set(`${folderId}|${reportId}`, {
+        FOLDER_ID: folderId,
+        REPORT_ID: reportId,
+        ITEM_POS: pos,
+        ADDED_BY: by,
+        ADDED_AT: this.now(),
+      });
+      return 1;
+    }
+    if (
+      /^UPDATE \w+\.QF_FOLDER_REPORTS SET ITEM_POS = \? WHERE FOLDER_ID = \? AND REPORT_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const [pos, folderId, reportId] = params;
+      const i = this.folderReports.get(`${folderId}|${reportId}`);
+      if (!i) return 0;
+      if (typeof pos !== 'number' || pos < 0) throw new DbError('Check constraint.', '23513', -545);
+      i.ITEM_POS = pos;
+      return 1;
+    }
+    if (/^DELETE FROM \w+\.QF_FOLDER_REPORTS WHERE FOLDER_ID = \? AND REPORT_ID = \?$/.test(s))
+      return this.folderReports.delete(`${params[0]}|${params[1]}`) ? 1 : 0;
+    if (/^DELETE FROM \w+\.QF_FOLDER_REPORTS WHERE FOLDER_ID = \?$/.test(s)) {
+      let n = 0;
+      for (const [k, v] of this.folderReports)
+        if (v.FOLDER_ID === params[0]) {
+          this.folderReports.delete(k);
+          n++;
+        }
+      return n;
+    }
+    if (/^DELETE FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \?$/.test(s)) {
+      const before = this.folderShares.length;
+      this.folderShares = this.folderShares.filter((x) => x.FOLDER_ID !== params[0]);
+      return before - this.folderShares.length;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_FOLDER_SHARES \(FOLDER_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, CREATED_BY, CREATED_AT\)/.test(
+        s,
+      )
+    ) {
+      const [folderId, type, id, role, by] = params;
+      if (!this.folders.has(String(folderId)))
+        throw new DbError('Foreign key violation.', '23503', -530);
+      if (
+        this.folderShares.some(
+          (x) => x.FOLDER_ID === folderId && x.PRINCIPAL_TYPE === type && x.PRINCIPAL_ID === id,
+        )
+      )
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      this.folderShares.push({
+        FOLDER_ID: folderId,
+        PRINCIPAL_TYPE: type,
+        PRINCIPAL_ID: id,
+        SHARE_ROLE: role,
+        CREATED_BY: by,
+        CREATED_AT: this.now(),
+      });
+      return 1;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_FOLDER_SHARE_AUDIT \(AUDIT_ID, FOLDER_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT\)/.test(
+        s,
+      )
+    ) {
+      const [id, folderId, action, type, pid, oldRole, newRole, actor] = params;
+      this.folderShareAudit.push({
+        AUDIT_ID: id,
+        FOLDER_ID: folderId,
+        ACTION: action,
+        PRINCIPAL_TYPE: type,
+        PRINCIPAL_ID: pid,
+        OLD_ROLE: oldRole,
+        NEW_ROLE: newRole,
+        ACTOR_ID: actor,
+        OCCURRED_AT: this.now(),
+      });
+      return 1;
+    }
+    return undefined;
+  }
+
   addGroup(userId: string, group: string, source = 'LOCAL') {
     this.userGroups.set(`${userId}|${group}`, {
       USER_ID: userId,
@@ -90,6 +315,8 @@ export class FakeMetadataDb implements MetadataDb {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
     if (s.startsWith('SELECT 1 AS OK')) return [{ OK: 1 }] as T[];
+    const folderRows = this.folderQuery(s, params);
+    if (folderRows) return folderRows as T[];
     if (/FROM \w+\.QF_USERS WHERE USERNAME = \?/.test(s)) {
       const u = [...this.users.values()].find((x) => x.USERNAME === params[0]);
       return (u ? [u] : []) as T[];
@@ -327,6 +554,8 @@ export class FakeMetadataDb implements MetadataDb {
   async update(sql: string, params: P = []): Promise<number> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
+    const folderN = this.folderUpdate(s, params);
+    if (folderN !== undefined) return folderN;
     if (s.startsWith('INSERT INTO') && s.includes('.QF_REPORTS')) {
       const [id, owner, name, key, desc, cat, text, pjson, bdef, cdef] = params;
       if ([...this.reports.values()].some((r) => r.OWNER_ID === owner && r.REPORT_NAME_KEY === key))
@@ -411,6 +640,8 @@ export class FakeMetadataDb implements MetadataDb {
       for (const [k, v] of this.reportPrefs)
         if (v.REPORT_ID === params[0]) this.reportPrefs.delete(k); // ON DELETE CASCADE
       for (const [k, v] of this.tileOrder) if (v.REPORT_ID === params[0]) this.tileOrder.delete(k); // ON DELETE CASCADE
+      for (const [k, v] of this.folderReports)
+        if (v.REPORT_ID === params[0]) this.folderReports.delete(k); // ON DELETE CASCADE
       return 1;
     }
     if (s.startsWith('INSERT INTO') && s.includes('.QF_EXECUTIONS')) {
@@ -710,6 +941,9 @@ export class FakeMetadataDb implements MetadataDb {
       if (!f || f.OWNER_ID !== params[1]) return 0;
       this.folders.delete(String(params[0]));
       for (const p of this.reportPrefs.values()) if (p.FOLDER_ID === params[0]) p.FOLDER_ID = null; // ON DELETE SET NULL
+      for (const [k, v] of this.folderReports)
+        if (v.FOLDER_ID === params[0]) this.folderReports.delete(k); // ON DELETE CASCADE
+      this.folderShares = this.folderShares.filter((x) => x.FOLDER_ID !== params[0]); // ON DELETE CASCADE
       return 1;
     }
     if (
@@ -809,6 +1043,9 @@ export class FakeMetadataDb implements MetadataDb {
       folders: new Map([...this.folders].map(([k, v]) => [k, { ...v }])),
       reportPrefs: new Map([...this.reportPrefs].map(([k, v]) => [k, { ...v }])),
       tileOrder: new Map([...this.tileOrder].map(([k, v]) => [k, { ...v }])),
+      folderShares: this.folderShares.map((x) => ({ ...x })),
+      folderReports: new Map([...this.folderReports].map(([k, v]) => [k, { ...v }])),
+      folderShareAudit: this.folderShareAudit.map((x) => ({ ...x })),
     };
     try {
       return await fn(this);
@@ -824,6 +1061,9 @@ export class FakeMetadataDb implements MetadataDb {
       this.folders = snapshot.folders;
       this.reportPrefs = snapshot.reportPrefs;
       this.tileOrder = snapshot.tileOrder;
+      this.folderShares = snapshot.folderShares;
+      this.folderReports = snapshot.folderReports;
+      this.folderShareAudit = snapshot.folderShareAudit;
       throw e;
     }
   }

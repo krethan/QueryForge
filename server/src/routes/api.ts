@@ -45,6 +45,13 @@ import {
 } from '../reports/formatting.js';
 import { folderInputSchema, type FolderRepository } from '../reports/folders.js';
 import {
+  folderAddInputSchema,
+  folderOrderInputSchema,
+  mergeVisibleOrder,
+  type FolderAccessService,
+  type FolderMember,
+} from '../sharing/folder-access.js';
+import {
   applyTileOrder,
   tileOrderInputSchema,
   type TileOrderRepository,
@@ -113,6 +120,7 @@ export interface ApiDeps {
   groups: GroupRepository;
   schedules: ScheduleRepository;
   folders: FolderRepository;
+  folderAccess: FolderAccessService;
   tileOrder: TileOrderRepository;
   scheduler: Scheduler;
   mailer?: Mailer;
@@ -1153,23 +1161,58 @@ export function apiRouter(d: ApiDeps): Router {
     }),
   );
 
-  // ---- Per-user folders and favorites. Every query is scoped to the signed-in user. ----
+  // ---- Folders (006) and shared folders (009). ----
+  // Personal filing and favorites are scoped to the signed-in user (FolderRepository). Who may
+  // see or change a folder is decided by FolderAccessService; which reports in it a person sees
+  // is always reduced to the reports they can already see (visibleReports), so sharing a
+  // folder never reveals a report, and a hidden report is never counted or listed.
   const folderId = (req: Request) => {
     const r = uuid.safeParse(req.params.folderId);
     if (!r.success) throw new AppError(404, 'FOLDER_NOT_FOUND', 'Folder not found.');
     return r.data;
   };
+  const visibleIdSet = async (u: Pick<AppUser, 'id' | 'role'>) => {
+    const { owned, shared } = await visibleReports(u);
+    return new Set([...owned, ...shared].map((x) => x.id));
+  };
+  const viewFolders = async (u: Pick<AppUser, 'id' | 'role'>, only?: string) => {
+    let list = await d.folderAccess.listAccessible(u);
+    if (only) list = list.filter((f) => f.id === only);
+    const [members, visible] = await Promise.all([d.folderAccess.members(list), visibleIdSet(u)]);
+    return list.map((f) => ({
+      ...f,
+      reportIds: (members.get(f.id) ?? []).map((m) => m.reportId).filter((id) => visible.has(id)),
+    }));
+  };
+  const oneFolder = async (u: Pick<AppUser, 'id' | 'role'>, id: string) => {
+    const [f] = await viewFolders(u, id);
+    if (!f) throw new AppError(404, 'FOLDER_NOT_FOUND', 'Folder not found.');
+    return f;
+  };
+  /** The report must exist and be visible to the caller, else 404 (never 403: no leak). */
+  const requireVisibleReport = async (u: Pick<AppUser, 'id' | 'role'>, id: string) => {
+    await d.access.require(u, id, 'VIEW');
+  };
   r.get(
     '/folders',
     h(async (req, res) => {
-      res.json({ folders: await d.folders.list(user(req).id) });
+      res.json({ folders: await viewFolders(user(req)) });
     }),
   );
   r.post(
     '/folders',
     h(async (req, res) => {
       const { name } = folderInputSchema.parse(req.body ?? {});
-      res.status(201).json({ folder: await d.folders.create(user(req).id, name) });
+      const f = await d.folders.create(user(req).id, name);
+      res.status(201).json({ folder: await oneFolder(user(req), f.id) });
+    }),
+  );
+  r.get(
+    '/folders/:folderId',
+    h(async (req, res) => {
+      const id = folderId(req);
+      await d.folderAccess.require(user(req), id, 'VIEW');
+      res.json({ folder: await oneFolder(user(req), id) });
     }),
   );
   r.put(
@@ -1177,14 +1220,112 @@ export function apiRouter(d: ApiDeps): Router {
     h(async (req, res) => {
       const id = folderId(req);
       const { name } = folderInputSchema.parse(req.body ?? {});
-      res.json({ folder: await d.folders.rename(user(req).id, id, name) });
+      await d.folderAccess.require(user(req), id, 'OWNER');
+      await d.folders.rename(user(req).id, id, name);
+      res.json({ folder: await oneFolder(user(req), id) });
     }),
   );
   r.delete(
     '/folders/:folderId',
     h(async (req, res) => {
       const id = folderId(req);
+      // Owner only. Shares and shared placements go with the folder; no report is deleted.
+      await d.folderAccess.require(user(req), id, 'OWNER');
       res.json(await d.folders.remove(user(req).id, id));
+    }),
+  );
+  r.get(
+    '/folders/:folderId/shares',
+    h(async (req, res) => {
+      const { folder, access } = await d.folderAccess.require(user(req), folderId(req), 'VIEW');
+      if (access !== 'OWNER' && access !== 'ADMIN')
+        throw new AppError(
+          403,
+          'FORBIDDEN',
+          'Only the folder owner can see who it is shared with.',
+        );
+      res.json({ shares: await d.folderAccess.listShares(folder.id) });
+    }),
+  );
+  r.put(
+    '/folders/:folderId/shares',
+    h(async (req, res) => {
+      const { shares } = sharesInputSchema.parse(req.body);
+      const { folder } = await d.folderAccess.require(user(req), folderId(req), 'OWNER');
+      const out = await d.folderAccess.replaceShares(folder, user(req).id, shares, async (id) =>
+        Boolean(await d.users.findById(id)),
+      );
+      res.json({ shares: out });
+    }),
+  );
+  r.get(
+    '/folders/:folderId/access',
+    h(async (req, res) => {
+      const { folder, access } = await d.folderAccess.require(user(req), folderId(req), 'VIEW');
+      if (access !== 'OWNER' && access !== 'ADMIN')
+        throw new AppError(
+          403,
+          'FORBIDDEN',
+          'Only the folder owner or an admin can view access audit.',
+        );
+      const owner = await d.users.findById(folder.ownerId);
+      const [shares, events] = await Promise.all([
+        d.folderAccess.listShares(folder.id),
+        d.folderAccess.listAudit(folder.id, Number(req.query.limit) || 100),
+      ]);
+      res.json({
+        owner: { id: folder.ownerId, displayName: owner?.displayName ?? folder.ownerId },
+        shares,
+        events,
+      });
+    }),
+  );
+  r.post(
+    '/folders/:folderId/reports',
+    h(async (req, res) => {
+      const { reportId: rid } = folderAddInputSchema.parse(req.body ?? {});
+      const { folder } = await d.folderAccess.require(user(req), folderId(req), 'EDIT');
+      // An editor can only place reports they can see themselves.
+      await requireVisibleReport(user(req), rid);
+      await d.folderAccess.addReport(folder.id, rid, user(req).id);
+      res.json({ folder: await oneFolder(user(req), folder.id) });
+    }),
+  );
+  r.delete(
+    '/folders/:folderId/reports/:id',
+    h(async (req, res) => {
+      const rid = reportId(req);
+      const { folder } = await d.folderAccess.require(user(req), folderId(req), 'EDIT');
+      // Nobody can act on (or learn about) a report they cannot see.
+      await requireVisibleReport(user(req), rid);
+      await d.folderAccess.removeReport(folder, rid);
+      res.json({ folder: await oneFolder(user(req), folder.id) });
+    }),
+  );
+  r.put(
+    '/folders/:folderId/order',
+    h(async (req, res) => {
+      const { reportIds } = folderOrderInputSchema.parse(req.body ?? {});
+      const { folder } = await d.folderAccess.require(user(req), folderId(req), 'EDIT');
+      const members: FolderMember[] = (await d.folderAccess.members([folder])).get(folder.id) ?? [];
+      const visible = await visibleIdSet(user(req));
+      const visibleMembers = new Set(
+        members.map((m) => m.reportId).filter((id) => visible.has(id)),
+      );
+      // Reports the caller cannot see keep their place; ids that are not visible members of
+      // this folder are silently ignored so the response does not reveal whether they exist.
+      const merged = mergeVisibleOrder(
+        members.map((m) => m.reportId),
+        visibleMembers,
+        reportIds.filter((id) => visibleMembers.has(id)),
+      );
+      const byId = new Map(members.map((m) => [m.reportId, m]));
+      await d.folderAccess.saveOrder(
+        folder.id,
+        merged.map((id) => byId.get(id)!),
+        user(req).id,
+      );
+      res.json({ folder: await oneFolder(user(req), folder.id) });
     }),
   );
   const prefSchema = z
@@ -1198,7 +1339,12 @@ export function apiRouter(d: ApiDeps): Router {
       const change = prefSchema.parse(req.body ?? {});
       // Anyone who can see a report may file or star it for themselves; nobody else's view changes.
       await d.access.require(user(req), id, 'VIEW');
-      res.json({ prefs: await d.folders.setPref(user(req).id, id, change) });
+      const prefs = await d.folders.setPref(user(req).id, id, change);
+      // "Move to folder" puts the report in exactly one of the caller's own folders (or none),
+      // so it also leaves any of their own shared folders it had been placed in.
+      if (change.folderId !== undefined)
+        await d.folderAccess.removeFromOwnFoldersExcept(user(req).id, id, change.folderId);
+      res.json({ prefs });
     }),
   );
   /**
