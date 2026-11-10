@@ -134,6 +134,11 @@ export interface Report {
   folderId?: string | null;
   /** Whether the viewing user starred this report (GET /reports only). */
   favorite?: boolean;
+  /**
+   * The viewing user's saved dashboard tile position (0 = first), or null when they have not
+   * placed this report yet (GET /reports only; migration 008).
+   */
+  tilePos?: number | null;
 }
 
 /** A personal report folder (migration 006). */

@@ -453,6 +453,38 @@ Both tables are on the protected-objects list, so reporting SQL cannot read them
 routes have only been tested against the in-memory fake metadata database. They have not been run on a
 real IBM i or Db2 for i yet.
 
+## Rearranging dashboard tiles
+
+The dashboard's **Sort by** list starts on **My order**, each user's own tile order:
+
+- **Drag a tile** onto another tile to move it there (it lands before or after the target, depending on
+  which half you drop on). From the keyboard, focus the tile's drag handle and use the arrow keys
+  (**Home**/**End** move it to the start or end). A screen-reader announcement confirms each move.
+- Tiles move within their section (Favorites, My reports, Shared with me, or a folder). The dashboard keeps
+  one order across all of them, so a move in one section never shuffles tiles outside it.
+- The order is saved on the server straight away and comes back after a reload or on another browser.
+  **Reset order** forgets it and returns to name order.
+- With no saved order, My order is name order. New reports and reports newly shared with you appear after
+  the tiles you have arranged, in name order, until you move them.
+- Rearranging is turned off while a search is active (the saved order would otherwise lose the hidden
+  tiles) and under the other sort options.
+
+The order belongs to the viewing user, like folders and favorites. The server only stores or applies
+positions for reports the user can see right now (own, shared directly or through a group, or every report
+for a global admin). IDs for other reports are dropped without saying whether they exist. If a share is
+revoked, that report's position is ignored at once and removed the next time the user saves an order. If
+it is shared again, it comes back as a new tile at the end.
+
+API: `GET /api/reports?sort=custom` returns tiles in the user's order, and `GET /api/reports` adds
+`tilePos` (0-based, or `null` when not placed) to each report. Use `GET/PUT/DELETE /api/dashboard/tile-order`
+to read, replace (`{ reportIds: uuid[] }`, unique, at most 2000) or clear the order.
+
+Storage is migration `008_dashboard_tile_order.sql`, which only adds the table `QF_TILE_ORDER`
+(USER_ID, REPORT_ID, TILE_POS, UPDATED_AT). It has primary key `(USER_ID, REPORT_ID)` and a `TILE_POS >= 0`
+check, and its foreign keys to `QF_USERS` and `QF_REPORTS` use ON DELETE CASCADE. Saving replaces the
+user's rows in one transaction. The table is on the protected-objects list. As with 006, this has only been
+tested against the in-memory fake metadata database, not on a real IBM i.
+
 ## Security model
 
 - Session JWT in HttpOnly SameSite=Strict cookie; double-submit CSRF token + Origin check; login lockout.
@@ -499,8 +531,12 @@ Administrators inherit read/Editor-equivalent access to every report without an 
   drilled automatically; an empty (NULL) value mapped to a target parameter falls back
   to that parameter's default; ad-hoc drill runs are not linked to the report in history.
 
-- Folders and favorites: there is no drag-and-drop or bulk move (one report at a time), no nested
-  folders, and no folder sharing. Migration 006 has not been applied to a real Db2 for i.
+- Folders and favorites: there is no bulk move (one report at a time) and no dragging a tile into a
+  folder, no nested folders, and no folder sharing. Migration 006 has not been applied to a real Db2 for i.
+- Tile order: tiles can only be dragged within their own section, not into another section or
+  folder. Drag and drop uses the browser's native HTML drag events, which most touch browsers do not
+  fire, so touch-only devices cannot rearrange tiles yet (the handle's arrow-key controls need a keyboard). Rearranging is off while searching.
+  Migration 008 has not been applied to a real Db2 for i.
 - Conditional formatting has not been tested on a real IBM i.
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
   `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).

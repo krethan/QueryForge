@@ -44,6 +44,11 @@ import {
   pivotExportFormatting,
 } from '../reports/formatting.js';
 import { folderInputSchema, type FolderRepository } from '../reports/folders.js';
+import {
+  applyTileOrder,
+  tileOrderInputSchema,
+  type TileOrderRepository,
+} from '../reports/tile-order.js';
 import type { HistoryRepository } from '../history/history.js';
 import {
   reportInputSchema,
@@ -108,6 +113,7 @@ export interface ApiDeps {
   groups: GroupRepository;
   schedules: ScheduleRepository;
   folders: FolderRepository;
+  tileOrder: TileOrderRepository;
   scheduler: Scheduler;
   mailer?: Mailer;
   oidc?: OidcProvider;
@@ -1040,9 +1046,36 @@ export function apiRouter(d: ApiDeps): Router {
       throw new AppError(400, 'SQL_TOO_LONG', 'Query is too long.');
   };
 
+  /**
+   * Every report the user can see on the dashboard: their own, plus reports shared with them
+   * (directly or through a group), or every other report for a global ADMIN. This is the
+   * same owner/share filtering AccessService applies to a single report.
+   */
+  const visibleReports = async (
+    u: { id: string; role: string },
+    opts: { search?: string; category?: string; sort?: SortKey } = {},
+  ) => {
+    const owned = await d.reports.list(u.id, opts);
+    const needle = opts.search?.trim().toUpperCase();
+    const category = opts.category?.trim();
+    const shared = (
+      u.role === 'ADMIN'
+        ? (await d.reports.listAdmin()).filter((report) => report.ownerId !== u.id)
+        : await d.reports.listShared(u.id, await d.groups.forUser(u.id))
+    ).filter(
+      (x) =>
+        (!needle || x.name.toUpperCase().includes(needle)) &&
+        (!category || x.category === category),
+    );
+    return { owned, shared };
+  };
+
   r.get(
     '/reports',
     h(async (req, res) => {
+      // 'custom' is the viewing user's own dashboard tile order (migration 008); reports
+      // without a saved position follow in name order, so no saved order = name order.
+      const custom = req.query.sort === 'custom';
       const sort = (['name', 'created', 'lastRun', 'updated'] as const).includes(
         req.query.sort as SortKey,
       )
@@ -1052,29 +1085,71 @@ export function apiRouter(d: ApiDeps): Router {
         typeof req.query.search === 'string' ? req.query.search.slice(0, 128) : undefined;
       const category =
         typeof req.query.category === 'string' ? req.query.category.slice(0, 128) : undefined;
-      const owned = await d.reports.list(user(req).id, { search, category, sort });
-      const groups = await d.groups.forUser(user(req).id);
-      const needle = search?.trim().toUpperCase();
-      const shared = (
-        user(req).role === 'ADMIN'
-          ? (await d.reports.listAdmin()).filter((report) => report.ownerId !== user(req).id)
-          : await d.reports.listShared(user(req).id, groups)
-      ).filter(
-        (x) =>
-          (!needle || x.name.toUpperCase().includes(needle)) &&
-          (!category?.trim() || x.category === category.trim()),
-      );
+      let { owned, shared } = await visibleReports(user(req), { search, category, sort });
       // Folders and favorites are the viewing user's own (migration 006).
       const prefs = await d.folders.prefs(user(req).id);
+      // Saved positions are only ever looked up for reports already authorised above, so an
+      // order entry for a report the user lost access to is ignored, never shown.
+      const positions = await d.tileOrder.positions(user(req).id);
+      const visibleIds = new Set([...owned, ...shared].map((x) => x.id));
+      const rank = new Map(
+        [...positions]
+          .filter(([id]) => visibleIds.has(id))
+          .sort((a, b) => a[1] - b[1])
+          .map(([id], i) => [id, i]),
+      );
+      if (custom) {
+        owned = applyTileOrder(owned, rank);
+        shared = applyTileOrder(shared, rank);
+      }
       const withPref = <R extends { id: string }>(x: R) => ({
         ...x,
         folderId: prefs.get(x.id)?.folderId ?? null,
         favorite: prefs.get(x.id)?.favorite ?? false,
+        tilePos: rank.get(x.id) ?? null,
       });
       res.json({
         reports: owned.map((x) => withPref({ ...x, access: 'OWNER' as const })),
         shared: shared.map(withPref),
       });
+    }),
+  );
+
+  // ---- Per-user dashboard tile order (migration 008). Scoped to the signed-in user. ----
+  const savedTileOrder = async (u: { id: string; role: string }) => {
+    const { owned, shared } = await visibleReports(u);
+    const visible = new Set([...owned, ...shared].map((x) => x.id));
+    const positions = await d.tileOrder.positions(u.id);
+    return [...positions]
+      .filter(([id]) => visible.has(id))
+      .sort((a, b) => a[1] - b[1])
+      .map(([id]) => id);
+  };
+  r.get(
+    '/dashboard/tile-order',
+    h(async (req, res) => {
+      res.json({ reportIds: await savedTileOrder(user(req)) });
+    }),
+  );
+  r.put(
+    '/dashboard/tile-order',
+    h(async (req, res) => {
+      const { reportIds } = tileOrderInputSchema.parse(req.body ?? {});
+      const { owned, shared } = await visibleReports(user(req));
+      const visible = new Set([...owned, ...shared].map((x) => x.id));
+      // Only reports the user can see are stored. Anything else (deleted, never shared,
+      // or revoked) is silently dropped, so the response does not reveal whether it exists.
+      // Replacing the whole list also prunes rows for reports the user has lost access to.
+      const kept = reportIds.filter((id) => visible.has(id));
+      await d.tileOrder.replace(user(req).id, kept);
+      res.json({ reportIds: kept });
+    }),
+  );
+  r.delete(
+    '/dashboard/tile-order',
+    h(async (req, res) => {
+      await d.tileOrder.clear(user(req).id);
+      res.json({ reportIds: [] });
     }),
   );
 

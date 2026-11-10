@@ -176,6 +176,17 @@ export const api = {
   /** Change the caller's own folder and/or star for a report. */
   setReportPrefs: (id: string, change: Partial<ReportPrefs>) =>
     json<{ prefs: ReportPrefs }>('PUT', `/reports/${id}/prefs`, change).then((r) => r.prefs),
+  /**
+   * Save the caller's dashboard tile order. The server keeps only reports the caller can see
+   * and returns the stored list.
+   */
+  saveTileOrder: (reportIds: string[]) =>
+    json<{ reportIds: string[] }>('PUT', '/dashboard/tile-order', { reportIds }).then(
+      (r) => r.reportIds,
+    ),
+  /** Forget the caller's tile order (back to the default name order). */
+  resetTileOrder: () =>
+    json<{ reportIds: string[] }>('DELETE', '/dashboard/tile-order').then((r) => r.reportIds),
   getReport: (id: string) =>
     json<{ report: Report; builder?: Report['builder']; drill?: DrillInfo }>(
       'GET',

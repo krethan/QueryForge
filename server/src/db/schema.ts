@@ -11,6 +11,7 @@ export const T = {
   shareAudit: 'QF_SHARE_AUDIT',
   folders: 'QF_FOLDERS',
   reportPrefs: 'QF_REPORT_PREFS',
+  tileOrder: 'QF_TILE_ORDER',
 } as const;
 
 /** Unqualified metadata object names that reporting SQL may never mention. */

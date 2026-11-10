@@ -12,10 +12,12 @@ import {
 } from '@carbon/react';
 import {
   Add,
+  Draggable,
   Edit,
   Folder as FolderIcon,
   FolderMoveTo,
   Play,
+  Reset,
   Share as ShareIcon,
   Star,
   StarFilled,
@@ -24,13 +26,20 @@ import {
 } from '@carbon/icons-react';
 import { ManageFoldersModal, MoveToFolderModal, UNFILED } from '../components/Folders';
 import { ShareModal } from '../components/ShareModal';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Folder, Report } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { DashboardChart } from '../components/charts/DashboardChart';
 import { encodeDrill } from '../utils/drill';
+import {
+  initialTileOrder,
+  mergeSectionOrder,
+  moveBefore,
+  moveBy,
+  sortByOrder,
+} from '../utils/tileOrder';
 import { formatDateTime, formatDuration, statusLabel, statusTagType } from '../utils/format';
 
 /** Grouped builder reports and reports with a drill target can be drilled from a tile. */
@@ -109,6 +118,7 @@ export function DeleteReportModal({
 function ReportTile({
   r,
   folderName,
+  dragHandle,
   onDelete,
   onShare,
   onStar,
@@ -116,6 +126,8 @@ function ReportTile({
 }: {
   r: Report;
   folderName?: string;
+  /** The drag handle, when the dashboard is in "My order" and may be rearranged. */
+  dragHandle?: React.ReactNode;
   onDelete(r: Report): void;
   onShare(r: Report): void;
   onStar(r: Report): void;
@@ -125,6 +137,7 @@ function ReportTile({
   return (
     <Tile className="qf-tile" data-testid="report-tile">
       <div className="qf-tile__head">
+        {dragHandle}
         <h3>{r.name}</h3>
         <Button
           size="sm"
@@ -226,6 +239,108 @@ function ReportTile({
   );
 }
 
+const REORDER_HELP_ID = 'qf-reorder-help';
+
+/**
+ * A grid of tiles that can be rearranged by dragging a tile (native HTML drag and drop) or,
+ * from the keyboard, by focusing a tile's handle and pressing the arrow keys. Tiles move only
+ * within their own section; the new order of the section is passed to `onReorder`.
+ */
+function SortableTiles({
+  section,
+  items,
+  enabled,
+  onReorder,
+  render,
+}: {
+  section: string;
+  items: Report[];
+  enabled: boolean;
+  onReorder(ids: string[], moved: Report): void;
+  render(r: Report, dragHandle?: React.ReactNode): React.ReactNode;
+}) {
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [over, setOver] = useState<{ id: string; after: boolean } | null>(null);
+  const ids = items.map((r) => r.id);
+  const end = () => {
+    setDragId(null);
+    setOver(null);
+  };
+  return (
+    <div className="qf-tiles" data-section={section}>
+      {items.map((r) => {
+        const cls = ['qf-tile-slot'];
+        if (enabled) cls.push('qf-tile-slot--sortable');
+        if (dragId === r.id) cls.push('qf-tile-slot--dragging');
+        if (over?.id === r.id && dragId && dragId !== r.id)
+          cls.push(over.after ? 'qf-tile-slot--drop-after' : 'qf-tile-slot--drop-before');
+        const handle = enabled ? (
+          <Button
+            size="sm"
+            kind="ghost"
+            hasIconOnly
+            className="qf-drag-handle"
+            iconDescription={`Reorder ${r.name}`}
+            tooltipPosition="right"
+            aria-describedby={REORDER_HELP_ID}
+            renderIcon={Draggable}
+            onKeyDown={(e: React.KeyboardEvent) => {
+              const delta =
+                e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+                  ? -1
+                  : e.key === 'ArrowRight' || e.key === 'ArrowDown'
+                    ? 1
+                    : e.key === 'Home'
+                      ? -ids.length
+                      : e.key === 'End'
+                        ? ids.length
+                        : 0;
+              if (!delta) return;
+              e.preventDefault();
+              const next = moveBy(ids, r.id, delta);
+              if (next !== ids) onReorder(next, r);
+            }}
+          />
+        ) : undefined;
+        return (
+          <div
+            key={r.id}
+            className={cls.join(' ')}
+            data-testid="tile-slot"
+            data-report-id={r.id}
+            draggable={enabled}
+            onDragStart={(e) => {
+              if (!enabled) return;
+              setDragId(r.id);
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', r.id);
+            }}
+            onDragOver={(e) => {
+              if (!enabled || !dragId) return; // only tiles dragged from this section
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              const box = e.currentTarget.getBoundingClientRect();
+              const after = box.width > 0 && e.clientX > box.left + box.width / 2;
+              if (over?.id !== r.id || over.after !== after) setOver({ id: r.id, after });
+            }}
+            onDrop={(e) => {
+              if (!enabled || !dragId) return;
+              e.preventDefault();
+              const moved = items.find((x) => x.id === dragId);
+              const next = moveBefore(ids, dragId, r.id, over?.id === r.id && over.after);
+              end();
+              if (moved && next !== ids) onReorder(next, moved);
+            }}
+            onDragEnd={end}
+          >
+            {render(r, handle)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function useFolders() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [error, setError] = useState<unknown>(null);
@@ -246,7 +361,8 @@ const ALL = '__all__';
 export function DashboardPage() {
   const nav = useNavigate();
   const [search, setSearch] = useState('');
-  const [sort, setSort] = useState('name');
+  /** 'custom' is the user's own saved tile order ("My order"); without one it is name order. */
+  const [sort, setSort] = useState('custom');
   const { reports, shared, error, reload, setError } = useReports(search, sort);
   const { folders, error: folderError, reload: reloadFolders } = useFolders();
   const [toDelete, setToDelete] = useState<Report | null>(null);
@@ -259,9 +375,56 @@ export function DashboardPage() {
   const [local, setLocal] = useState<Record<string, Partial<Report>>>({});
 
   const apply = useCallback((r: Report): Report => ({ ...r, ...local[r.id] }), [local]);
-  const owned = useMemo(() => (reports ?? []).map(apply), [reports, apply]);
-  const sharedR = useMemo(() => shared.map(apply), [shared, apply]);
-  const all = useMemo(() => [...owned, ...sharedR], [owned, sharedR]);
+  /** Optimistic whole-dashboard tile order after a rearrange, until the next reload. */
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [announce, setAnnounce] = useState('');
+  const custom = sort === 'custom';
+  // Saving a partial list would forget the position of every report hidden by the search.
+  const canReorder = custom && !search.trim();
+  useEffect(() => setOrder(null), [reports, shared]);
+  const serverOrder = useMemo(
+    () => initialTileOrder([...(reports ?? []), ...shared]),
+    [reports, shared],
+  );
+  const tileOrder = order ?? serverOrder;
+  const hasSavedOrder =
+    order !== null || [...(reports ?? []), ...shared].some((r) => r.tilePos != null);
+  const ordered = useCallback(
+    (xs: Report[]) => (custom ? sortByOrder(xs, tileOrder) : xs),
+    [custom, tileOrder],
+  );
+  const owned = useMemo(() => ordered((reports ?? []).map(apply)), [reports, apply, ordered]);
+  const sharedR = useMemo(() => ordered(shared.map(apply)), [shared, apply, ordered]);
+  const all = useMemo(() => ordered([...owned, ...sharedR]), [owned, sharedR, ordered]);
+  /** Saves run one after another so the last rearrange always wins. */
+  const saving = useRef<Promise<unknown>>(Promise.resolve());
+  const confirmed = useRef<string[] | null>(null);
+  const reorder = (sectionIds: string[], moved: Report) => {
+    const next = mergeSectionOrder(tileOrder, sectionIds);
+    setOrder(next);
+    setAnnounce(
+      `${moved.name} moved to position ${sectionIds.indexOf(moved.id) + 1} of ${sectionIds.length}.`,
+    );
+    saving.current = saving.current.then(async () => {
+      try {
+        confirmed.current = await api.saveTileOrder(next);
+      } catch (e) {
+        setOrder(confirmed.current);
+        setError(e);
+      }
+    });
+  };
+  const resetOrder = async () => {
+    try {
+      await saving.current;
+      await api.resetTileOrder();
+      confirmed.current = null;
+      setAnnounce('Dashboard order reset.');
+      await reload();
+    } catch (e) {
+      setError(e);
+    }
+  };
   const folderName = useMemo(() => new Map(folders.map((f) => [f.id, f.name])), [folders]);
   // A report filed in a folder that no longer exists counts as Unfiled.
   const folderOf = (r: Report) => (r.folderId && folderName.has(r.folderId) ? r.folderId : null);
@@ -289,15 +452,25 @@ export function DashboardPage() {
       setError(e);
     }
   };
-  const tile = (r: Report, showFolder = true) => (
+  const tile = (r: Report, showFolder = true, dragHandle?: React.ReactNode) => (
     <ReportTile
       key={r.id}
       r={r}
+      dragHandle={dragHandle}
       folderName={showFolder ? (folderName.get(folderOf(r) ?? '') ?? undefined) : undefined}
       onDelete={setToDelete}
       onShare={setToShare}
       onStar={(x) => void star(x)}
       onMove={setToMove}
+    />
+  );
+  const tiles = (id: string, items: Report[], showFolder = true) => (
+    <SortableTiles
+      section={id}
+      items={items}
+      enabled={canReorder && items.length > 1}
+      onReorder={reorder}
+      render={(r, handle) => tile(r, showFolder, handle)}
     />
   );
   const section = (id: string, title: string, items: Report[], showFolder = true) =>
@@ -306,7 +479,7 @@ export function DashboardPage() {
         <h2 id={`${id}-heading`} className="qf-section__title">
           {title} <span className="qf-section__count">({items.length})</span>
         </h2>
-        <div className="qf-tiles">{items.map((r) => tile(r, showFolder))}</div>
+        {tiles(id, items, showFolder)}
       </section>
     );
   const folderMode = grouped || effectiveFilter !== ALL;
@@ -357,6 +530,7 @@ export function DashboardPage() {
           inline={false}
           style={{ minWidth: '12rem' }}
         >
+          <SelectItem value="custom" text="My order" />
           <SelectItem value="name" text="Name" />
           <SelectItem value="lastRun" text="Last run" />
           <SelectItem value="updated" text="Last modified" />
@@ -386,6 +560,23 @@ export function DashboardPage() {
         <Button kind="tertiary" size="lg" renderIcon={FolderIcon} onClick={() => setManage(true)}>
           Manage folders
         </Button>
+      </div>
+      {custom && (
+        <div className="qf-reorder-help">
+          <p id={REORDER_HELP_ID}>
+            {canReorder
+              ? 'Drag a tile to rearrange your dashboard, or focus its handle and use the arrow keys. Your order is saved for you only.'
+              : 'Clear the search to rearrange tiles.'}
+          </p>
+          {hasSavedOrder && (
+            <Button kind="ghost" size="sm" renderIcon={Reset} onClick={() => void resetOrder()}>
+              Reset order
+            </Button>
+          )}
+        </div>
+      )}
+      <div className="cds--visually-hidden" aria-live="polite" data-testid="reorder-status">
+        {announce}
       </div>
       <ErrorNotice error={error ?? folderError} onClose={() => setError(null)} />
       {reports === null ? (
@@ -430,7 +621,7 @@ export function DashboardPage() {
                   My reports
                 </h2>
               )}
-              <div className="qf-tiles">{owned.map((r) => tile(r))}</div>
+              {tiles('mine', owned)}
             </>
           )}
           {!folderMode && sharedR.length > 0 && (
@@ -438,7 +629,7 @@ export function DashboardPage() {
               <h2 id="shared-heading" className="qf-section__title">
                 Shared with me
               </h2>
-              <div className="qf-tiles">{sharedR.map((r) => tile(r))}</div>
+              {tiles('shared', sharedR)}
             </section>
           )}
         </>

@@ -95,6 +95,68 @@ body {
   }
 }
 
+.qf-tile-slot {
+  position: relative;
+  display: flex;
+  min-width: 0;
+
+  > .qf-tile {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.qf-tile-slot--sortable > .qf-tile {
+  cursor: grab;
+}
+
+.qf-tile-slot--dragging {
+  opacity: 0.4;
+}
+
+// Drop indicator: a bar in the grid gap on the side the dragged tile will land.
+.qf-tile-slot--drop-before::before,
+.qf-tile-slot--drop-after::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--cds-focus, #0f62fe);
+}
+
+.qf-tile-slot--drop-before::before {
+  left: -0.625rem;
+}
+
+.qf-tile-slot--drop-after::after {
+  right: -0.625rem;
+}
+
+.qf-tile-slot--drop-before > .qf-tile,
+.qf-tile-slot--drop-after > .qf-tile {
+  outline: 1px dashed var(--cds-focus, #0f62fe);
+}
+
+.qf-tile .qf-drag-handle {
+  cursor: grab;
+  flex: none;
+  margin-left: -0.5rem;
+}
+
+.qf-reorder-help {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-height: 2rem;
+  margin: -0.5rem 0 0.5rem;
+  color: var(--cds-text-helper);
+
+  p {
+    font-size: 0.75rem;
+  }
+}
+
 .qf-empty {
   padding: 3rem 2rem;
   text-align: center;

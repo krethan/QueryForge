@@ -1,4 +1,5 @@
 import { FolderRepository } from './reports/folders.js';
+import { TileOrderRepository } from './reports/tile-order.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import cookieParser from 'cookie-parser';
@@ -45,6 +46,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
   const execution = new ExecutionService(cfg, executor, access, history);
   const schedules = new ScheduleRepository(metadataDb, cfg.metadata.schema);
   const folders = new FolderRepository(metadataDb, cfg.metadata.schema);
+  const tileOrder = new TileOrderRepository(metadataDb, cfg.metadata.schema);
   const pick = <T>(v: T | null | undefined, make: () => T | undefined) =>
     v === null ? undefined : (v ?? make());
   const oidc = pick(o.oidc, () =>
@@ -96,6 +98,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       groups,
       schedules,
       folders,
+      tileOrder,
       scheduler,
       mailer,
       oidc,
@@ -124,6 +127,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     access,
     schedules,
     folders,
+    tileOrder,
     scheduler,
     mailer,
   };
