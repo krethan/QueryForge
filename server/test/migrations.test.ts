@@ -18,8 +18,8 @@ describe('Db2 for i migrations', () => {
     expect(sql).toContain('ON DELETE SET NULL');
     expect(sql).toContain('CLOB');
   });
-  it('applies migrations 1-8 in order (008 adds per-user dashboard tile order)', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  it('applies migrations 1-9 in order (009 adds shared folders)', () => {
+    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(migs[3].statements[0]).toMatch(/ADD COLUMN BUILDER_DEF CLOB\(1M\) CCSID 1208$/);
   });
   it('splits statements without breaking on semicolons in strings or comments', () => {

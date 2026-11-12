@@ -55,7 +55,7 @@ describe('migration 006: folders and favorites', () => {
   const m6 = migs.find((m) => m.version === 6)!;
   const sql = m6.statements.join('\n');
   it('comes after 005 and creates the QF_ tables in the metadata schema', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(sql).toContain('CREATE TABLE QFMETA.QF_FOLDERS');
     expect(sql).toContain('CREATE TABLE QFMETA.QF_REPORT_PREFS');
     expect(sql).not.toContain('{{SCHEMA}}');
@@ -248,7 +248,12 @@ describe('access checks: folders and favorites belong to the viewing user', () =
     await a.send('put', `/api/reports/${r.id}/prefs`).send({ folderId: f.id, favorite: true });
     await a.send('put', `/api/folders/${f.id}`).send({ name: 'Renamed folder' });
     await a.send('delete', `/api/folders/${f.id}`);
-    const mine = db.statements.filter((s) => /QF_FOLDERS|QF_REPORT_PREFS/.test(s.sql));
+    // Personal folder statements are scoped by user. The shared-folder layer (009) looks
+    // folders up by ID and authorises in FolderAccessService; shared-folders.test.ts covers it.
+    const sharedLayer = /QF_FOLDER_SHARES|QF_FOLDER_REPORTS|WHERE FOLDER_ID = \?$|P\.FOLDER_ID IN/;
+    const mine = db.statements.filter(
+      (s) => /QF_FOLDERS|QF_REPORT_PREFS/.test(s.sql) && !sharedLayer.test(s.sql.trim()),
+    );
     expect(mine.length).toBeGreaterThan(5);
     for (const s of mine) {
       expect(s.params).toContain('u-alice');

@@ -141,12 +141,23 @@ export interface Report {
   tilePos?: number | null;
 }
 
-/** A personal report folder (migration 006). */
+/**
+ * A report folder (migration 006), possibly shared (migration 009). The extra fields come
+ * from GET /folders; older callers and tests may leave them out.
+ */
 export interface Folder {
   id: string;
   name: string;
   createdAt: string | null;
   updatedAt: string | null;
+  ownerId?: string;
+  ownerName?: string;
+  /** The caller's role on the folder. ADMIN is editor-equivalent, never the owner. */
+  access?: AccessRole;
+  /** True when the folder is shared with anyone (always true for folders shared with you). */
+  shared?: boolean;
+  /** Reports in the folder that the caller can see, in the folder's order. */
+  reportIds?: string[];
 }
 export interface ReportPrefs {
   folderId: string | null;

@@ -16,13 +16,64 @@ import {
 import { Close, Group, User as UserIcon } from '@carbon/icons-react';
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { Report, Share, UserSummary } from '../api/types';
+import type { Folder, Report, Share, UserSummary } from '../api/types';
 import { ErrorNotice } from './ErrorNotice';
 
 type Option = { key: string; type: 'USER' | 'GROUP'; id: string; label: string };
 
 /** Owner-only dialog: share a report with users or groups as VIEWER or EDITOR (enforced by the server). */
 export function ShareModal({ report, onClose }: { report: Report | null; onClose(): void }) {
+  return (
+    <ShareDialog
+      target={report ? { id: report.id, name: report.name } : null}
+      load={api.getShares}
+      save={api.putShares}
+      note="Viewers can run and export the report. Editors can also change its SQL, parameters and schedules. Only you (the owner) can share or delete it."
+      onClose={onClose}
+    />
+  );
+}
+
+/**
+ * Owner-only dialog: share a folder with users or groups (migration 009). Viewers see the
+ * folder; editors can also add, remove and reorder its reports. Nobody gains access to a
+ * report this way: each person sees only the reports in the folder already shared with them.
+ */
+export function FolderShareModal({
+  folder,
+  onClose,
+}: {
+  folder: Folder | null;
+  onClose(saved?: boolean): void;
+}) {
+  return (
+    <ShareDialog
+      target={folder ? { id: folder.id, name: folder.name } : null}
+      load={api.getFolderShares}
+      save={api.putFolderShares}
+      heading="Share folder"
+      note="Viewers can see the folder. Editors can also add, remove and reorder its reports. Sharing a folder does not share the reports in it: each person sees only the reports they already have access to. Only you (the owner) can share, rename or delete it."
+      onClose={onClose}
+    />
+  );
+}
+
+function ShareDialog({
+  target,
+  load,
+  save: saveShares,
+  heading,
+  note,
+  onClose,
+}: {
+  target: { id: string; name: string } | null;
+  load(id: string): Promise<Share[]>;
+  save(id: string, shares: Share[]): Promise<Share[]>;
+  heading?: string;
+  note: string;
+  onClose(saved?: boolean): void;
+}) {
+  const report = target;
   const [shares, setShares] = useState<Share[] | null>(null);
   const [groups, setGroups] = useState<string[]>([]);
   const [users, setUsers] = useState<UserSummary[]>([]);
@@ -37,7 +88,7 @@ export function ShareModal({ report, onClose }: { report: Report | null; onClose
     setShares(null);
     setError(null);
     setPick(null);
-    Promise.all([api.getShares(report.id), api.groups()])
+    Promise.all([load(report.id), api.groups()])
       .then(([s, g]) => {
         setShares(s);
         setGroups(g);
@@ -46,7 +97,8 @@ export function ShareModal({ report, onClose }: { report: Report | null; onClose
         setError(e);
         setShares([]);
       });
-  }, [report]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report?.id]);
 
   useEffect(() => {
     if (!term.trim()) return setUsers([]);
@@ -83,8 +135,8 @@ export function ShareModal({ report, onClose }: { report: Report | null; onClose
     setBusy(true);
     setError(null);
     try {
-      await api.putShares(report.id, shares);
-      onClose();
+      await saveShares(report.id, shares);
+      onClose(true);
     } catch (e) {
       setError(e);
     } finally {
@@ -95,20 +147,17 @@ export function ShareModal({ report, onClose }: { report: Report | null; onClose
   return (
     <Modal
       open={Boolean(report)}
-      modalHeading={`Share "${report?.name ?? ''}"`}
+      modalHeading={`${heading ?? 'Share'} "${report?.name ?? ''}"`}
       modalLabel="Sharing"
       primaryButtonText={busy ? 'Saving…' : 'Save sharing'}
       secondaryButtonText="Cancel"
       primaryButtonDisabled={busy || !shares}
-      onRequestClose={onClose}
+      onRequestClose={() => onClose()}
       onRequestSubmit={save}
       size="md"
     >
       <Stack gap={5}>
-        <p className="qf-muted">
-          Viewers can run and export the report. Editors can also change its SQL, parameters and
-          schedules. Only you (the owner) can share or delete it.
-        </p>
+        <p className="qf-muted">{note}</p>
         <ErrorNotice error={error} />
         <div className="qf-share-add">
           <ComboBox

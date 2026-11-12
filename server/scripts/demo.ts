@@ -1018,7 +1018,7 @@ async function main() {
 
   const { factory } = fakeFactory(script);
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const { app, access, schedules } = createApp({
+  const { app, access, schedules, folders, folderAccess } = createApp({
     cfg,
     metadataDb,
     jobFactory: factory,
@@ -1102,6 +1102,31 @@ async function main() {
     daily,
     validateCron(daily.cron, daily.timezone, 15)[0],
   );
+
+  // Shared folders (migration 009). Sharing a folder never shares its reports: Sam (finance
+  // group) sees the demo user's "Month-end Pack" but only the report shared with finance.
+  const monthEnd = await folders.create('u-demo', 'Month-end Pack');
+  await folders.setPref('u-demo', created[1].id, { folderId: monthEnd.id });
+  await folders.setPref('u-demo', created[3].id, { folderId: monthEnd.id });
+  await folderAccess.replaceShares(
+    { id: monthEnd.id, ownerId: 'u-demo' },
+    'u-demo',
+    [{ type: 'GROUP', id: 'finance', role: 'VIEWER' }],
+    exists,
+  );
+  // Pat's team folder, shared with the sales group as Editor; the demo user has added a report.
+  const team = await folders.create('u-pat', 'Sales Team');
+  for (const r of patOwned) await folders.setPref('u-pat', r.id, { folderId: team.id });
+  await folderAccess.replaceShares(
+    { id: team.id, ownerId: 'u-pat' },
+    'u-pat',
+    [
+      { type: 'GROUP', id: 'sales', role: 'EDITOR' },
+      { type: 'USER', id: 'u-sam', role: 'VIEWER' },
+    ],
+    exists,
+  );
+  await folderAccess.addReport(team.id, created[0].id, 'u-demo');
 
   app.listen(PORT, '127.0.0.1', () => {
     console.log(

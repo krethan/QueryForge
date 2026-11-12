@@ -22,6 +22,7 @@ import { Scheduler } from './scheduler/scheduler.js';
 import { ScheduleRepository } from './scheduler/schedules.js';
 import { AccessService } from './sharing/access.js';
 import { GroupRepository } from './sharing/groups.js';
+import { FolderAccessService } from './sharing/folder-access.js';
 
 export interface AppOptions {
   cfg: AppConfig;
@@ -47,6 +48,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
   const schedules = new ScheduleRepository(metadataDb, cfg.metadata.schema);
   const folders = new FolderRepository(metadataDb, cfg.metadata.schema);
   const tileOrder = new TileOrderRepository(metadataDb, cfg.metadata.schema);
+  const folderAccess = new FolderAccessService(metadataDb, cfg.metadata.schema, folders, groups);
   const pick = <T>(v: T | null | undefined, make: () => T | undefined) =>
     v === null ? undefined : (v ?? make());
   const oidc = pick(o.oidc, () =>
@@ -98,6 +100,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       groups,
       schedules,
       folders,
+      folderAccess,
       tileOrder,
       scheduler,
       mailer,
@@ -127,6 +130,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     access,
     schedules,
     folders,
+    folderAccess,
     tileOrder,
     scheduler,
     mailer,

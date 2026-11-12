@@ -55,18 +55,24 @@ const toFolder = (r: Record<string, unknown>): Folder => ({
 /**
  * Per-user folders and favorites (migration 006). Every statement is parameterised and
  * scoped by the signed-in user's ID, so one user can never see, rename, delete or file
- * into another user's folders, or change another user's favorites. Whether the user may
+ * into another user's folders, or change another user's favorites. Sharing a folder with
+ * other people (migration 009) is handled by FolderAccessService; personal filing here is
+ * unchanged by it. Whether the user may
  * see the report itself is checked by the caller (AccessService) before setPref.
  */
 export class FolderRepository {
   private readonly folders: string;
   private readonly prefsTable: string;
+  private readonly folderReports: string;
+  private readonly folderShares: string;
   constructor(
     private readonly db: MetadataDb,
     schema: string,
   ) {
     this.folders = q(schema, T.folders);
     this.prefsTable = q(schema, T.reportPrefs);
+    this.folderReports = q(schema, T.folderReports);
+    this.folderShares = q(schema, T.folderShares);
   }
 
   async list(userId: string): Promise<Folder[]> {
@@ -75,6 +81,18 @@ export class FolderRepository {
       [userId],
     );
     return rows.map(toFolder);
+  }
+
+  /**
+   * Any user's folder by ID, with its owner. Callers must authorise the viewer first
+   * (FolderAccessService.require); this never decides who may see the folder.
+   */
+  async findById(folderId: string): Promise<(Folder & { ownerId: string }) | null> {
+    const rows = await this.db.query(
+      `SELECT FOLDER_ID, OWNER_ID, FOLDER_NAME, CREATED_AT, UPDATED_AT FROM ${this.folders} WHERE FOLDER_ID = ?`,
+      [folderId],
+    );
+    return rows[0] ? { ...toFolder(rows[0]), ownerId: String(rows[0].OWNER_ID) } : null;
   }
 
   async get(userId: string, folderId: string): Promise<Folder> {
@@ -118,13 +136,21 @@ export class FolderRepository {
     return this.get(userId, folderId);
   }
 
-  /** Delete a folder. Its reports become Unfiled; no report is deleted. Returns how many moved. */
+  /**
+   * Delete a folder. Its reports become Unfiled; no report is deleted. Returns how many of the
+   * owner's own filed reports moved. If the folder was shared, its shares and the reports
+   * others placed in it (migration 009) go with it in the same transaction (the foreign keys
+   * also cascade); the reports themselves are untouched.
+   */
   async remove(userId: string, folderId: string): Promise<{ moved: number }> {
     return this.db.transaction(async (tx) => {
       const moved = await tx.update(
         `UPDATE ${this.prefsTable} SET FOLDER_ID = NULL, UPDATED_AT = ${NOW_UTC} WHERE USER_ID = ? AND FOLDER_ID = ?`,
         [userId, folderId],
       );
+      // Only the owner's own folder: the DELETE below re-checks OWNER_ID and rolls all of this back.
+      await tx.update(`DELETE FROM ${this.folderReports} WHERE FOLDER_ID = ?`, [folderId]);
+      await tx.update(`DELETE FROM ${this.folderShares} WHERE FOLDER_ID = ?`, [folderId]);
       const n = await tx.update(
         `DELETE FROM ${this.folders} WHERE FOLDER_ID = ? AND OWNER_ID = ?`,
         [folderId, userId],

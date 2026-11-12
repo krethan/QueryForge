@@ -24,8 +24,16 @@ import {
   TrashCan,
   View,
 } from '@carbon/icons-react';
-import { ManageFoldersModal, MoveToFolderModal, UNFILED } from '../components/Folders';
-import { ShareModal } from '../components/ShareModal';
+import {
+  ManageFoldersModal,
+  MoveToFolderModal,
+  UNFILED,
+  canEditFolder,
+  folderLabel,
+  ownsFolder,
+  roleLabel,
+} from '../components/Folders';
+import { FolderShareModal, ShareModal } from '../components/ShareModal';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
@@ -369,6 +377,7 @@ export function DashboardPage() {
   const [toShare, setToShare] = useState<Report | null>(null);
   const [toMove, setToMove] = useState<Report | null>(null);
   const [manage, setManage] = useState(false);
+  const [folderToShare, setFolderToShare] = useState<Folder | null>(null);
   const [folderFilter, setFolderFilter] = useState(ALL);
   const [grouped, setGrouped] = useState(false);
   /** Optimistic local changes to stars / folders until the next reload. */
@@ -425,22 +434,58 @@ export function DashboardPage() {
       setError(e);
     }
   };
-  const folderName = useMemo(() => new Map(folders.map((f) => [f.id, f.name])), [folders]);
-  // A report filed in a folder that no longer exists counts as Unfiled.
-  const folderOf = (r: Report) => (r.folderId && folderName.has(r.folderId) ? r.folderId : null);
+  const folderName = useMemo(() => new Map(folders.map((f) => [f.id, folderLabel(f)])), [folders]);
+  const ownFolderIds = useMemo(
+    () => new Set(folders.filter(ownsFolder).map((f) => f.id)),
+    [folders],
+  );
+  // The tile's folder label is your own filing. A report filed in a folder that no longer
+  // exists counts as Unfiled.
+  const folderOf = (r: Report) => (r.folderId && ownFolderIds.has(r.folderId) ? r.folderId : null);
+  /**
+   * Whether a report is in a folder. The server lists each folder's reports (only those you can
+   * see); your own just-moved reports follow the optimistic move until the folders reload.
+   */
+  const inFolder = (r: Report, f: Folder) => {
+    if (ownsFolder(f) && local[r.id]?.folderId !== undefined) return local[r.id]!.folderId === f.id;
+    return f.reportIds ? f.reportIds.includes(r.id) : r.folderId === f.id;
+  };
+  const isUnfiled = (r: Report) => !folders.some((f) => inFolder(r, f));
   const counts = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of all) if (r.folderId) m.set(r.folderId, (m.get(r.folderId) ?? 0) + 1);
+    for (const f of folders) m.set(f.id, all.filter((r) => inFolder(r, f)).length);
     return m;
-  }, [all]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [all, folders, local]);
   const favorites = all.filter((r) => r.favorite);
   const effectiveFilter =
     folderFilter === ALL || folderFilter === UNFILED || folderName.has(folderFilter)
       ? folderFilter
       : ALL;
+  const filterFolder = folders.find((f) => f.id === effectiveFilter);
   const inFilter = (r: Report) =>
     effectiveFilter === ALL ||
-    (effectiveFilter === UNFILED ? folderOf(r) === null : folderOf(r) === effectiveFilter);
+    (effectiveFilter === UNFILED ? isUnfiled(r) : !!filterFolder && inFolder(r, filterFolder));
+  /** A shared folder in "My order" follows the folder's own (shared) order. */
+  const folderOrdered = (f: Folder, items: Report[]) => {
+    if (!custom || !f.shared || !f.reportIds) return items;
+    return sortByOrder(items, f.reportIds);
+  };
+  const [folderOrder, setFolderOrder] = useState<Record<string, string[]>>({});
+  useEffect(() => setFolderOrder({}), [folders]);
+  const reorderFolder = (f: Folder, ids: string[], moved: Report) => {
+    setFolderOrder((o) => ({ ...o, [f.id]: ids }));
+    setAnnounce(`${moved.name} moved to position ${ids.indexOf(moved.id) + 1} of ${ids.length}.`);
+    saving.current = saving.current.then(async () => {
+      try {
+        await api.saveFolderOrder(f.id, ids);
+        await reloadFolders();
+      } catch (e) {
+        setFolderOrder((o) => Object.fromEntries(Object.entries(o).filter(([k]) => k !== f.id)));
+        setError(e);
+      }
+    });
+  };
 
   const star = async (r: Report) => {
     const favorite = !r.favorite;
@@ -464,40 +509,77 @@ export function DashboardPage() {
       onMove={setToMove}
     />
   );
-  const tiles = (id: string, items: Report[], showFolder = true) => (
-    <SortableTiles
-      section={id}
-      items={items}
-      enabled={canReorder && items.length > 1}
-      onReorder={reorder}
-      render={(r, handle) => tile(r, showFolder, handle)}
-    />
-  );
-  const section = (id: string, title: string, items: Report[], showFolder = true) =>
+  const tiles = (id: string, items: Report[], showFolder = true, folder?: Folder) => {
+    // A shared folder's order is shared: only people who can edit the folder may rearrange it.
+    const sharedFolder = folder?.shared ? folder : undefined;
+    const enabled =
+      canReorder && items.length > 1 && (!sharedFolder || canEditFolder(sharedFolder));
+    const shown =
+      sharedFolder && folderOrder[sharedFolder.id]
+        ? sortByOrder(items, folderOrder[sharedFolder.id])
+        : items;
+    return (
+      <SortableTiles
+        section={id}
+        items={shown}
+        enabled={enabled}
+        onReorder={(ids, moved) =>
+          sharedFolder ? reorderFolder(sharedFolder, ids, moved) : reorder(ids, moved)
+        }
+        render={(r, handle) => tile(r, showFolder, handle)}
+      />
+    );
+  };
+  const section = (
+    id: string,
+    title: string,
+    items: Report[],
+    showFolder = true,
+    folder?: Folder,
+  ) =>
     items.length > 0 && (
       <section key={id} className="qf-section" aria-labelledby={`${id}-heading`}>
         <h2 id={`${id}-heading`} className="qf-section__title">
           {title} <span className="qf-section__count">({items.length})</span>
         </h2>
-        {tiles(id, items, showFolder)}
+        {folder?.shared && (
+          <p className="qf-section__sub" data-testid="folder-sharing">
+            <Tag size="sm" type="purple">
+              Shared folder
+            </Tag>{' '}
+            {ownsFolder(folder)
+              ? 'Shared by you'
+              : `Shared by ${folder.ownerName || 'another user'} · ${roleLabel(folder.access)}`}
+          </p>
+        )}
+        {tiles(id, items, showFolder, folder)}
       </section>
     );
   const folderMode = grouped || effectiveFilter !== ALL;
   const visible = all.filter(inFilter);
-  const groups: { id: string; title: string; items: Report[] }[] = grouped
+  const groups: { id: string; title: string; items: Report[]; folder?: Folder }[] = grouped
     ? [
-        ...folders.map((f) => ({
-          id: `folder-${f.id}`,
-          title: f.name,
-          items: visible.filter((r) => folderOf(r) === f.id),
-        })),
-        { id: 'unfiled', title: 'Unfiled', items: visible.filter((r) => folderOf(r) === null) },
+        ...folders
+          .filter((f) => effectiveFilter === ALL || effectiveFilter === f.id)
+          .map((f) => ({
+            id: `folder-${f.id}`,
+            title: folderLabel(f),
+            items: folderOrdered(
+              f,
+              all.filter((r) => inFolder(r, f)),
+            ),
+            folder: f,
+          })),
+        ...(effectiveFilter === ALL || effectiveFilter === UNFILED
+          ? [{ id: 'unfiled', title: 'Unfiled', items: all.filter(isUnfiled) }]
+          : []),
       ]
     : [
         {
           id: 'filtered',
           title: effectiveFilter === UNFILED ? 'Unfiled' : (folderName.get(effectiveFilter) ?? ''),
-          items: visible,
+          items: filterFolder ? folderOrdered(filterFolder, visible) : visible,
+          folder: filterFolder,
         },
       ];
 
@@ -547,7 +629,7 @@ export function DashboardPage() {
           <SelectItem value={ALL} text="All folders" />
           <SelectItem value={UNFILED} text="Unfiled" />
           {folders.map((f) => (
-            <SelectItem key={f.id} value={f.id} text={f.name} />
+            <SelectItem key={f.id} value={f.id} text={folderLabel(f)} />
           ))}
         </Select>
         <Toggle
@@ -565,7 +647,7 @@ export function DashboardPage() {
         <div className="qf-reorder-help">
           <p id={REORDER_HELP_ID}>
             {canReorder
-              ? 'Drag a tile to rearrange your dashboard, or focus its handle and use the arrow keys. Your order is saved for you only.'
+              ? `Drag a tile to rearrange your dashboard, or focus its handle and use the arrow keys. Your order is saved for you only.${folderMode && groups.some((g) => g.folder?.shared && g.items.length) ? ' A shared folder keeps one order for everyone in it; only its editors can change it.' : ''}`
               : 'Clear the search to rearrange tiles.'}
           </p>
           {hasSavedOrder && (
@@ -592,7 +674,7 @@ export function DashboardPage() {
           {section('favorites', 'Favorites', favorites)}
           {folderMode ? (
             <>
-              {groups.map((g) => section(g.id, g.title, g.items, false))}
+              {groups.map((g) => section(g.id, g.title, g.items, false, g.folder))}
               {visible.length === 0 && (
                 <div className="qf-empty">
                   <h2>No reports here</h2>
@@ -640,21 +722,37 @@ export function DashboardPage() {
         folders={folders}
         counts={counts}
         onClose={() => setManage(false)}
+        onShare={(f) => {
+          setManage(false);
+          setFolderToShare(f);
+        }}
         onChanged={async () => {
           await reloadFolders();
           setLocal({});
           await reload();
         }}
       />
+      {folderToShare && (
+        <FolderShareModal
+          folder={folderToShare}
+          onClose={(saved) => {
+            setFolderToShare(null);
+            setManage(true);
+            if (saved) void reloadFolders();
+          }}
+        />
+      )}
       {toMove && (
         <MoveToFolderModal
           report={toMove}
           folders={folders}
           onClose={() => setToMove(null)}
-          onMoved={(folderId) => {
+          onMoved={(folderId, sharedChanged) => {
             const id = toMove!.id;
             setLocal((l) => ({ ...l, [id]: { ...l[id], folderId } }));
             setToMove(null);
+            // Shared folder contents (and your own folders' shared placements) come from the server.
+            if (sharedChanged || folders.some((f) => f.shared)) void reloadFolders();
           }}
         />
       )}
