@@ -43,6 +43,8 @@ import type {
   FolderAuditPage,
   FolderDeletionPage,
   DeletedFolderAuditPage,
+  RetentionRun,
+  RetentionState,
   Formatting,
   ReportPrefs,
 } from './types';
@@ -230,6 +232,10 @@ export const api = {
       'GET',
       `/admin/folder-deletions/${encodeURIComponent(folderId)}/audit?limit=${limit}&offset=${offset}`,
     ),
+  /** History retention settings and the last run (app admins only). */
+  getRetention: () => json<RetentionState>('GET', '/admin/retention'),
+  /** Delete history older than the retention settings now (app admins only). */
+  runRetention: () => json<RetentionState & { run: RetentionRun }>('POST', '/admin/retention/run'),
   /** Downloads a deleted folder's sharing history as CSV (app admins only). */
   async exportDeletedFolderAudit(folderId: string) {
     return downloadFile(

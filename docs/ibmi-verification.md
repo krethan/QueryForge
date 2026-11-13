@@ -116,7 +116,11 @@ As the metadata profile, and only inside `UBVERIFY`:
    reminder twice as two instances and checks one `QF_SHARE_REMINDERS` row is claimed once (the unique
    key decides; mail goes to an in-memory mailer, nothing is sent), and saves and changes a
    `QF_USER_SETTINGS` row. It also checks that the app's metadata reads return more than 100
-   rows (see [Known risks](#8-known-risks-to-watch-for)).
+   rows (see [Known risks](#8-known-risks-to-watch-for)). Last, it checks history retention: it seeds
+   four `QF_SHARE_REMINDERS` rows in `UBVERIFY` (three with end dates over a year ago, one in two days)
+   and runs retention with a batch size of 2, expecting three rows deleted in two
+   `DELETE … WHERE REMINDER_ID IN (SELECT … FETCH FIRST 2 ROWS ONLY)` statements and the future one
+   kept. The read-only metadata queries also count the rows past each retention cutoff (no delete).
 6. `--cleanup UBVERIFY` drops the library with `DROP SCHEMA UBVERIFY CASCADE`, but only if the
    `QF_VERIFY_KIT` marker is there and it holds nothing except `QF_*` tables, the SQL catalog views
    `CREATE SCHEMA` adds, and its journal (any program, data area or other object makes it refuse).
@@ -239,6 +243,7 @@ metadata profile, `META_SCHEMA=UBVERIFY` (kept from step 3 without `--cleanup`, 
 | UI-23 | Share notifications    | With SMTP pointed at a **test** mail server, share a report with tester2 (Notify people on), then change the role, then share with a group tester2 is in; repeat with Notify people off; turn off **E-mail me about shares** as tester2 and share again | tester2 gets one e-mail per save that gained access or changed role, naming who shared what, the access and any end date, with a link to `QF_PUBLIC_BASE_URL`; no report data in it; nothing with Notify people off or after opting out; the sharer and owner get nothing |
 | UI-24 | End-date reminders     | With `SCHEDULER_ENABLED=true`, set a share's end date to tomorrow; wait for a poll; restart the app and wait again; then change the end date to the day after                                                                                           | The owner gets one reminder; none after the restart (one `QF_SHARE_REMINDERS` row, `STATUS` `SENT`); the new end date gets one new reminder                                                                                                                               |
 | UI-25 | No SMTP                | Unset `SMTP_HOST`, restart, open the Share dialog and save a share                                                                                                                                                                                      | The dialog says e-mail isn't set up and the checkbox is disabled; the share saves; the server log has a "share notification skipped" line                                                                                                                                 |
+| UI-26 | Data retention         | As tester1 (admin), open Data retention; check the "Kept for" column matches the `QF_RETAIN_*` settings; Run now, confirm. As tester2, open `/admin/retention`. Insert an old `QF_SCHEDULE_DELIVERIES` row in `UBVERIFY` first if there is none         | Admin sees the settings and the counts deleted; only `UBVERIFY` rows older than the cutoffs go; audit tables untouched with `QF_RETAIN_AUDIT_DAYS=0`; the app log has a `history retention (manual by tester1)` line; tester2 sees "Admins only" and the API returns 403  |
 
 ## 7. Results template
 
@@ -256,12 +261,18 @@ Copy this table into the PR or an issue and fill it in.
 | Metadata queries all PASS                         |                            |                                             |       |
 | Smoke test all PASS (incl. > 100-row reads)       |                            |                                             |       |
 | Cleanup dropped `UBVERIFY`                        |                            |                                             |       |
-| UI-01 … UI-22 (one row each)                      |                            |                                             |       |
+| UI-01 … UI-26 (one row each)                      |                            |                                             |       |
 
 Tested by: ______ Date: ______ Partition / host (not production): ______ App commit: ______
 
 ## 8. Known risks to watch for
 
+- **Batched retention deletes.** Retention deletes with
+  `DELETE FROM t WHERE id IN (SELECT id FROM t WHERE ts < ? FETCH FIRST n ROWS ONLY)`, a subselect on the
+  table being deleted from. Older Db2 for i releases rejected that (SQL0118). The smoke test runs it in
+  `UBVERIFY`; if it fails there, retention reports the error per table and deletes nothing. The history
+  tables have no index that leads with the timestamp, so on a large table each batch may scan it; watch
+  the first run's duration in a quiet window.
 - **Metadata reads past 100 rows.** `@ibm/mapepire-js` 1.0.2's `SQLJob.execute()` fetches only 100
   rows by default. The app's metadata store no longer relies on it: it pages with
   `Query.execute(1000)` / `fetchMore(1000)` until Mapepire reports the end, closes the cursor, and

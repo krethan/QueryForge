@@ -28,6 +28,7 @@ import { FolderReportGrants } from './sharing/folder-report-grants.js';
 import { systemClock, type Clock } from './sharing/expiry.js';
 import { ShareNotifier } from './notifications/share-notifier.js';
 import { UserSettingsRepository } from './notifications/settings.js';
+import { RetentionService } from './retention/retention.js';
 
 export interface AppOptions {
   cfg: AppConfig;
@@ -94,6 +95,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
   );
   const userSettings = new UserSettingsRepository(metadataDb, cfg.metadata.schema);
   const notifier = new ShareNotifier(metadataDb, cfg.metadata.schema, cfg, mailer, clock);
+  const retention = new RetentionService(metadataDb, cfg.metadata.schema, cfg.retention, clock);
   const scheduler = new Scheduler(
     cfg,
     schedules,
@@ -103,6 +105,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     mailer,
     recipients,
     notifier,
+    retention,
   );
 
   const app = express();
@@ -153,6 +156,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       mailer,
       notifier,
       userSettings,
+      retention,
       oidc,
       ldap,
     }),
@@ -187,5 +191,6 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     mailer,
     notifier,
     userSettings,
+    retention,
   };
 }

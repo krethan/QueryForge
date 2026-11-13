@@ -45,6 +45,7 @@ import type { RecipientService } from '../scheduler/recipients.js';
 import { sharesInputSchema, type AccessService, type ShareChange } from '../sharing/access.js';
 import type { ShareNotifier } from '../notifications/share-notifier.js';
 import type { UserSettingsRepository } from '../notifications/settings.js';
+import { RetentionRunningError, type RetentionService } from '../retention/retention.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
 import type { AccessibleReport, Report } from '../reports/reports.js';
 import {
@@ -151,6 +152,7 @@ export interface ApiDeps {
   mailer?: Mailer;
   notifier: ShareNotifier;
   userSettings: UserSettingsRepository;
+  retention: RetentionService;
   oidc?: OidcProvider;
   ldap?: LdapAuthenticator;
 }
@@ -1471,9 +1473,8 @@ export function apiRouter(d: ApiDeps): Router {
   // ---- Deleted folders (migration 013): app admins only. ----
   // A deleted folder has no owner view left, and its history names everyone who had access, so
   // only a global admin may read it. Everyone else gets 403 whether or not anything was deleted.
-  const requireAdmin = (req: Request) => {
-    if (user(req).role !== 'ADMIN')
-      throw new AppError(403, 'FORBIDDEN', 'Only an admin can view deleted folders.');
+  const requireAdmin = (req: Request, message = 'Only an admin can view deleted folders.') => {
+    if (user(req).role !== 'ADMIN') throw new AppError(403, 'FORBIDDEN', message);
   };
   /**
    * A deleted folder's deletion record. A folder that still exists is 404 here even for an
@@ -1518,6 +1519,40 @@ export function apiRouter(d: ApiDeps): Router {
         d.folderAccess.auditAll(deletion.folderId),
         folderAuditCsvCells(deletion.folderName),
       );
+    }),
+  );
+
+  // ---- History retention (no migration): app admins only. ----
+  const retentionState = () => ({
+    settings: d.retention.settings(),
+    batchSize: d.retention.batchSize,
+    maxBatches: d.retention.maxBatches,
+    /** Automatic daily runs happen only on the scheduler leader, so only once it has started. */
+    automatic: cfg.scheduler.enabled && d.scheduler.started,
+    running: d.retention.isRunning,
+    nextAutomaticAfter: d.retention.nextAutomaticAfter,
+    lastRun: d.retention.lastRun,
+  });
+  const ADMIN_RETENTION = 'Only an admin can manage data retention.';
+  r.get(
+    '/admin/retention',
+    h(async (req, res) => {
+      requireAdmin(req, ADMIN_RETENTION);
+      res.json(retentionState());
+    }),
+  );
+  r.post(
+    '/admin/retention/run',
+    h(async (req, res) => {
+      requireAdmin(req, ADMIN_RETENTION);
+      try {
+        const run = await d.retention.run({ trigger: 'MANUAL', requestedBy: user(req).username });
+        res.json({ ...retentionState(), run });
+      } catch (e) {
+        if (e instanceof RetentionRunningError)
+          throw new AppError(409, 'RETENTION_RUNNING', e.message);
+        throw e;
+      }
     }),
   );
   r.post(
