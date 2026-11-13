@@ -320,9 +320,22 @@ body {
 }
 .qf-share-add {
   display: grid;
-  grid-template-columns: 1fr 9rem auto;
+  grid-template-columns: 1fr 8rem 10rem auto;
   gap: 0.75rem;
   align-items: end;
+}
+/* Share end date (migration 014): date picker plus "No end date" in each row. */
+.qf-share-expiry {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+  flex-wrap: wrap;
+  .cds--form-item {
+    flex: 0 0 9.5rem;
+  }
+}
+.qf-share-expiry-hint {
+  margin-top: -0.5rem;
 }
 .qf-share-who {
   display: inline-flex;

@@ -369,9 +369,33 @@ describe('sharing audit', () => {
         ],
       ),
     ).toEqual([
-      { action: 'CHANGE', type: 'USER', id: 'a', oldRole: 'VIEWER', newRole: 'EDITOR' },
-      { action: 'GRANT', type: 'USER', id: 'b', oldRole: null, newRole: 'VIEWER' },
-      { action: 'REVOKE', type: 'GROUP', id: 'g', oldRole: 'EDITOR', newRole: null },
+      {
+        action: 'CHANGE',
+        type: 'USER',
+        id: 'a',
+        oldRole: 'VIEWER',
+        newRole: 'EDITOR',
+        oldExpiresAt: null,
+        newExpiresAt: null,
+      },
+      {
+        action: 'GRANT',
+        type: 'USER',
+        id: 'b',
+        oldRole: null,
+        newRole: 'VIEWER',
+        oldExpiresAt: null,
+        newExpiresAt: null,
+      },
+      {
+        action: 'REVOKE',
+        type: 'GROUP',
+        id: 'g',
+        oldRole: 'EDITOR',
+        newRole: null,
+        oldExpiresAt: null,
+        newExpiresAt: null,
+      },
     ]);
   });
 

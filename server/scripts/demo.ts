@@ -1022,7 +1022,11 @@ async function main() {
 
   const { factory } = fakeFactory(script);
   const here = path.dirname(fileURLToPath(import.meta.url));
+  // Share expiry (migration 014) is checked against this clock. A few shares are seeded "ten
+  // days ago" (seedOffsetMs) so the demo shows one that has already expired; then it is real time.
+  let seedOffsetMs = 0;
   const { app, access, schedules, scheduler, folders, folderAccess } = createApp({
+    clock: () => new Date(Date.now() + seedOffsetMs),
     cfg,
     metadataDb,
     jobFactory: factory,
@@ -1068,6 +1072,25 @@ async function main() {
     ],
     exists,
   );
+  // End dates (migration 014): Sam's Editor share ran out three days ago and shows as Expired;
+  // Pat keeps Viewer access until the end of a day three weeks from now (demo server's zone).
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const endOfDay = (offsetDays: number) => {
+    const d = new Date(Date.now() + offsetDays * DAY_MS);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).toISOString();
+  };
+  seedOffsetMs = -10 * DAY_MS;
+  await access.replaceShares(
+    created[1],
+    'u-demo',
+    [
+      { type: 'GROUP', id: 'finance', role: 'VIEWER' },
+      { type: 'USER', id: 'u-pat', role: 'VIEWER', expiresAt: endOfDay(21) },
+      { type: 'USER', id: 'u-sam', role: 'EDITOR', expiresAt: endOfDay(-4) },
+    ],
+    exists,
+  );
+  seedOffsetMs = 0;
   await access.replaceShares(
     patOwned[0],
     'u-pat',

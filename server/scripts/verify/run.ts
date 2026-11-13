@@ -24,9 +24,10 @@ import { UserRepository } from '../../src/auth/users.js';
 import { CatalogService } from '../../src/catalog/catalog.js';
 import { HistoryRepository } from '../../src/history/history.js';
 import { FolderRepository } from '../../src/reports/folders.js';
-import { ReportRepository, reportInputSchema } from '../../src/reports/reports.js';
+import { ReportRepository, reportInputSchema, type Report } from '../../src/reports/reports.js';
 import { TileOrderRepository } from '../../src/reports/tile-order.js';
 import { ScheduleRepository } from '../../src/scheduler/schedules.js';
+import { RecipientService } from '../../src/scheduler/recipients.js';
 import { AccessService } from '../../src/sharing/access.js';
 import { FolderAccessService } from '../../src/sharing/folder-access.js';
 import { GroupRepository } from '../../src/sharing/groups.js';
@@ -1046,6 +1047,20 @@ async function metadataQueries(job: SqlJobLike, rec: Recorder, schema: string) {
     ],
     ['Report sharing audit (FETCH FIRST)', () => access.listAudit(nobody)],
     [
+      'Share expiry checks (migration 014: EXPIRES_AT read, and compared with a bound TIMESTAMP)',
+      async () => {
+        const someone = { id: nobody, role: 'USER' as const };
+        const report = { id: nobody, ownerId: randomUUID(), name: 'x' } as Report;
+        await access.roleFor(someone, report);
+        await access.listShares(nobody);
+        await folderAccess.roleFor(someone, { id: nobody, ownerId: randomUUID() });
+        await folderAccess.listShares(nobody);
+        await new RecipientService(db, schema, new UserRepository(db, schema), access, {
+          recipientDomains: [],
+        }).options(report);
+      },
+    ],
+    [
       'Folders and favorites',
       async () => {
         await folders.list(nobody);
@@ -1188,6 +1203,52 @@ async function smokeTest(
           ? undefined
           : 'The shared folder was not listed for the viewer.',
     );
+    // Share expiry (migration 014): set one an hour ahead, read the EXPIRY audit row back, and
+    // check the share stops working at that instant (a later clock), without waiting for it.
+    const inAnHour = new Date(Date.now() + 60 * 60 * 1000);
+    inAnHour.setUTCMilliseconds(0);
+    await step(
+      'Set an expiry on the folder share (QF_FOLDER_SHARES.EXPIRES_AT, migration 014)',
+      () =>
+        folderAccess.replaceShares(
+          { id: folder.id, ownerId: owner.a.id },
+          owner.a.id,
+          [{ type: 'USER', id: owner.b.id, role: 'VIEWER', expiresAt: inAnHour.toISOString() }],
+          async () => true,
+        ),
+      (shares) =>
+        shares[0]?.expiresAt === inAnHour.toISOString() && !shares[0]?.expired
+          ? undefined
+          : `Read back ${JSON.stringify(shares)}; expected expiresAt ${inAnHour.toISOString()}, not expired.`,
+    );
+    await step(
+      'Read the expiry change back from the audit (migration 014 check constraint accepted EXPIRY)',
+      () => folderAccess.auditPage(folder.id, 25, 0),
+      (p) =>
+        p.events.some((e) => e.action === 'EXPIRY' && e.newExpiresAt === inAnHour.toISOString())
+          ? undefined
+          : 'No EXPIRY audit row with the new expiry was read back.',
+    );
+    await step(
+      'The share works before its expiry and not at or after it (EXPIRES_AT compared as UTC)',
+      async () => {
+        const at = (t: number) =>
+          new FolderAccessService(db, schema, folders, groups, () => new Date(t));
+        const viewer = { id: owner.b.id, role: 'USER' as const };
+        const f = { id: folder.id, ownerId: owner.a.id };
+        return {
+          before: await at(inAnHour.getTime() - 1000).roleFor(viewer, f),
+          atExpiry: await at(inAnHour.getTime()).roleFor(viewer, f),
+          listedAfter: (await at(inAnHour.getTime() + 1000).listAccessible(viewer)).some(
+            (x) => x.id === folder.id,
+          ),
+        };
+      },
+      (r) =>
+        r.before === 'VIEWER' && r.atExpiry === null && !r.listedAfter
+          ? undefined
+          : `Role a second before: ${r.before}; at expiry: ${r.atExpiry}; listed after: ${r.listedAfter}. Expected VIEWER, null, false.`,
+    );
     await step(
       'Check constraint rejects an unknown audit principal type',
       async () => {
@@ -1258,9 +1319,11 @@ async function smokeTest(
         return seen;
       },
       (seen) =>
-        seen.length === 4 && seen.filter((x) => x.startsWith('REVOKE')).length === 2
+        seen.length === 5 &&
+        seen.filter((x) => x.startsWith('REVOKE')).length === 2 &&
+        seen.includes('EXPIRY:USER')
           ? undefined
-          : `Read ${seen.length} audit rows (${seen.join(', ')}); expected 2 GRANT and 2 REVOKE.`,
+          : `Read ${seen.length} audit rows (${seen.join(', ')}); expected 2 GRANT, 1 EXPIRY and 2 REVOKE.`,
     );
     await step('Delete the report', () => reports.delete(owner.a.id, report.id));
   } finally {

@@ -344,7 +344,7 @@ describe("a deleted folder's sharing history (admins)", () => {
     const rows = csvBody(csv);
     expect(rows[0]).toEqual([...FOLDER_AUDIT_CSV_HEADER]);
     expect(rows.slice(1).map((r) => r[1])).toEqual(['REVOKE', 'REVOKE', 'GRANT', 'GRANT']);
-    expect(rows.slice(1).every((r) => r[10] === 'Finance')).toBe(true);
+    expect(rows.slice(1).every((r) => r[12] === 'Finance')).toBe(true);
   });
 
   it('is 404 for a folder that still exists, even a shared one, and for unknown IDs', async () => {
@@ -397,6 +397,8 @@ describe('GET /api/folders/:id/audit/export (CSV)', () => {
       'Bob',
       'VIEWER',
       'EDITOR',
+      '',
+      '',
       'u-alice',
       'Alice',
       f.id,
@@ -459,7 +461,7 @@ describe('GET /api/folders/:id/audit/export (CSV)', () => {
     expect(names.get('u-at')).toBe(`'@SUM(A1)`);
     expect(names.get('u-minus')).toBe(`'-2+3`);
     expect(names.get('u-uni')).toBe('Zoë 日本 ＝1');
-    expect(csvBody(res)[1][10]).toBe(`'=cmd|calc`);
+    expect(csvBody(res)[1][12]).toBe(`'=cmd|calc`);
     // Raw UTF-8 bytes, not mojibake.
     expect(Buffer.from(res.text, 'utf8').includes(Buffer.from('Zoë 日本', 'utf8'))).toBe(true);
     expect(res.headers['content-disposition']).toContain('filename="_cmd_calc audit.csv"');
@@ -497,8 +499,8 @@ describe('GET /api/folders/:id/audit/export (CSV)', () => {
           String(a.AUDIT_ID).localeCompare(String(b.AUDIT_ID)),
       )
       .map((a) => String(a.AUDIT_ID));
-    expect(rows.map((r) => r[11])).toEqual(expected);
-    expect(new Set(rows.map((r) => r[11])).size).toBe(total);
+    expect(rows.map((r) => r[13])).toEqual(expected);
+    expect(new Set(rows.map((r) => r[13])).size).toBe(total);
     // ceil(1234 / 500) = 3 batches, the first without a cursor, the rest keyset, none OFFSET.
     const reads = db.statements.filter((s) => s.sql.includes('QF_FOLDER_SHARE_AUDIT'));
     expect(reads).toHaveLength(3);

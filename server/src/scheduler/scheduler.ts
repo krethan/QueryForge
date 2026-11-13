@@ -23,6 +23,18 @@ export interface RunResult {
   deliveredTo: string[];
   /** Recipients left out because they can no longer open the report. */
   skipped: string[];
+  /** The part of `skipped` left out because their share expired (migration 014). */
+  expired?: string[];
+}
+
+/** Why recipients were left out, as recorded with the delivery (LAST_ERROR / ERROR_MESSAGE). */
+export function skipNote(skipped: string[], expired: string[]): string | null {
+  const lost = skipped.filter((e) => !expired.includes(e));
+  const parts: string[] = [];
+  if (expired.length) parts.push(`Not sent to ${expired.join(', ')}: their access has expired.`);
+  if (lost.length)
+    parts.push(`Not sent to ${lost.join(', ')}: they can no longer open this report.`);
+  return parts.length ? parts.join(' ') : null;
 }
 
 export interface RunOptions {
@@ -110,6 +122,7 @@ export class Scheduler {
     let rowCount: number | undefined;
     let deliveredTo: string[] = [];
     let skipped: string[] = [];
+    let expired: string[] = [];
     let result: RunResult;
     try {
       const { runAs, report } = await this.ownerFor(s);
@@ -117,12 +130,16 @@ export class Scheduler {
       if (!rc.ok) throw new Error(rc.message);
       if (!this.mailer)
         throw new Error('Email delivery is not configured on the server (SMTP_HOST).');
-      // Access is re-checked at every delivery: anyone who lost access to the report is left out.
+      // Access is re-checked at every delivery: anyone who lost access to the report is left
+      // out, including anyone whose share has expired since the last run (migration 014).
       const checked = await this.recipients.check(report, rc.recipients);
       skipped = checked.blocked;
+      expired = checked.expired;
       if (!checked.allowed.length)
         throw new Error(
-          `Not sent: none of the recipients can open this report any more (${skipped.join(', ')}).`,
+          `Not sent: none of the recipients can open this report any more (${skipped.join(', ')}).${
+            expired.length ? ` Access has expired for ${expired.join(', ')}.` : ''
+          }`,
         );
       const file = await this.execution.exportXlsx(
         runAs,
@@ -168,9 +185,7 @@ export class Scheduler {
       } finally {
         await file.cleanup();
       }
-      const note = skipped.length
-        ? `Not sent to ${skipped.join(', ')}: they can no longer open this report.`
-        : null;
+      const note = skipNote(skipped, expired);
       await this.schedules.recordResult(s.id, {
         status: 'SUCCEEDED',
         error: note,
@@ -185,6 +200,7 @@ export class Scheduler {
         disabled: false,
         deliveredTo,
         skipped,
+        expired,
       };
     } catch (e) {
       const error = sanitizeErrorMessage(e);
@@ -193,7 +209,15 @@ export class Scheduler {
       await this.schedules
         .recordResult(s.id, { status: 'FAILED', error, failures, disable, ranAt })
         .catch((x) => console.error('schedule result not recorded:', sanitizeErrorMessage(x)));
-      result = { status: 'FAILED', error, rowCount, disabled: disable, deliveredTo: [], skipped };
+      result = {
+        status: 'FAILED',
+        error,
+        rowCount,
+        disabled: disable,
+        deliveredTo: [],
+        skipped,
+        expired,
+      };
     }
     await this.schedules
       .recordDelivery({

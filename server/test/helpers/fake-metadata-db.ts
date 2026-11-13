@@ -88,6 +88,16 @@ export class FakeMetadataDb implements MetadataDb {
     this.userGroups.delete(`${userId}|${group}`);
   }
 
+  /**
+   * The SQL predicate (EXPIRES_AT IS NULL OR EXPIRES_AT > CAST(? AS TIMESTAMP)) for a share row,
+   * with `now` the bound Db2 timestamp text. Compared as instants, like Db2 compares TIMESTAMPs.
+   */
+  static activeAt(sh: Row, now: unknown) {
+    if (sh.EXPIRES_AT === null || sh.EXPIRES_AT === undefined) return true;
+    const t = (v: unknown) => Date.parse(String(v).trim().replace(' ', 'T').slice(0, 23) + 'Z');
+    return t(sh.EXPIRES_AT) > t(now);
+  }
+
   private matchesPrincipal(sh: Row, uid: unknown, groups: unknown[]) {
     return (
       (sh.PRINCIPAL_TYPE === 'USER' && sh.PRINCIPAL_ID === uid) ||
@@ -131,7 +141,7 @@ export class FakeMetadataDb implements MetadataDb {
         .map((i) => ({ FOLDER_ID: i.FOLDER_ID }));
     }
     if (
-      /^SELECT S\.FOLDER_ID, S\.PRINCIPAL_TYPE, S\.PRINCIPAL_ID, S\.SHARE_ROLE, U\.DISPLAY_NAME FROM \w+\.QF_FOLDER_SHARES S LEFT JOIN \w+\.QF_USERS U ON S\.PRINCIPAL_TYPE = 'USER' AND U\.USER_ID = S\.PRINCIPAL_ID WHERE S\.FOLDER_ID IN \(/.test(
+      /^SELECT S\.FOLDER_ID, S\.PRINCIPAL_TYPE, S\.PRINCIPAL_ID, S\.SHARE_ROLE, S\.EXPIRES_AT, U\.DISPLAY_NAME FROM \w+\.QF_FOLDER_SHARES S LEFT JOIN \w+\.QF_USERS U ON S\.PRINCIPAL_TYPE = 'USER' AND U\.USER_ID = S\.PRINCIPAL_ID WHERE S\.FOLDER_ID IN \(/.test(
         s,
       )
     )
@@ -150,7 +160,7 @@ export class FakeMetadataDb implements MetadataDb {
           ),
         );
     if (
-      /^SELECT S\.FOLDER_ID, S\.SHARE_ROLE, F\.OWNER_ID, X\.MAX_ROLE FROM \w+\.QF_FOLDER_SHARES S JOIN \w+\.QF_FOLDERS F ON F\.FOLDER_ID = S\.FOLDER_ID JOIN \w+\.QF_FOLDER_REPORT_SHARING X ON X\.FOLDER_ID = S\.FOLDER_ID WHERE F\.OWNER_ID <> \? AND \(\(S\.PRINCIPAL_TYPE = 'USER' AND S\.PRINCIPAL_ID = \?\)( OR \(S\.PRINCIPAL_TYPE = 'GROUP' AND S\.PRINCIPAL_ID IN \([?, ]+\)\))?\)$/.test(
+      /^SELECT S\.FOLDER_ID, S\.SHARE_ROLE, S\.EXPIRES_AT, F\.OWNER_ID, X\.MAX_ROLE FROM \w+\.QF_FOLDER_SHARES S JOIN \w+\.QF_FOLDERS F ON F\.FOLDER_ID = S\.FOLDER_ID JOIN \w+\.QF_FOLDER_REPORT_SHARING X ON X\.FOLDER_ID = S\.FOLDER_ID WHERE F\.OWNER_ID <> \? AND \(\(S\.PRINCIPAL_TYPE = 'USER' AND S\.PRINCIPAL_ID = \?\)( OR \(S\.PRINCIPAL_TYPE = 'GROUP' AND S\.PRINCIPAL_ID IN \([?, ]+\)\))?\)$/.test(
         s,
       )
     ) {
@@ -164,6 +174,7 @@ export class FakeMetadataDb implements MetadataDb {
         out.push({
           FOLDER_ID: sh.FOLDER_ID,
           SHARE_ROLE: sh.SHARE_ROLE,
+          EXPIRES_AT: sh.EXPIRES_AT ?? null,
           OWNER_ID: f.OWNER_ID,
           MAX_ROLE: x.MAX_ROLE,
         });
@@ -217,19 +228,15 @@ export class FakeMetadataDb implements MetadataDb {
       return f ? [{ ...f }] : [];
     }
     if (
-      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \?$/.test(
+      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \?$/.test(
         s,
       )
     )
       return this.folderShares.filter((x) => x.FOLDER_ID === params[0]).map((x) => ({ ...x }));
-    if (/^SELECT DISTINCT FOLDER_ID FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID IN \(/.test(s))
-      return [
-        ...new Set(
-          this.folderShares
-            .filter((x) => params.includes(x.FOLDER_ID as string))
-            .map((x) => x.FOLDER_ID),
-        ),
-      ].map((id) => ({ FOLDER_ID: id }));
+    if (/^SELECT FOLDER_ID, EXPIRES_AT FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID IN \(/.test(s))
+      return this.folderShares
+        .filter((x) => params.includes(x.FOLDER_ID as string))
+        .map((x) => ({ FOLDER_ID: x.FOLDER_ID, EXPIRES_AT: x.EXPIRES_AT ?? null }));
     if (
       /FROM \w+\.QF_FOLDERS F JOIN \w+\.QF_FOLDER_SHARES S ON S\.FOLDER_ID = F\.FOLDER_ID JOIN \w+\.QF_USERS U ON U\.USER_ID = F\.OWNER_ID WHERE F\.OWNER_ID <> \?/.test(
         s,
@@ -249,6 +256,7 @@ export class FakeMetadataDb implements MetadataDb {
         out.push({
           ...f,
           SHARE_ROLE: sh.SHARE_ROLE,
+          EXPIRES_AT: sh.EXPIRES_AT ?? null,
           OWNER_NAME: this.users.get(String(f.OWNER_ID))?.DISPLAY_NAME,
         });
       }
@@ -423,11 +431,11 @@ export class FakeMetadataDb implements MetadataDb {
       return before - this.folderShares.length;
     }
     if (
-      /^INSERT INTO \w+\.QF_FOLDER_SHARES \(FOLDER_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, CREATED_BY, CREATED_AT\)/.test(
+      /^INSERT INTO \w+\.QF_FOLDER_SHARES \(FOLDER_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT, CREATED_BY, CREATED_AT\)/.test(
         s,
       )
     ) {
-      const [folderId, type, id, role, by] = params;
+      const [folderId, type, id, role, expiresAt, by] = params;
       if (!this.folders.has(String(folderId)))
         throw new DbError('Foreign key violation.', '23503', -530);
       if (
@@ -441,17 +449,21 @@ export class FakeMetadataDb implements MetadataDb {
         PRINCIPAL_TYPE: type,
         PRINCIPAL_ID: id,
         SHARE_ROLE: role,
+        EXPIRES_AT: expiresAt,
         CREATED_BY: by,
         CREATED_AT: this.now(),
       });
       return 1;
     }
     if (
-      /^INSERT INTO \w+\.QF_FOLDER_SHARE_AUDIT \(AUDIT_ID, FOLDER_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT\)/.test(
+      /^INSERT INTO \w+\.QF_FOLDER_SHARE_AUDIT \(AUDIT_ID, FOLDER_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, OLD_EXPIRES_AT, NEW_EXPIRES_AT, ACTOR_ID, OCCURRED_AT\)/.test(
         s,
       )
     ) {
-      const [id, folderId, action, type, pid, oldRole, newRole, actor] = params;
+      const [id, folderId, action, type, pid, oldRole, newRole, oldExp, newExp, actor] = params;
+      // QF_FSAU_CK_ACTION as widened by migration 014
+      if (!['GRANT', 'CHANGE', 'REVOKE', 'EXPIRY'].includes(String(action)))
+        throw new DbError('Check constraint QF_FSAU_CK_ACTION violated.', '23513', -545);
       // QF_FSAU_CK_TYPE as widened by migration 012
       if (!['USER', 'GROUP', 'REPORTS'].includes(String(type)))
         throw new DbError('Check constraint QF_FSAU_CK_TYPE violated.', '23513', -545);
@@ -467,6 +479,8 @@ export class FakeMetadataDb implements MetadataDb {
         PRINCIPAL_ID: pid,
         OLD_ROLE: oldRole,
         NEW_ROLE: newRole,
+        OLD_EXPIRES_AT: oldExp,
+        NEW_EXPIRES_AT: newExp,
         ACTOR_ID: actor,
         OCCURRED_AT: this.now(),
       });
@@ -484,7 +498,7 @@ export class FakeMetadataDb implements MetadataDb {
       return f && f.OWNER_ID === params[1] ? [{ FOLDER_NAME: f.FOLDER_NAME }] : [];
     }
     if (
-      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \? ORDER BY PRINCIPAL_TYPE, PRINCIPAL_ID$/.test(
+      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \? ORDER BY PRINCIPAL_TYPE, PRINCIPAL_ID$/.test(
         s,
       )
     )
@@ -606,12 +620,14 @@ export class FakeMetadataDb implements MetadataDb {
       );
     }
     if (
-      /^SELECT U\.USER_ID, U\.DISPLAY_NAME, U\.EMAIL FROM \w+\.QF_USERS U WHERE U\.IS_ACTIVE = 1 AND U\.EMAIL IS NOT NULL AND \(U\.USER_ID = \? OR U\.USER_ID IN \(SELECT S\.PRINCIPAL_ID FROM \w+\.QF_REPORT_SHARES S WHERE S\.REPORT_ID = \? AND S\.PRINCIPAL_TYPE = 'USER'\) OR U\.USER_ID IN \(SELECT G\.USER_ID FROM \w+\.QF_USER_GROUPS G JOIN \w+\.QF_REPORT_SHARES S ON S\.PRINCIPAL_TYPE = 'GROUP' AND S\.PRINCIPAL_ID = G\.GROUP_NAME WHERE S\.REPORT_ID = \?\)\) ORDER BY U\.DISPLAY_NAME FETCH FIRST 500 ROWS ONLY$/.test(
+      /^SELECT U\.USER_ID, U\.DISPLAY_NAME, U\.EMAIL FROM \w+\.QF_USERS U WHERE U\.IS_ACTIVE = 1 AND U\.EMAIL IS NOT NULL AND \(U\.USER_ID = \? OR U\.USER_ID IN \(SELECT S\.PRINCIPAL_ID FROM \w+\.QF_REPORT_SHARES S WHERE S\.REPORT_ID = \? AND S\.PRINCIPAL_TYPE = 'USER' AND \(S\.EXPIRES_AT IS NULL OR S\.EXPIRES_AT > CAST\(\? AS TIMESTAMP\)\)\) OR U\.USER_ID IN \(SELECT G\.USER_ID FROM \w+\.QF_USER_GROUPS G JOIN \w+\.QF_REPORT_SHARES S ON S\.PRINCIPAL_TYPE = 'GROUP' AND S\.PRINCIPAL_ID = G\.GROUP_NAME WHERE S\.REPORT_ID = \? AND \(S\.EXPIRES_AT IS NULL OR S\.EXPIRES_AT > CAST\(\? AS TIMESTAMP\)\)\)\) ORDER BY U\.DISPLAY_NAME FETCH FIRST 500 ROWS ONLY$/.test(
         s,
       )
     ) {
-      const [ownerId, rid] = params;
-      const shares = this.shares.filter((x) => x.REPORT_ID === rid);
+      const [ownerId, rid, now] = params;
+      const shares = this.shares.filter(
+        (x) => x.REPORT_ID === rid && FakeMetadataDb.activeAt(x, now),
+      );
       const groups = new Set(
         shares.filter((x) => x.PRINCIPAL_TYPE === 'GROUP').map((x) => x.PRINCIPAL_ID),
       );
@@ -711,7 +727,7 @@ export class FakeMetadataDb implements MetadataDb {
         .map((g) => ({ GROUP_NAME: g })) as T[];
     }
     if (
-      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM \w+\.QF_REPORT_SHARES WHERE REPORT_ID = \?$/.test(
+      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM \w+\.QF_REPORT_SHARES WHERE REPORT_ID = \?$/.test(
         s,
       )
     ) {
@@ -768,6 +784,7 @@ export class FakeMetadataDb implements MetadataDb {
         out.push({
           ...r,
           SHARE_ROLE: sh.SHARE_ROLE,
+          EXPIRES_AT: sh.EXPIRES_AT ?? null,
           OWNER_NAME: this.users.get(String(r.OWNER_ID))?.DISPLAY_NAME,
         });
       }
@@ -797,15 +814,20 @@ export class FakeMetadataDb implements MetadataDb {
           if (!r) return false;
           if (r.OWNER_ID === params[0]) return true;
           if (x.CREATED_BY === params[1] && r.OWNER_ID === params[2]) return true;
-          const userId = params[3];
+          // ... EXISTS (... AND (X.EXPIRES_AT IS NULL OR X.EXPIRES_AT > CAST(? AS TIMESTAMP)) AND ...)
+          if (!s.includes('(X.EXPIRES_AT IS NULL OR X.EXPIRES_AT > CAST(? AS TIMESTAMP))'))
+            throw new Error('listForUser must test share expiry (migration 014)');
+          const now = params[3];
+          const userId = params[4];
           const viaFolders = /OR R\.REPORT_ID IN \(([?, ]+)\)/.exec(s);
           const nIds = viaFolders ? (viaFolders[1].match(/\?/g) ?? []).length : 0;
-          const groups = params.slice(4, params.length - nIds);
+          const groups = params.slice(5, params.length - nIds);
           if (nIds && params.slice(params.length - nIds).includes(r.REPORT_ID as string))
             return true;
           return this.shares.some(
             (sh) =>
               sh.REPORT_ID === r.REPORT_ID &&
+              FakeMetadataDb.activeAt(sh, now) &&
               ((sh.PRINCIPAL_TYPE === 'USER' && sh.PRINCIPAL_ID === userId) ||
                 (sh.PRINCIPAL_TYPE === 'GROUP' && groups.includes(sh.PRINCIPAL_ID as string))),
           );
@@ -1117,12 +1139,13 @@ export class FakeMetadataDb implements MetadataDb {
     }
     // ---- share audit ----
     if (
-      /^INSERT INTO \w+\.QF_SHARE_AUDIT \(AUDIT_ID, REPORT_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT\)/.test(
+      /^INSERT INTO \w+\.QF_SHARE_AUDIT \(AUDIT_ID, REPORT_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, OLD_EXPIRES_AT, NEW_EXPIRES_AT, ACTOR_ID, OCCURRED_AT\)/.test(
         s,
       )
     ) {
-      const [id, rid, action, type, pid, oldRole, newRole, actor] = params;
-      if (!['GRANT', 'CHANGE', 'REVOKE'].includes(String(action)))
+      const [id, rid, action, type, pid, oldRole, newRole, oldExp, newExp, actor] = params;
+      // QF_SAUD_CK_ACTION as widened by migration 014
+      if (!['GRANT', 'CHANGE', 'REVOKE', 'EXPIRY'].includes(String(action)))
         throw new DbError('Check constraint violation.', '23513', -545);
       this.shareAudit.push({
         AUDIT_ID: id,
@@ -1132,6 +1155,8 @@ export class FakeMetadataDb implements MetadataDb {
         PRINCIPAL_ID: pid,
         OLD_ROLE: oldRole,
         NEW_ROLE: newRole,
+        OLD_EXPIRES_AT: oldExp,
+        NEW_EXPIRES_AT: newExp,
         ACTOR_ID: actor,
         OCCURRED_AT: this.now(),
       });
@@ -1144,11 +1169,11 @@ export class FakeMetadataDb implements MetadataDb {
       return before - this.shares.length;
     }
     if (
-      /^INSERT INTO \w+\.QF_REPORT_SHARES \(REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, CREATED_BY, CREATED_AT\)/.test(
+      /^INSERT INTO \w+\.QF_REPORT_SHARES \(REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT, CREATED_BY, CREATED_AT\)/.test(
         s,
       )
     ) {
-      const [rid, type, pid, role, by] = params;
+      const [rid, type, pid, role, expiresAt, by] = params;
       if (!this.reports.has(String(rid)))
         throw new DbError('Foreign key violation.', '23503', -530);
       this.shares.push({
@@ -1156,6 +1181,7 @@ export class FakeMetadataDb implements MetadataDb {
         PRINCIPAL_TYPE: type,
         PRINCIPAL_ID: pid,
         SHARE_ROLE: role,
+        EXPIRES_AT: expiresAt,
         CREATED_BY: by,
       });
       return 1;

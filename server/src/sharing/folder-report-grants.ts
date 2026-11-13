@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { MetadataDb } from '../db/types.js';
 import { T, q } from '../db/schema.js';
-import { sharesInputSchema, type ShareRole } from './access.js';
+import { sharesInputSchema, type AccessCheckOptions, type ShareRole } from './access.js';
+import { shareActive, systemClock, type Clock } from './expiry.js';
 import type { FolderAccessService, FolderMember } from './folder-access.js';
 
 /**
@@ -22,6 +23,7 @@ import type { FolderAccessService, FolderMember } from './folder-access.js';
  * and the stronger of the two wins. So a report added later is shared as soon as it is in the
  * folder; removing it, changing or revoking a folder share, turning the option off or deleting
  * the folder takes away only what came through the folder, never a direct report share.
+ * A folder share past its expiry (migration 014) passes nothing on, checked on every request.
  */
 export type FolderReportSkipReason = 'NOT_OWNER' | 'ADDED_BY_OTHER';
 
@@ -67,6 +69,7 @@ export class FolderReportGrants {
     private readonly db: MetadataDb,
     schema: string,
     private readonly folderAccess: FolderAccessService,
+    private readonly clock: Clock = systemClock,
   ) {
     this.folders = q(schema, T.folders);
     this.shares = q(schema, T.folderShares);
@@ -77,7 +80,10 @@ export class FolderReportGrants {
   }
 
   /** Everyone who can reach `report` through one of its owner's folders, and at what role. */
-  async grantsForReport(report: { id: string; ownerId: string }): Promise<FolderReportGrant[]> {
+  async grantsForReport(
+    report: { id: string; ownerId: string },
+    opts: AccessCheckOptions = {},
+  ): Promise<FolderReportGrant[]> {
     const folders = await this.db.query<Record<string, unknown>>(
       `SELECT F.FOLDER_ID, F.FOLDER_NAME, X.MAX_ROLE
          FROM ${this.folders} F JOIN ${this.sharing} X ON X.FOLDER_ID = F.FOLDER_ID
@@ -109,15 +115,17 @@ export class FolderReportGrants {
     );
     const fids = [...meta.keys()];
     const rows = await this.db.query<Record<string, unknown>>(
-      `SELECT S.FOLDER_ID, S.PRINCIPAL_TYPE, S.PRINCIPAL_ID, S.SHARE_ROLE, U.DISPLAY_NAME
+      `SELECT S.FOLDER_ID, S.PRINCIPAL_TYPE, S.PRINCIPAL_ID, S.SHARE_ROLE, S.EXPIRES_AT, U.DISPLAY_NAME
          FROM ${this.shares} S LEFT JOIN ${this.users} U ON S.PRINCIPAL_TYPE = 'USER' AND U.USER_ID = S.PRINCIPAL_ID
         WHERE S.FOLDER_ID IN (${placeholders(fids.length)}) ORDER BY S.FOLDER_ID, S.PRINCIPAL_TYPE, S.PRINCIPAL_ID`,
       fids,
     );
     const out: FolderReportGrant[] = [];
+    const now = this.clock();
     for (const r of rows) {
       const f = meta.get(String(r.FOLDER_ID));
       if (!f) continue;
+      if (!opts.includeExpired && !shareActive(r.EXPIRES_AT, now)) continue;
       out.push({
         folderId: String(r.FOLDER_ID),
         folderName: f.name,
@@ -140,9 +148,10 @@ export class FolderReportGrants {
     user: { id: string },
     report: { id: string; ownerId: string },
     groups: () => Promise<Set<string>>,
+    opts: AccessCheckOptions = {},
   ): Promise<ShareRole | null> {
     if (report.ownerId === user.id) return null;
-    const grants = await this.grantsForReport(report);
+    const grants = await this.grantsForReport(report, opts);
     if (!grants.length) return null;
     const g = grants.some((x) => x.type === 'GROUP') ? await groups() : new Set<string>();
     let best: ShareRole | null = null;
@@ -164,7 +173,7 @@ export class FolderReportGrants {
       params.push(...groups);
     }
     const rows = await this.db.query<Record<string, unknown>>(
-      `SELECT S.FOLDER_ID, S.SHARE_ROLE, F.OWNER_ID, X.MAX_ROLE
+      `SELECT S.FOLDER_ID, S.SHARE_ROLE, S.EXPIRES_AT, F.OWNER_ID, X.MAX_ROLE
          FROM ${this.shares} S
          JOIN ${this.folders} F ON F.FOLDER_ID = S.FOLDER_ID
          JOIN ${this.sharing} X ON X.FOLDER_ID = S.FOLDER_ID
@@ -172,7 +181,9 @@ export class FolderReportGrants {
       params,
     );
     const folders = new Map<string, { ownerId: string; role: ShareRole }>();
+    const now = this.clock();
     for (const r of rows) {
+      if (!shareActive(r.EXPIRES_AT, now)) continue;
       const id = String(r.FOLDER_ID);
       const granted = minRole(role(r.SHARE_ROLE), role(r.MAX_ROLE));
       const prev = folders.get(id);

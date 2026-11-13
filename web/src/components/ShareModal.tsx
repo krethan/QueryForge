@@ -15,6 +15,8 @@ import {
   StructuredListHead,
   StructuredListRow,
   StructuredListWrapper,
+  Tag,
+  TextInput,
   Toggle,
 } from '@carbon/react';
 import {
@@ -36,10 +38,14 @@ import type {
   UserSummary,
 } from '../api/types';
 import { ErrorNotice } from './ErrorNotice';
+import { browserTimeZone, endOfDayIso, isExpired, lastDayOf, todayLocal } from '../utils/expiry';
 
 type Option = { key: string; type: 'USER' | 'GROUP'; id: string; label: string };
 
-/** Owner-only dialog: share a report with users or groups as VIEWER or EDITOR (enforced by the server). */
+/**
+ * Owner-only dialog: share a report with users or groups as VIEWER or EDITOR (enforced by the
+ * server), each optionally until a chosen day (migration 014).
+ */
 export function ShareModal({ report, onClose }: { report: Report | null; onClose(): void }) {
   const [grants, setGrants] = useState<FolderReportGrant[]>([]);
   useEffect(() => setGrants([]), [report?.id]);
@@ -276,6 +282,9 @@ function ShareDialog({
   const [term, setTerm] = useState('');
   const [pick, setPick] = useState<Option | null>(null);
   const [role, setRole] = useState<Share['role']>('VIEWER');
+  const [until, setUntil] = useState('');
+  /** Expiry of each share as loaded, so an unchanged (even expired) one is never flagged. */
+  const [loaded, setLoaded] = useState<Map<string, string | null>>(new Map());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -284,9 +293,11 @@ function ShareDialog({
     setShares(null);
     setError(null);
     setPick(null);
+    setUntil('');
     Promise.all([load(report.id), api.groups()])
       .then(([s, g]) => {
         setShares(s);
+        setLoaded(new Map(s.map((x) => [`${x.type}:${x.id}`, x.expiresAt ?? null])));
         setGroups(g);
       })
       .catch((e) => {
@@ -319,15 +330,36 @@ function ShareDialog({
       .map((g) => ({ key: `GROUP:${g}`, type: 'GROUP' as const, id: g, label: `Group: ${g}` })),
   ].filter((o) => !shares?.some((s) => s.type === o.type && s.id === o.id));
 
+  const today = todayLocal();
+  const untilBad = until !== '' && (until < today || !endOfDayIso(until));
   const add = () => {
-    if (!pick || !shares) return;
-    setShares([...shares, { type: pick.type, id: pick.id, role, displayName: pick.label }]);
+    if (!pick || !shares || untilBad) return;
+    setShares([
+      ...shares,
+      {
+        type: pick.type,
+        id: pick.id,
+        role,
+        displayName: pick.label,
+        expiresAt: until ? endOfDayIso(until) : null,
+      },
+    ]);
     setPick(null);
     setTerm('');
+    setUntil('');
   };
+  const setExpiry = (i: number, expiresAt: string | null) =>
+    setShares((cur) => cur && cur.map((x, j) => (j === i ? { ...x, expiresAt } : x)));
+  /** A new or changed expiry that has already passed: the server would refuse it. */
+  const badExpiry = (s: Share) =>
+    Boolean(s.expiresAt) &&
+    s.expiresAt !== loaded.get(`${s.type}:${s.id}`) &&
+    isExpired(s.expiresAt);
+  const expiredCount = shares?.filter((s) => isExpired(s.expiresAt)).length ?? 0;
+  const invalid = Boolean(shares?.some(badExpiry));
 
   const save = async () => {
-    if (!report || !shares) return;
+    if (!report || !shares || invalid) return;
     setBusy(true);
     setError(null);
     try {
@@ -347,10 +379,10 @@ function ShareDialog({
       modalLabel="Sharing"
       primaryButtonText={busy ? 'Saving…' : 'Save sharing'}
       secondaryButtonText="Cancel"
-      primaryButtonDisabled={busy || !shares}
+      primaryButtonDisabled={busy || !shares || invalid}
       onRequestClose={() => onClose()}
       onRequestSubmit={save}
-      size="md"
+      size="lg"
     >
       <Stack gap={5}>
         <p className="qf-muted">{note}</p>
@@ -378,10 +410,33 @@ function ShareDialog({
             <SelectItem value="VIEWER" text="Viewer" />
             <SelectItem value="EDITOR" text="Editor" />
           </Select>
-          <Button kind="tertiary" onClick={add} disabled={!pick}>
+          <TextInput
+            id="share-until"
+            type="date"
+            labelText="Until (optional)"
+            value={until}
+            min={today}
+            invalid={untilBad}
+            invalidText="Pick today or a later day."
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUntil(e.target.value)}
+          />
+          <Button kind="tertiary" onClick={add} disabled={!pick || untilBad}>
             Add
           </Button>
         </div>
+        <p className="qf-muted qf-share-expiry-hint">
+          A share with an end date works until the end of that day ({browserTimeZone()}), then stops
+          on its own. Leave it empty for no end date.
+        </p>
+        {expiredCount > 0 && (
+          <InlineNotification
+            kind="warning"
+            lowContrast
+            hideCloseButton
+            title={`${expiredCount} share${expiredCount === 1 ? ' has' : 's have'} expired`}
+            subtitle="Expired shares give no access. Pick a new end date or choose No end date to renew one, or remove it."
+          />
+        )}
         {shares === null ? (
           <InlineLoading description="Loading shares…" />
         ) : shares.length === 0 ? (
@@ -392,6 +447,7 @@ function ShareDialog({
               <StructuredListRow head>
                 <StructuredListCell head>Shared with</StructuredListCell>
                 <StructuredListCell head>Access</StructuredListCell>
+                <StructuredListCell head>Until</StructuredListCell>
                 <StructuredListCell head> </StructuredListCell>
               </StructuredListRow>
             </StructuredListHead>
@@ -402,6 +458,11 @@ function ShareDialog({
                     <span className="qf-share-who">
                       {s.type === 'GROUP' ? <Group /> : <UserIcon />}
                       {s.type === 'GROUP' ? `Group: ${s.id}` : (s.displayName ?? s.id)}
+                      {isExpired(s.expiresAt) && (
+                        <Tag size="sm" type="red">
+                          Expired
+                        </Tag>
+                      )}
                     </span>
                   </StructuredListCell>
                   <StructuredListCell>
@@ -422,6 +483,31 @@ function ShareDialog({
                       <SelectItem value="VIEWER" text="Viewer" />
                       <SelectItem value="EDITOR" text="Editor" />
                     </Select>
+                  </StructuredListCell>
+                  <StructuredListCell>
+                    <div className="qf-share-expiry">
+                      <TextInput
+                        id={`expiry-${i}`}
+                        type="date"
+                        size="sm"
+                        labelText={`Access until, ${s.type === 'GROUP' ? `group ${s.id}` : (s.displayName ?? s.id)}`}
+                        hideLabel
+                        value={lastDayOf(s.expiresAt)}
+                        min={today}
+                        invalid={badExpiry(s)}
+                        invalidText="Pick today or a later day."
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                          setExpiry(i, e.target.value ? endOfDayIso(e.target.value) : null)
+                        }
+                      />
+                      {s.expiresAt ? (
+                        <Button kind="ghost" size="sm" onClick={() => setExpiry(i, null)}>
+                          No end date
+                        </Button>
+                      ) : (
+                        <span className="qf-muted">No end date</span>
+                      )}
+                    </div>
                   </StructuredListCell>
                   <StructuredListCell>
                     <Button

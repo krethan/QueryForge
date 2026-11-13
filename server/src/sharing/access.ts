@@ -12,6 +12,15 @@ import {
 import { AppError } from '../util/errors.js';
 import { GROUP_NAME_RE, type GroupRepository } from './groups.js';
 import type { FolderReportGrants } from './folder-report-grants.js';
+import {
+  expiresAtInput,
+  expiryIso,
+  expiryParam,
+  resolveExpiry,
+  shareActive,
+  systemClock,
+  type Clock,
+} from './expiry.js';
 
 export type ShareRole = 'VIEWER' | 'EDITOR';
 export interface Share {
@@ -19,9 +28,20 @@ export interface Share {
   id: string;
   role: ShareRole;
   displayName?: string;
+  /**
+   * The instant (ISO-8601 UTC) the share stops giving access (migration 014), or null: never.
+   * In a PUT body, leaving it out keeps the share's current expiry and null clears it.
+   */
+  expiresAt?: string | null;
+  /** True once expiresAt has passed: the share gives no access until it is renewed. */
+  expired?: boolean;
 }
 
-export type AuditAction = 'GRANT' | 'CHANGE' | 'REVOKE';
+/**
+ * GRANT / CHANGE (role) / REVOKE, and (migration 014) EXPIRY: only the share's expiry was set,
+ * changed, renewed or cleared. Every event carries the expiry before and after.
+ */
+export type AuditAction = 'GRANT' | 'CHANGE' | 'REVOKE' | 'EXPIRY';
 export interface ShareAuditEvent {
   id: string;
   reportId: string;
@@ -31,36 +51,122 @@ export interface ShareAuditEvent {
   principalName?: string;
   oldRole: ShareRole | null;
   newRole: ShareRole | null;
+  /** Expiry before / after the change (ISO-8601 UTC), null meaning none (migration 014). */
+  oldExpiresAt: string | null;
+  newExpiresAt: string | null;
   actorId: string;
   actorName?: string;
   /** ISO-8601 UTC */
   occurredAt: string;
 }
 
-/** Grant / change / revoke events needed to turn `before` into `after`. */
-export function diffShares(
-  before: Pick<Share, 'type' | 'id' | 'role'>[],
-  after: Pick<Share, 'type' | 'id' | 'role'>[],
-): {
+/** A share as stored or as it will be stored: who, which role, and its expiry (if any). */
+export type ShareState = Pick<Share, 'type' | 'id' | 'role'> & { expiresAt?: string | null };
+export interface ShareChange {
   action: AuditAction;
   type: 'USER' | 'GROUP';
   id: string;
   oldRole: ShareRole | null;
   newRole: ShareRole | null;
-}[] {
+  oldExpiresAt: string | null;
+  newExpiresAt: string | null;
+}
+
+/**
+ * Audit events needed to turn `before` into `after`: GRANT, CHANGE (role changed, whatever
+ * happened to the expiry), EXPIRY (same role, expiry set / changed / cleared) and REVOKE.
+ */
+export function diffShares(before: ShareState[], after: ShareState[]): ShareChange[] {
   const key = (s: { type: string; id: string }) => `${s.type}:${s.id}`;
+  const exp = (s: ShareState) => expiryIso(s.expiresAt ?? null);
   const old = new Map(before.map((s) => [key(s), s]));
-  const out: ReturnType<typeof diffShares> = [];
+  const out: ShareChange[] = [];
   for (const s of after) {
     const o = old.get(key(s));
-    if (!o) out.push({ action: 'GRANT', type: s.type, id: s.id, oldRole: null, newRole: s.role });
-    else if (o.role !== s.role)
-      out.push({ action: 'CHANGE', type: s.type, id: s.id, oldRole: o.role, newRole: s.role });
+    const base = { type: s.type, id: s.id };
+    if (!o)
+      out.push({
+        ...base,
+        action: 'GRANT',
+        oldRole: null,
+        newRole: s.role,
+        oldExpiresAt: null,
+        newExpiresAt: exp(s),
+      });
+    else if (o.role !== s.role || exp(o) !== exp(s))
+      out.push({
+        ...base,
+        action: o.role !== s.role ? 'CHANGE' : 'EXPIRY',
+        oldRole: o.role,
+        newRole: s.role,
+        oldExpiresAt: exp(o),
+        newExpiresAt: exp(s),
+      });
     old.delete(key(s));
   }
   for (const o of old.values())
-    out.push({ action: 'REVOKE', type: o.type, id: o.id, oldRole: o.role, newRole: null });
+    out.push({
+      type: o.type,
+      id: o.id,
+      action: 'REVOKE',
+      oldRole: o.role,
+      newRole: null,
+      oldExpiresAt: exp(o),
+      newExpiresAt: null,
+    });
   return out;
+}
+
+/** A QF_REPORT_SHARES / QF_FOLDER_SHARES row as read for access checks and replacement. */
+export interface ShareRow {
+  PRINCIPAL_TYPE: string;
+  PRINCIPAL_ID: string;
+  SHARE_ROLE: string;
+  EXPIRES_AT?: unknown;
+}
+
+/** Stored rows as share states (expiry as ISO-8601 UTC). */
+export const shareStates = (rows: ShareRow[]): ShareState[] =>
+  rows.map((r) => ({
+    type: r.PRINCIPAL_TYPE === 'GROUP' ? 'GROUP' : 'USER',
+    id: String(r.PRINCIPAL_ID),
+    role: r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER',
+    expiresAt: expiryIso(r.EXPIRES_AT),
+  }));
+
+/**
+ * The shares to store, with each expiry resolved against what is stored now (see
+ * resolveExpiry): an unchanged expiry is kept even when past, a new or changed one must be in
+ * the future, a missing one keeps the current value and null clears it.
+ */
+export function resolveShareExpiries(
+  requested: z.infer<typeof sharesInputSchema>['shares'],
+  current: ShareState[],
+  now: Date,
+): (ShareState & { expiresAt: string | null })[] {
+  const byKey = new Map(current.map((c) => [`${c.type}:${c.id}`, c]));
+  return requested.map((s) => ({
+    type: s.type,
+    id: s.id,
+    role: s.role,
+    expiresAt: resolveExpiry(s.expiresAt, byKey.get(`${s.type}:${s.id}`)?.expiresAt ?? null, now),
+  }));
+}
+
+/** Rows that give access at `now` (all of them when expired shares should count too). */
+export const liveShares = <R extends { EXPIRES_AT?: unknown }>(
+  rows: R[],
+  now: Date,
+  includeExpired = false,
+): R[] => (includeExpired ? rows : rows.filter((r) => shareActive(r.EXPIRES_AT, now)));
+
+/** Options for access checks. */
+export interface AccessCheckOptions {
+  /**
+   * Count expired shares as if they were still in force. Only used to explain why someone has
+   * no access (a scheduled delivery skipping a recipient whose share expired); never to grant.
+   */
+  includeExpired?: boolean;
 }
 
 const dbTs = (v: unknown) => {
@@ -76,6 +182,7 @@ export const sharesInputSchema = z.object({
         type: z.enum(['USER', 'GROUP']),
         id: z.string().min(1).max(128),
         role: z.enum(['VIEWER', 'EDITOR']),
+        expiresAt: expiresAtInput,
       }),
     )
     .max(200),
@@ -103,22 +210,32 @@ export class AccessService {
     private readonly reports: ReportRepository,
     private readonly groups: GroupRepository,
     private readonly folderGrants?: FolderReportGrants,
+    private readonly clock: Clock = systemClock,
   ) {
     this.shares = q(schema, T.shares);
     this.audit = q(schema, T.shareAudit);
     this.users = q(schema, T.users);
   }
 
-  async roleFor(user: Pick<AppUser, 'id' | 'role'>, report: Report): Promise<AccessRole | null> {
+  /**
+   * The caller's effective role on a report. A share whose EXPIRES_AT (migration 014) is not
+   * after the current time gives nothing, on this and every later request.
+   */
+  async roleFor(
+    user: Pick<AppUser, 'id' | 'role'>,
+    report: Report,
+    opts: AccessCheckOptions = {},
+  ): Promise<AccessRole | null> {
     if (user.role === 'ADMIN' && report.ownerId !== user.id) return 'ADMIN';
     if (report.ownerId === user.id) return 'OWNER';
-    const rows = await this.db.query<{
-      PRINCIPAL_TYPE: string;
-      PRINCIPAL_ID: string;
-      SHARE_ROLE: string;
-    }>(`SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM ${this.shares} WHERE REPORT_ID = ?`, [
-      report.id,
-    ]);
+    const rows = liveShares(
+      await this.db.query<ShareRow>(
+        `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM ${this.shares} WHERE REPORT_ID = ?`,
+        [report.id],
+      ),
+      this.clock(),
+      opts.includeExpired,
+    );
     let groupSet: Promise<Set<string>> | undefined;
     const groups = () => (groupSet ??= this.groups.forUser(user.id).then((g) => new Set(g)));
     const g = rows.some((r) => r.PRINCIPAL_TYPE === 'GROUP') ? await groups() : new Set<string>();
@@ -133,7 +250,7 @@ export class AccessService {
     }
     // A direct share keeps its strength; a folder can only add to it, never lower it.
     if (best !== 'EDITOR' && this.folderGrants) {
-      const viaFolder = await this.folderGrants.roleFor(user, report, groups);
+      const viaFolder = await this.folderGrants.roleFor(user, report, groups, opts);
       if (viaFolder && (!best || RANK[viaFolder] > RANK[best])) best = viaFolder;
     }
     return best;
@@ -169,17 +286,12 @@ export class AccessService {
   async listShares(reportId: string): Promise<Share[]> {
     const users = this.shares.replace(T.shares, T.users);
     const rows = await this.db.query<Record<string, unknown>>(
-      `SELECT S.PRINCIPAL_TYPE, S.PRINCIPAL_ID, S.SHARE_ROLE, U.DISPLAY_NAME
+      `SELECT S.PRINCIPAL_TYPE, S.PRINCIPAL_ID, S.SHARE_ROLE, S.EXPIRES_AT, U.DISPLAY_NAME
          FROM ${this.shares} S LEFT JOIN ${users} U ON S.PRINCIPAL_TYPE = 'USER' AND U.USER_ID = S.PRINCIPAL_ID
         WHERE S.REPORT_ID = ? ORDER BY S.PRINCIPAL_TYPE, S.PRINCIPAL_ID`,
       [reportId],
     );
-    return rows.map((r) => ({
-      type: r.PRINCIPAL_TYPE as 'USER' | 'GROUP',
-      id: String(r.PRINCIPAL_ID),
-      role: r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER',
-      displayName: r.DISPLAY_NAME ? String(r.DISPLAY_NAME) : undefined,
-    }));
+    return toShares(rows, this.clock());
   }
 
   /** Replace all shares of a report (owner only; caller has already checked). */
@@ -205,35 +317,39 @@ export class AccessService {
       }
     }
     await this.db.transaction(async (tx) => {
-      const current = await tx.query<{
-        PRINCIPAL_TYPE: string;
-        PRINCIPAL_ID: string;
-        SHARE_ROLE: string;
-      }>(
-        `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM ${this.shares} WHERE REPORT_ID = ?`,
-        [report.id],
+      const current = shareStates(
+        await tx.query<ShareRow>(
+          `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM ${this.shares} WHERE REPORT_ID = ?`,
+          [report.id],
+        ),
       );
-      const events = diffShares(
-        current.map((r) => ({
-          type: r.PRINCIPAL_TYPE === 'GROUP' ? 'GROUP' : 'USER',
-          id: String(r.PRINCIPAL_ID),
-          role: r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER',
-        })),
-        shares,
-      );
+      // A new or changed expiry must be in the future; an unchanged one is kept as it is.
+      const next = resolveShareExpiries(shares, current, this.clock());
+      const events = diffShares(current, next);
       // audit rows commit or roll back together with the share change
       for (const ev of events)
         await tx.update(
-          `INSERT INTO ${this.audit} (AUDIT_ID, REPORT_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
-          [randomUUID(), report.id, ev.action, ev.type, ev.id, ev.oldRole, ev.newRole, by],
+          `INSERT INTO ${this.audit} (AUDIT_ID, REPORT_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, OLD_EXPIRES_AT, NEW_EXPIRES_AT, ACTOR_ID, OCCURRED_AT)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
+          [
+            randomUUID(),
+            report.id,
+            ev.action,
+            ev.type,
+            ev.id,
+            ev.oldRole,
+            ev.newRole,
+            expiryParam(ev.oldExpiresAt),
+            expiryParam(ev.newExpiresAt),
+            by,
+          ],
         );
       await tx.update(`DELETE FROM ${this.shares} WHERE REPORT_ID = ?`, [report.id]);
-      for (const s of shares)
+      for (const s of next)
         await tx.update(
-          `INSERT INTO ${this.shares} (REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, CREATED_BY, CREATED_AT)
-           VALUES (?, ?, ?, ?, ?, ${NOW_UTC})`,
-          [report.id, s.type, s.id, s.role, by],
+          `INSERT INTO ${this.shares} (REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT, CREATED_BY, CREATED_AT)
+           VALUES (?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
+          [report.id, s.type, s.id, s.role, expiryParam(s.expiresAt), by],
         );
     });
     return this.listShares(report.id);
@@ -244,7 +360,7 @@ export class AccessService {
     const n = Math.max(1, Math.min(Math.floor(limit) || 100, 500));
     const rows = await this.db.query<Record<string, unknown>>(
       `SELECT A.AUDIT_ID, A.REPORT_ID, A.ACTION, A.PRINCIPAL_TYPE, A.PRINCIPAL_ID, A.OLD_ROLE, A.NEW_ROLE,
-              A.ACTOR_ID, A.OCCURRED_AT, ACT.DISPLAY_NAME AS ACTOR_NAME, PU.DISPLAY_NAME AS PRINCIPAL_NAME
+              A.OLD_EXPIRES_AT, A.NEW_EXPIRES_AT, A.ACTOR_ID, A.OCCURRED_AT, ACT.DISPLAY_NAME AS ACTOR_NAME, PU.DISPLAY_NAME AS PRINCIPAL_NAME
          FROM ${this.audit} A
          LEFT JOIN ${this.users} ACT ON ACT.USER_ID = A.ACTOR_ID
          LEFT JOIN ${this.users} PU ON A.PRINCIPAL_TYPE = 'USER' AND PU.USER_ID = A.PRINCIPAL_ID
@@ -262,9 +378,23 @@ export class AccessService {
       principalName: r.PRINCIPAL_NAME ? String(r.PRINCIPAL_NAME) : undefined,
       oldRole: role(r.OLD_ROLE),
       newRole: role(r.NEW_ROLE),
+      oldExpiresAt: expiryIso(r.OLD_EXPIRES_AT),
+      newExpiresAt: expiryIso(r.NEW_EXPIRES_AT),
       actorId: String(r.ACTOR_ID),
       actorName: r.ACTOR_NAME ? String(r.ACTOR_NAME) : undefined,
       occurredAt: dbTs(r.OCCURRED_AT),
     }));
   }
+}
+
+/** Share rows (with EXPIRES_AT and DISPLAY_NAME) as the API returns them, flagged when expired. */
+export function toShares(rows: Record<string, unknown>[], now: Date): Share[] {
+  return rows.map((r) => ({
+    type: r.PRINCIPAL_TYPE === 'GROUP' ? 'GROUP' : 'USER',
+    id: String(r.PRINCIPAL_ID),
+    role: r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER',
+    displayName: r.DISPLAY_NAME ? String(r.DISPLAY_NAME) : undefined,
+    expiresAt: expiryIso(r.EXPIRES_AT),
+    expired: !shareActive(r.EXPIRES_AT, now),
+  }));
 }

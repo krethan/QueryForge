@@ -25,6 +25,7 @@ import { AccessService } from './sharing/access.js';
 import { GroupRepository } from './sharing/groups.js';
 import { FolderAccessService } from './sharing/folder-access.js';
 import { FolderReportGrants } from './sharing/folder-report-grants.js';
+import { systemClock, type Clock } from './sharing/expiry.js';
 
 export interface AppOptions {
   cfg: AppConfig;
@@ -35,22 +36,41 @@ export interface AppOptions {
   oidc?: OidcProvider | null;
   ldap?: LdapAuthenticator | null;
   mailer?: Mailer | null;
+  /**
+   * Where "now" comes from for share expiry checks (migration 014). Tests pass a movable clock;
+   * defaults to the system clock.
+   */
+  clock?: Clock;
 }
 
 export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppOptions) {
+  const clock = o.clock ?? systemClock;
   const sessions = new SessionService(cfg);
   const users = new UserRepository(metadataDb, cfg.metadata.schema);
-  const reports = new ReportRepository(metadataDb, cfg.metadata.schema);
+  const reports = new ReportRepository(metadataDb, cfg.metadata.schema, clock);
   const history = new HistoryRepository(metadataDb, cfg.metadata.schema);
   const executor = new QueryExecutor(cfg, jobFactory);
   const catalog = new CatalogService(cfg, executor);
   const groups = new GroupRepository(metadataDb, cfg.metadata.schema);
   const folders = new FolderRepository(metadataDb, cfg.metadata.schema);
-  const folderAccess = new FolderAccessService(metadataDb, cfg.metadata.schema, folders, groups);
-  const folderGrants = new FolderReportGrants(metadataDb, cfg.metadata.schema, folderAccess);
-  const access = new AccessService(metadataDb, cfg.metadata.schema, reports, groups, folderGrants);
+  const folderAccess = new FolderAccessService(
+    metadataDb,
+    cfg.metadata.schema,
+    folders,
+    groups,
+    clock,
+  );
+  const folderGrants = new FolderReportGrants(metadataDb, cfg.metadata.schema, folderAccess, clock);
+  const access = new AccessService(
+    metadataDb,
+    cfg.metadata.schema,
+    reports,
+    groups,
+    folderGrants,
+    clock,
+  );
   const execution = new ExecutionService(cfg, executor, access, history);
-  const schedules = new ScheduleRepository(metadataDb, cfg.metadata.schema);
+  const schedules = new ScheduleRepository(metadataDb, cfg.metadata.schema, clock);
   const tileOrder = new TileOrderRepository(metadataDb, cfg.metadata.schema);
   const pick = <T>(v: T | null | undefined, make: () => T | undefined) =>
     v === null ? undefined : (v ?? make());
@@ -68,6 +88,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     access,
     cfg.scheduler,
     folderGrants,
+    clock,
   );
   const scheduler = new Scheduler(cfg, schedules, users, access, execution, mailer, recipients);
 

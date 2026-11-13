@@ -4,6 +4,7 @@ import type { MetadataDb } from '../db/types.js';
 import { NOW_UTC, T, q } from '../db/schema.js';
 import { AppError, DbError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
+import { expiryIso, expiryParam } from '../sharing/expiry.js';
 
 export interface Folder {
   id: string;
@@ -229,7 +230,7 @@ export class FolderRepository {
       );
       const shares = folder
         ? await tx.query<Record<string, unknown>>(
-            `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM ${this.folderShares} WHERE FOLDER_ID = ? ORDER BY PRINCIPAL_TYPE, PRINCIPAL_ID`,
+            `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM ${this.folderShares} WHERE FOLDER_ID = ? ORDER BY PRINCIPAL_TYPE, PRINCIPAL_ID`,
             [folderId],
           )
         : [];
@@ -255,19 +256,32 @@ export class FolderRepository {
       );
       if (n === 0) throw FOLDER_NOT_FOUND(); // rolls back the UPDATE
       const reportsRole = shareRole(sharing?.MAX_ROLE);
-      const revoke = (type: string, id: string, oldRole: string | null) =>
+      // An expired share (migration 014) is revoked like any other; its expiry goes on the row.
+      const revoke = (type: string, id: string, oldRole: string | null, oldExpiry: unknown) =>
         tx.update(
-          `INSERT INTO ${this.folderShareAudit} (AUDIT_ID, FOLDER_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
-          [randomUUID(), folderId, 'REVOKE', type, id, oldRole, null, userId],
+          `INSERT INTO ${this.folderShareAudit} (AUDIT_ID, FOLDER_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, OLD_EXPIRES_AT, NEW_EXPIRES_AT, ACTOR_ID, OCCURRED_AT)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
+          [
+            randomUUID(),
+            folderId,
+            'REVOKE',
+            type,
+            id,
+            oldRole,
+            null,
+            expiryParam(expiryIso(oldExpiry)),
+            null,
+            userId,
+          ],
         );
       for (const sh of shares)
         await revoke(
           sh.PRINCIPAL_TYPE === 'GROUP' ? 'GROUP' : 'USER',
           String(sh.PRINCIPAL_ID),
           shareRole(sh.SHARE_ROLE),
+          sh.EXPIRES_AT,
         );
-      if (reportsRole) await revoke('REPORTS', REPORTS_PRINCIPAL, reportsRole);
+      if (reportsRole) await revoke('REPORTS', REPORTS_PRINCIPAL, reportsRole, null);
       await tx.update(
         `INSERT INTO ${this.deletions} (DELETION_ID, FOLDER_ID, FOLDER_NAME, OWNER_ID, ACTOR_ID, SHARE_COUNT, PLACED_COUNT, FILED_COUNT, REPORTS_ROLE, DELETED_AT)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${NOW_UTC})`,

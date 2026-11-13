@@ -670,6 +670,34 @@ no deletion record (their sharing history rows, if any, are still there). **Not 
 migration 013, the deletion transaction and the export's keyset query have only run against the in-memory
 fake metadata database; `npm run verify:ibmi` covers them for a non-production partition.
 
+## Share end dates
+
+A report or folder share can have an end date. In the **Share** dialog, the **Until (optional)** date on
+the add row and the **Until** column for each existing share set it; **No end date** clears it. The share
+works until the end of the chosen day in your browser's time zone (the dialog names the zone) and then
+stops on its own: every access check (opening, running and exporting a report, the dashboard's Shared
+with me list, folder visibility, folder report sharing, schedule recipients) compares the end date with
+the current time on each request, so nothing has to run at midnight and no restart is needed. An end date
+you add or change must be in the future; an end date you leave alone is kept even once it has passed.
+
+Expired shares stay in the list with a red **Expired** tag and a warning, so the owner can renew one (a
+new date or **No end date**) or remove it. They give no access, including to admins through a shared
+folder: a folder whose shares have all expired counts as personal again. Each end-date change is audited
+as an **End date** (`EXPIRY`) event with the old and new date, in the report's and folder's Access and
+audit panels and in the folder audit CSV (**Expiry before (UTC)** / **Expiry after (UTC)** columns).
+Scheduled delivery skips a recipient whose access has expired and records it in the run's history
+("Not sent to …: their access has expired."); saving a schedule to such a recipient is refused until the
+share is renewed. Nobody is notified when a share expires. The demo seeds one expired and one expiring
+share on "Customer Credit Limits".
+
+Storage is migration `014_share_expiry.sql`: nullable `EXPIRES_AT` columns on `QF_REPORT_SHARES` and
+`QF_FOLDER_SHARES`, `OLD_EXPIRES_AT` / `NEW_EXPIRES_AT` on both share audit tables, and the two audit
+action check constraints dropped and re-added to allow `EXPIRY`. Existing shares get a null end date (no
+end date), so nothing changes until an owner sets one. Adding columns rebuilds those tables under an
+exclusive lock, so apply it in a quiet window. No index is added: share lists are small and per report or
+folder. **Not tested on a real IBM i:** migration 014 and the end-date checks have only run against the
+in-memory fake metadata database; `npm run verify:ibmi` covers them for a non-production partition.
+
 ## Rearranging dashboard tiles
 
 The dashboard's **Sort by** list starts on **My order**, each user's own tile order:
