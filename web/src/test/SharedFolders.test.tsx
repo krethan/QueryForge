@@ -206,6 +206,7 @@ describe('Dashboard shared folders', { timeout: 20000 }, () => {
         FIN,
         [expect.objectContaining({ type: 'GROUP', id: 'finance', role: 'EDITOR' })],
         null,
+        true,
       ),
     );
   });

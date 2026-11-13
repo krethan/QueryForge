@@ -176,8 +176,8 @@ describe('share expiry rules', () => {
 describe('migration 014: share expiry', () => {
   const migs = loadMigrations('QFMETA');
   const m14 = migs.find((m) => m.version === 14)!;
-  it('is the last migration and only adds nullable columns and widens two ACTION checks', () => {
-    expect(migs.at(-1)!.version).toBe(14);
+  it('comes before 015 and only adds nullable columns and widens two ACTION checks', () => {
+    expect(migs.map((m) => m.version).indexOf(14)).toBe(13);
     expect(m14.file).toBe('014_share_expiry.sql');
     const stmts = m14.statements.map((s) => s.replace(/\s+/g, ' '));
     const adds = stmts.filter((s) => / ADD COLUMN /.test(s));

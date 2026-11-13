@@ -1,13 +1,84 @@
 import {
   Button,
+  InlineNotification,
   StructuredListBody,
   StructuredListCell,
   StructuredListRow,
   StructuredListWrapper,
+  Toggle,
 } from '@carbon/react';
 import { Logout } from '@carbon/icons-react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { api } from '../api/client';
+import type { AccountSettings } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { ErrorNotice } from '../components/ErrorNotice';
+
+/** "E-mail me about shares" (migration 015): being given access, role changes, end dates. */
+export function ShareEmailSetting() {
+  const [info, setInfo] = useState<AccountSettings | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api
+      .getAccountSettings()
+      .then(setInfo)
+      .catch((e) => setError(e));
+  }, []);
+  const change = async (on: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setInfo(await api.putAccountSettings({ shareEmails: on }));
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="qf-section qf-account-notify">
+      <h2>Notifications</h2>
+      <ErrorNotice error={error} />
+      {info && (
+        <>
+          <Toggle
+            id="account-share-emails"
+            labelText="E-mail me about shares"
+            labelA="Off"
+            labelB="On"
+            toggled={info.settings.shareEmails}
+            disabled={busy}
+            onToggle={(on: boolean) => void change(on)}
+          />
+          <p className="qf-muted">
+            When someone shares a report or folder with you or changes your access, and a few days
+            before a share you made ends.
+          </p>
+          {!info.mailConfigured && (
+            <InlineNotification
+              kind="info"
+              lowContrast
+              hideCloseButton
+              title="E-mail isn't set up on this server"
+              subtitle="No share e-mails are sent at the moment. Your choice is kept for when it is."
+            />
+          )}
+          {info.mailConfigured && !info.hasEmail && (
+            <InlineNotification
+              kind="info"
+              lowContrast
+              hideCloseButton
+              title="No e-mail address"
+              subtitle="Your account has no e-mail address, so these e-mails can't reach you."
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 export function AccountPage() {
   const { user, logout } = useAuth();
@@ -53,6 +124,7 @@ export function AccountPage() {
           </StructuredListRow>
         </StructuredListBody>
       </StructuredListWrapper>
+      <ShareEmailSetting />
     </>
   );
 }

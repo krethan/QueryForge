@@ -128,6 +128,24 @@ const schema = z.object({
   SMTP_FROM: z.string().optional(),
   SMTP_REJECT_UNAUTHORIZED: bool.default(true),
   SMTP_CA_FILE: z.string().optional(),
+
+  // Share notifications (migration 015)
+  /**
+   * Public address of the app used for links in e-mails (e.g. https://unclebob.example.com).
+   * Defaults to APP_ORIGIN. Never derived from a request's Host header.
+   */
+  QF_PUBLIC_BASE_URL: z
+    .string()
+    .url()
+    .refine(
+      (v) => /^https?:\/\//i.test(v),
+      'QF_PUBLIC_BASE_URL must start with http:// or https://',
+    )
+    .optional(),
+  /** Days before a share ends that its owner is reminded by e-mail; 0 turns reminders off. */
+  QF_SHARE_REMINDER_DAYS: z.coerce.number().int().min(0).max(60).default(3),
+  /** Also remind the people whose access is ending (default: only the owner). */
+  QF_SHARE_REMINDER_TO_RECIPIENT: bool.default(false),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -221,6 +239,16 @@ export interface AppConfig {
     from: string;
     rejectUnauthorized: boolean;
     caFile?: string;
+  };
+  /** Share notification e-mails and expiry reminders (migration 015). */
+  notifications: {
+    /** Base of links in e-mails: QF_PUBLIC_BASE_URL, else APP_ORIGIN. */
+    publicBaseUrl: string;
+    /** Days before a share ends to remind; 0 = off. */
+    reminderDays: number;
+    reminderToRecipient: boolean;
+    /** Zone end dates are shown in (SCHEDULE_DEFAULT_TIMEZONE). */
+    timezone: string;
   };
 }
 
@@ -403,5 +431,11 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
           caFile: e.SMTP_CA_FILE,
         }
       : undefined,
+    notifications: {
+      publicBaseUrl: e.QF_PUBLIC_BASE_URL ?? e.APP_ORIGIN,
+      reminderDays: e.QF_SHARE_REMINDER_DAYS,
+      reminderToRecipient: e.QF_SHARE_REMINDER_TO_RECIPIENT,
+      timezone: e.SCHEDULE_DEFAULT_TIMEZONE,
+    },
   };
 }

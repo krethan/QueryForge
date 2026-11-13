@@ -1,6 +1,7 @@
 import type React from 'react';
 import {
   Button,
+  Checkbox,
   ComboBox,
   InlineLoading,
   InlineNotification,
@@ -48,16 +49,22 @@ type Option = { key: string; type: 'USER' | 'GROUP'; id: string; label: string }
  */
 export function ShareModal({ report, onClose }: { report: Report | null; onClose(): void }) {
   const [grants, setGrants] = useState<FolderReportGrant[]>([]);
-  useEffect(() => setGrants([]), [report?.id]);
+  const [mailConfigured, setMailConfigured] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    setGrants([]);
+    setMailConfigured(undefined);
+  }, [report?.id]);
   return (
     <ShareDialog
       target={report ? { id: report.id, name: report.name } : null}
       load={async (id) => {
         const r = await api.getReportSharing(id);
         setGrants(r.folderGrants);
+        setMailConfigured(r.mailConfigured);
         return r.shares;
       }}
-      save={api.putShares}
+      save={(id, shares, notify) => api.putShares(id, shares, notify)}
+      mailConfigured={mailConfigured}
       note="Viewers can run and export the report. Editors can also change its SQL, parameters and schedules. Only you (the owner) can share or delete it."
       onClose={onClose}
     >
@@ -142,7 +149,8 @@ export function FolderShareModal({
         setShareReports(r.shareReports);
         return r.shares;
       }}
-      save={(id, shares) => api.putFolderSharing(id, shares, shareReports)}
+      save={(id, shares, notify) => api.putFolderSharing(id, shares, shareReports, notify)}
+      mailConfigured={info?.mailConfigured}
       heading="Share folder"
       headerAction={
         onAudit && folder ? (
@@ -261,12 +269,16 @@ function ShareDialog({
   heading,
   note,
   headerAction,
+  mailConfigured,
   onClose,
   children,
 }: {
   target: { id: string; name: string } | null;
   load(id: string): Promise<Share[]>;
-  save(id: string, shares: Share[]): Promise<unknown>;
+  /** `notify`: e-mail people who gain access or change role ("Notify people", migration 015). */
+  save(id: string, shares: Share[], notify: boolean): Promise<unknown>;
+  /** Whether the server can send e-mail; undefined while not known. Never any SMTP setting. */
+  mailConfigured?: boolean;
   heading?: string;
   note: string;
   /** Shown under the note, e.g. a link to the folder's access and audit panel. */
@@ -287,9 +299,12 @@ function ShareDialog({
   const [loaded, setLoaded] = useState<Map<string, string | null>>(new Map());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  /** "Notify people": on by default each time the dialog opens. */
+  const [notify, setNotify] = useState(true);
 
   useEffect(() => {
     if (!report) return;
+    setNotify(true);
     setShares(null);
     setError(null);
     setPick(null);
@@ -363,7 +378,7 @@ function ShareDialog({
     setBusy(true);
     setError(null);
     try {
-      await saveShares(report.id, shares);
+      await saveShares(report.id, shares, notify && mailConfigured !== false);
       onClose(true);
     } catch (e) {
       setError(e);
@@ -525,6 +540,20 @@ function ShareDialog({
           </StructuredListWrapper>
         )}
         {children}
+        <div className="qf-share-notify">
+          <Checkbox
+            id="share-notify"
+            labelText="Notify people by e-mail"
+            checked={notify && mailConfigured !== false}
+            disabled={mailConfigured === false}
+            onChange={(_e: unknown, { checked }: { checked: boolean }) => setNotify(checked)}
+          />
+          <p className="qf-muted">
+            {mailConfigured === false
+              ? "E-mail isn't set up on this server, so nobody will be notified. Sharing still works."
+              : 'People who gain access or whose role changes get an e-mail saying who shared what, the access and any end date. Anyone who turned off share e-mails in Account is skipped.'}
+          </p>
+        </div>
         <p className="qf-muted">Changes take effect when you save.</p>
       </Stack>
     </Modal>

@@ -20,6 +20,8 @@ import type {
   FolderReportGrant,
   FolderShareReports,
   FolderSharing,
+  NotifyOutcome,
+  AccountSettings,
   Share,
   UserSummary,
   ExecutionRecord,
@@ -241,10 +243,17 @@ export const api = {
    * Replace a folder's shares and set whether its reports are shared too (owner only). The
    * server decides which reports that covers: only your own, placed there by you.
    */
-  putFolderSharing: (id: string, shares: Share[], shareReports: FolderShareReports) =>
-    json<FolderSharing>('PUT', `/folders/${id}/shares`, {
+  putFolderSharing: (
+    id: string,
+    shares: Share[],
+    shareReports: FolderShareReports,
+    /** E-mail people who gain access or change role (migration 015); left out: no e-mail. */
+    notify?: boolean,
+  ) =>
+    json<FolderSharing & { notification?: NotifyOutcome }>('PUT', `/folders/${id}/shares`, {
       shares: shares.map(shareBody),
       shareReports,
+      ...(notify === undefined ? {} : { notify }),
     }),
   /** Put a report you can see into a folder you can edit. */
   addToFolder: (folderId: string, reportId: string) =>
@@ -348,14 +357,26 @@ export const api = {
     json<{ shares: Share[] }>('GET', `/reports/${id}/shares`).then((r) => r.shares),
   /** A report's own shares plus the read-only access it gets through its owner's folders. */
   getReportSharing: (id: string) =>
-    json<{ shares: Share[]; folderGrants?: FolderReportGrant[] }>(
+    json<{ shares: Share[]; folderGrants?: FolderReportGrant[]; mailConfigured?: boolean }>(
       'GET',
       `/reports/${id}/shares`,
-    ).then((r) => ({ shares: r.shares, folderGrants: r.folderGrants ?? [] })),
-  putShares: (id: string, shares: Share[]) =>
-    json<{ shares: Share[] }>('PUT', `/reports/${id}/shares`, {
+    ).then(
+      (r): { shares: Share[]; folderGrants: FolderReportGrant[]; mailConfigured?: boolean } => ({
+        shares: r.shares,
+        folderGrants: r.folderGrants ?? [],
+        mailConfigured: r.mailConfigured,
+      }),
+    ),
+  /** Replace a report's shares; `notify` e-mails people who gain access or change role (015). */
+  putShares: (id: string, shares: Share[], notify?: boolean) =>
+    json<{ shares: Share[]; notification?: NotifyOutcome }>('PUT', `/reports/${id}/shares`, {
       shares: shares.map(shareBody),
+      ...(notify === undefined ? {} : { notify }),
     }).then((r) => r.shares),
+  /** Your own settings (migration 015): whether you get e-mails about shares. */
+  getAccountSettings: () => json<AccountSettings>('GET', '/account/settings'),
+  putAccountSettings: (settings: AccountSettings['settings']) =>
+    json<AccountSettings>('PUT', '/account/settings', settings),
   searchUsers: (search: string) =>
     json<{ users: UserSummary[] }>('GET', `/users?search=${encodeURIComponent(search)}`).then(
       (r) => r.users,

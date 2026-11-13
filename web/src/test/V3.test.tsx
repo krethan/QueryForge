@@ -185,9 +185,11 @@ describe('Share dialog', () => {
     await userEvent.selectOptions(document.getElementById('role-0')!, 'EDITOR');
     expect(document.getElementById('role-0')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
-    expect(save).toHaveBeenLastCalledWith('1', [
-      { type: 'USER', id: 'u-bob', role: 'EDITOR', displayName: 'Bob' },
-    ]);
+    expect(save).toHaveBeenLastCalledWith(
+      '1',
+      [{ type: 'USER', id: 'u-bob', role: 'EDITOR', displayName: 'Bob' }],
+      true,
+    );
     expect(onClose).toHaveBeenCalledOnce();
     onClose.mockClear();
     await userEvent.click(screen.getByRole('button', { name: 'Remove access' }));

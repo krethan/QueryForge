@@ -26,6 +26,8 @@ import { GroupRepository } from './sharing/groups.js';
 import { FolderAccessService } from './sharing/folder-access.js';
 import { FolderReportGrants } from './sharing/folder-report-grants.js';
 import { systemClock, type Clock } from './sharing/expiry.js';
+import { ShareNotifier } from './notifications/share-notifier.js';
+import { UserSettingsRepository } from './notifications/settings.js';
 
 export interface AppOptions {
   cfg: AppConfig;
@@ -90,7 +92,18 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     folderGrants,
     clock,
   );
-  const scheduler = new Scheduler(cfg, schedules, users, access, execution, mailer, recipients);
+  const userSettings = new UserSettingsRepository(metadataDb, cfg.metadata.schema);
+  const notifier = new ShareNotifier(metadataDb, cfg.metadata.schema, cfg, mailer, clock);
+  const scheduler = new Scheduler(
+    cfg,
+    schedules,
+    users,
+    access,
+    execution,
+    mailer,
+    recipients,
+    notifier,
+  );
 
   const app = express();
   app.disable('x-powered-by');
@@ -138,6 +151,8 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       scheduler,
       recipients,
       mailer,
+      notifier,
+      userSettings,
       oidc,
       ldap,
     }),
@@ -170,5 +185,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     scheduler,
     recipients,
     mailer,
+    notifier,
+    userSettings,
   };
 }
