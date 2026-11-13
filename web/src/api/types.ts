@@ -443,6 +443,28 @@ export interface FolderAuditPage {
   limit: number;
   offset: number;
 }
+/** One deleted folder (migration 013). Only app admins can read these. */
+export interface FolderDeletion {
+  id: string;
+  folderId: string;
+  folderName: string;
+  ownerId: string;
+  ownerName?: string;
+  actorId: string;
+  actorName?: string;
+  shareCount: number;
+  placedCount: number;
+  filedCount: number;
+  reportsRole: 'VIEWER' | 'EDITOR' | null;
+  deletedAt: string;
+}
+/** GET /admin/folder-deletions: one page, newest first. */
+export interface FolderDeletionPage {
+  deletions: FolderDeletion[];
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+}
 
 // ---- Report Builder (catalog-driven SELECT) ----
 export type CatalogTableType = 'T' | 'P' | 'V' | 'L' | 'A' | 'M' | string;

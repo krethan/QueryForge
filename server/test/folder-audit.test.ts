@@ -92,7 +92,7 @@ describe('migration 012: folder audit report-sharing rows', () => {
   const m = migs.find((x) => x.version === 12)!;
   const sql = m.statements.join('\n');
   it('comes after 011 and only replaces the PRINCIPAL_TYPE check on the folder audit table', () => {
-    expect(migs.map((x) => x.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(migs.map((x) => x.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     expect(m.file).toBe('012_folder_audit_report_sharing.sql');
     expect(m.statements).toHaveLength(2);
     expect(m.statements[0]).toBe(
@@ -217,7 +217,13 @@ describe('recording folder report-sharing changes', () => {
     const f = await newFolder(alice, 'Finance');
     await shareFolder(alice, f.id, [USER('u-bob')], 'VIEWER');
     expect((await alice.send('delete', `/api/folders/${f.id}`)).status).toBe(200);
-    expect(db.folderShareAudit.filter((a) => a.FOLDER_ID === f.id)).toHaveLength(2);
+    // GRANT bob, GRANT reports; then (migration 013) the delete revokes both in the same trail.
+    const rows = db.folderShareAudit.filter((a) => a.FOLDER_ID === f.id);
+    expect(rows).toHaveLength(4);
+    expect(rows.filter((a) => a.ACTION === 'REVOKE').map((a) => a.PRINCIPAL_TYPE)).toEqual([
+      'USER',
+      'REPORTS',
+    ]);
     expect((await audit(alice, f.id)).status).toBe(404);
   });
 });

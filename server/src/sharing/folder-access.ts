@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { MetadataDb } from '../db/types.js';
-import { NOW_UTC, T, q } from '../db/schema.js';
+import { NOW_UTC, T, q, toDbTimestamp } from '../db/schema.js';
 import type { AppUser } from '../auth/users.js';
 import { AppError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
@@ -87,6 +87,14 @@ export interface FolderAuditPage {
 export const FOLDER_AUDIT_PAGE = 25;
 export const MAX_FOLDER_AUDIT_PAGE = 100;
 export const MAX_FOLDER_AUDIT_OFFSET = 100_000;
+/** Rows read per round trip when exporting a folder's whole audit trail. */
+export const FOLDER_AUDIT_EXPORT_BATCH = 500;
+
+/** Where an audit export batch continues from: the last row read, as Db2 returned it. */
+export interface FolderAuditCursor {
+  occurredAt: string;
+  id: string;
+}
 
 export const folderAuditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_FOLDER_AUDIT_PAGE).default(FOLDER_AUDIT_PAGE),
@@ -616,8 +624,7 @@ export class FolderAccessService {
     const n = Math.max(1, Math.min(Math.floor(limit) || FOLDER_AUDIT_PAGE, 500));
     const skip = Math.max(0, Math.min(Math.floor(offset) || 0, MAX_FOLDER_AUDIT_OFFSET));
     const rows = await this.db.query<Record<string, unknown>>(
-      `SELECT A.AUDIT_ID, A.FOLDER_ID, A.ACTION, A.PRINCIPAL_TYPE, A.PRINCIPAL_ID, A.OLD_ROLE, A.NEW_ROLE,
-              A.ACTOR_ID, A.OCCURRED_AT, ACT.DISPLAY_NAME AS ACTOR_NAME, PU.DISPLAY_NAME AS PRINCIPAL_NAME
+      `SELECT ${AUDIT_COLUMNS}
          FROM ${this.audit} A
          LEFT JOIN ${this.users} ACT ON ACT.USER_ID = A.ACTOR_ID
          LEFT JOIN ${this.users} PU ON A.PRINCIPAL_TYPE = 'USER' AND PU.USER_ID = A.PRINCIPAL_ID
@@ -625,23 +632,80 @@ export class FolderAccessService {
         OFFSET ${skip} ROWS FETCH FIRST ${n + 1} ROWS ONLY`,
       [folderId],
     );
-    const role = (v: unknown): ShareRole | null =>
-      v === 'EDITOR' ? 'EDITOR' : v === 'VIEWER' ? 'VIEWER' : null;
-    const type = (v: unknown): FolderAuditPrincipal =>
-      v === 'GROUP' ? 'GROUP' : v === 'REPORTS' ? 'REPORTS' : 'USER';
-    const events = rows.slice(0, n).map((r) => ({
-      id: String(r.AUDIT_ID),
-      folderId: String(r.FOLDER_ID),
-      action: r.ACTION as AuditAction,
-      principalType: type(r.PRINCIPAL_TYPE),
-      principalId: String(r.PRINCIPAL_ID),
-      principalName: r.PRINCIPAL_NAME ? String(r.PRINCIPAL_NAME) : undefined,
-      oldRole: role(r.OLD_ROLE),
-      newRole: role(r.NEW_ROLE),
-      actorId: String(r.ACTOR_ID),
-      actorName: r.ACTOR_NAME ? String(r.ACTOR_NAME) : undefined,
-      occurredAt: dbTimestampToIso(r.OCCURRED_AT) ?? String(r.OCCURRED_AT),
-    }));
-    return { events, hasMore: rows.length > n };
+    return { events: rows.slice(0, n).map(toAuditEvent), hasMore: rows.length > n };
+  }
+
+  /**
+   * One batch of the folder's audit trail for export, newest first, continuing strictly after
+   * `after` (keyset paging on OCCURRED_AT DESC, AUDIT_ID). Unlike OFFSET paging, a change
+   * recorded while an export runs cannot shift the batches, so no row is repeated or skipped,
+   * and there is no offset ceiling. The cursor carries OCCURRED_AT exactly as Db2 returned it.
+   * Caller has checked access. The folder itself need not exist any more.
+   */
+  async auditBatch(
+    folderId: string,
+    after: FolderAuditCursor | null,
+    size = FOLDER_AUDIT_EXPORT_BATCH,
+  ): Promise<{ events: FolderShareAuditEvent[]; next: FolderAuditCursor | null }> {
+    const n = Math.max(1, Math.min(Math.floor(size) || FOLDER_AUDIT_EXPORT_BATCH, 1000));
+    const rows = await this.db.query<Record<string, unknown>>(
+      `SELECT ${AUDIT_COLUMNS}
+         FROM ${this.audit} A
+         LEFT JOIN ${this.users} ACT ON ACT.USER_ID = A.ACTOR_ID
+         LEFT JOIN ${this.users} PU ON A.PRINCIPAL_TYPE = 'USER' AND PU.USER_ID = A.PRINCIPAL_ID
+        WHERE A.FOLDER_ID = ?${
+          after
+            ? ' AND (A.OCCURRED_AT < CAST(? AS TIMESTAMP) OR (A.OCCURRED_AT = CAST(? AS TIMESTAMP) AND A.AUDIT_ID > ?))'
+            : ''
+        }
+        ORDER BY A.OCCURRED_AT DESC, A.AUDIT_ID
+        FETCH FIRST ${n} ROWS ONLY`,
+      after ? [folderId, after.occurredAt, after.occurredAt, after.id] : [folderId],
+    );
+    const last = rows.at(-1);
+    return {
+      events: rows.map(toAuditEvent),
+      next:
+        rows.length === n && last
+          ? { occurredAt: cursorTimestamp(last.OCCURRED_AT), id: String(last.AUDIT_ID) }
+          : null,
+    };
+  }
+
+  /** Every audit event for the folder, newest first, read a batch at a time (never truncated). */
+  async *auditAll(
+    folderId: string,
+    size = FOLDER_AUDIT_EXPORT_BATCH,
+  ): AsyncGenerator<FolderShareAuditEvent[]> {
+    let after: FolderAuditCursor | null = null;
+    do {
+      const batch = await this.auditBatch(folderId, after, size);
+      if (batch.events.length) yield batch.events;
+      after = batch.next;
+    } while (after);
   }
 }
+
+/** OCCURRED_AT exactly as read (Mapepire returns TIMESTAMP as text), to bind back as the cursor. */
+const cursorTimestamp = (v: unknown) => (v instanceof Date ? toDbTimestamp(v) : String(v));
+
+const AUDIT_COLUMNS = `A.AUDIT_ID, A.FOLDER_ID, A.ACTION, A.PRINCIPAL_TYPE, A.PRINCIPAL_ID, A.OLD_ROLE, A.NEW_ROLE,
+              A.ACTOR_ID, A.OCCURRED_AT, ACT.DISPLAY_NAME AS ACTOR_NAME, PU.DISPLAY_NAME AS PRINCIPAL_NAME`;
+
+const auditRole = (v: unknown): ShareRole | null =>
+  v === 'EDITOR' ? 'EDITOR' : v === 'VIEWER' ? 'VIEWER' : null;
+const auditType = (v: unknown): FolderAuditPrincipal =>
+  v === 'GROUP' ? 'GROUP' : v === 'REPORTS' ? 'REPORTS' : 'USER';
+const toAuditEvent = (r: Record<string, unknown>): FolderShareAuditEvent => ({
+  id: String(r.AUDIT_ID),
+  folderId: String(r.FOLDER_ID),
+  action: r.ACTION as AuditAction,
+  principalType: auditType(r.PRINCIPAL_TYPE),
+  principalId: String(r.PRINCIPAL_ID),
+  principalName: r.PRINCIPAL_NAME ? String(r.PRINCIPAL_NAME) : undefined,
+  oldRole: auditRole(r.OLD_ROLE),
+  newRole: auditRole(r.NEW_ROLE),
+  actorId: String(r.ACTOR_ID),
+  actorName: r.ACTOR_NAME ? String(r.ACTOR_NAME) : undefined,
+  occurredAt: dbTimestampToIso(r.OCCURRED_AT) ?? String(r.OCCURRED_AT),
+});

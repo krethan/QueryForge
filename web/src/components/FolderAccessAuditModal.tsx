@@ -1,3 +1,4 @@
+import { Download } from '@carbon/icons-react';
 import { Button, InlineLoading, Modal, Tag } from '@carbon/react';
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
@@ -69,6 +70,8 @@ export function FolderAccessAuditModal({
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     setData(null);
@@ -102,6 +105,21 @@ export function FolderAccessAuditModal({
       setError(e);
     } finally {
       setLoadingMore(false);
+    }
+  };
+
+  /** The whole history as CSV, straight from the server (every event, not just those loaded). */
+  const exportCsv = async () => {
+    setExporting(true);
+    setExported(null);
+    setError(null);
+    try {
+      const { filename } = await api.exportFolderAudit(folder.id);
+      setExported(filename);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -145,7 +163,26 @@ export function FolderAccessAuditModal({
               'not shared through the folder'
             )}
           </div>
-          <h3 className="qf-modal-subheading">Sharing history</h3>
+          <div className="qf-folder-audit__history-head">
+            <h3 className="qf-modal-subheading">Sharing history</h3>
+            {exporting ? (
+              <InlineLoading description="Exporting…" />
+            ) : (
+              <Button
+                kind="tertiary"
+                size="sm"
+                renderIcon={Download}
+                onClick={() => void exportCsv()}
+              >
+                Export CSV
+              </Button>
+            )}
+          </div>
+          {exported && (
+            <p className="qf-muted qf-folder-audit__exported" role="status">
+              Downloaded {exported} with the full sharing history.
+            </p>
+          )}
           {events.length === 0 ? (
             <p>No sharing changes recorded.</p>
           ) : (

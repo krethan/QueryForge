@@ -17,6 +17,7 @@ export const T = {
   folderShareAudit: 'QF_FOLDER_SHARE_AUDIT',
   scheduleDeliveries: 'QF_SCHEDULE_DELIVERIES',
   folderReportSharing: 'QF_FOLDER_REPORT_SHARING',
+  folderDeletions: 'QF_FOLDER_DELETIONS',
 } as const;
 
 /** Unqualified metadata object names that reporting SQL may never mention. */

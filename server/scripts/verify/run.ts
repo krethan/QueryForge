@@ -1060,6 +1060,18 @@ async function metadataQueries(job: SqlJobLike, rec: Recorder, schema: string) {
         await folderAccess.auditPage(nobody, 25, 25);
       },
     ],
+    [
+      'Folder deletion audit and audit export (migration 013, keyset paging)',
+      async () => {
+        await folders.listDeletions(25, 25);
+        await folders.findDeletion(nobody);
+        await folderAccess.auditBatch(
+          nobody,
+          { occurredAt: '2026-01-01 00:00:00.000000', id: nobody },
+          25,
+        );
+      },
+    ],
     ['Dashboard tile order', () => new TileOrderRepository(db, schema).positions(nobody)],
     [
       'Schedules, due runs and delivery history',
@@ -1226,6 +1238,29 @@ async function smokeTest(
         r.left === 0 && r.report
           ? undefined
           : `QF_FOLDER_REPORT_SHARING rows left: ${r.left}; report kept: ${r.report}`,
+    );
+    await step(
+      'The deletion is audited (QF_FOLDER_DELETIONS, migration 013)',
+      () => folders.findDeletion(folder.id),
+      (d) =>
+        !d
+          ? 'No QF_FOLDER_DELETIONS row was read back.'
+          : d.shareCount !== 1 || d.reportsRole !== 'VIEWER'
+            ? `Deletion row has SHARE_COUNT ${d.shareCount}, REPORTS_ROLE ${d.reportsRole}; expected 1, VIEWER.`
+            : undefined,
+    );
+    await step(
+      "The deleted folder's sharing history survives and exports one row per batch (keyset cursor bound back as a TIMESTAMP)",
+      async () => {
+        const seen: string[] = [];
+        for await (const batch of folderAccess.auditAll(folder.id, 1))
+          seen.push(...batch.map((e) => `${e.action}:${e.principalType}`));
+        return seen;
+      },
+      (seen) =>
+        seen.length === 4 && seen.filter((x) => x.startsWith('REVOKE')).length === 2
+          ? undefined
+          : `Read ${seen.length} audit rows (${seen.join(', ')}); expected 2 GRANT and 2 REVOKE.`,
     );
     await step('Delete the report', () => reports.delete(owner.a.id, report.id));
   } finally {

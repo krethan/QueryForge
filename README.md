@@ -605,6 +605,61 @@ ROWS ONLY`, which needs IBM i 7.2 or later (7.1 with a recent TR). **This featur
 real IBM i.** The tests run against the in-memory fake metadata database and in-process API; migration 012
 has never been applied to Db2 for i.
 
+### Exporting a folder's history (CSV)
+
+**Export CSV** in the panel downloads the folder's whole sharing history, not just the events loaded on
+screen: newest first, one row per event, with the columns `Occurred at (UTC)`, `Action`, `Principal type`,
+`Principal ID`, `Principal name`, `Role before`, `Role after`, `Changed by (user ID)`, `Changed by`,
+`Folder ID`, `Folder name` and `Event ID`.
+
+- **Who can export:** exactly who can read the panel (owner, or an admin for a folder shared with anyone);
+  viewers and editors 403, everyone else 404. Checked on the server for every request.
+- **Format:** UTF-8 with a byte-order mark (so Excel detects it), CRLF line ends, every cell quoted and
+  embedded quotes doubled (RFC 4180). Any cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return
+  (or their full-width forms) gets a leading `'`, the same formula-injection guard as the Excel export, so
+  a user or folder named `=HYPERLINK(…)` is shown as text. `Content-Disposition` carries an ASCII file name
+  and the full UTF-8 one (`filename*`).
+- **No truncation:** the server streams the file while reading the trail 500 rows at a time with keyset
+  paging (`OCCURRED_AT`, `AUDIT_ID`), so there is no row or offset limit, nothing is held in memory, and a
+  change recorded during the export cannot shift a page. A database error before the first row returns a
+  normal JSON error; one later cuts the connection, so a partial file never looks complete.
+
+API: `GET /api/folders/:folderId/audit/export` (`text/csv; charset=utf-8`).
+
+## Folder deletion audit
+
+Deleting a folder (owner only) is now recorded, in the same transaction as the delete (migration 013):
+
+- one `QF_FOLDER_DELETIONS` row: who deleted it and when, the folder's ID, name and owner, how many users
+  and groups it was shared with (`SHARE_COUNT`), how many reports were placed in it through the folder
+  (`PLACED_COUNT`) and how many of the owner's own filed reports moved to Unfiled (`FILED_COUNT`), and its
+  "also share the reports" level (`REPORTS_ROLE`, `NULL` when off);
+- a `REVOKE` row in the folder's sharing history for every share and for the report-sharing option the
+  delete ended, so the history shows how access ended.
+
+If any statement fails, nothing is deleted and nothing is recorded. Neither audit table has a foreign key
+to `QF_FOLDERS` or `QF_USERS`, so the records outlive the folder and the people they name.
+
+**Who can read it: app admins only** (`ROLE = 'ADMIN'`). Once a folder is gone it has no owner view left,
+and its history names everyone who had access, so it is treated as an administrative record. Everyone
+else, including the person who deleted the folder, gets 403. The admin endpoints only answer for folders
+that are actually deleted: a folder that still exists is 404 there, so they cannot be used to read a live
+personal folder's history (which admins cannot see through the normal panel either).
+
+- `GET /api/admin/folder-deletions?limit=50&offset=0` → `{ deletions, hasMore, limit, offset }`, newest
+  first (`limit` 1–200). Each is `{ id, folderId, folderName, ownerId, ownerName?, actorId, actorName?,
+shareCount, placedCount, filedCount, reportsRole, deletedAt }`.
+- `GET /api/admin/folder-deletions/:folderId/audit?limit=25&offset=0` → `{ deletion, events, hasMore,
+limit, offset }`: the deleted folder's sharing history.
+- `GET /api/admin/folder-deletions/:folderId/audit/export` → the same history as CSV (format above).
+
+There is no screen for this yet; it is API only. Storage is migration `013_folder_deletion_audit.sql`,
+which is additive: one new table, two indexes (`DELETED_AT DESC, DELETION_ID` for the list, `FOLDER_ID`
+for lookups) and a table label; nothing existing is altered. Folders deleted before 013 was applied have
+no deletion record (their sharing history rows, if any, are still there). **Not tested on a real IBM i:**
+migration 013, the deletion transaction and the export's keyset query have only run against the in-memory
+fake metadata database; `npm run verify:ibmi` covers them for a non-production partition.
+
 ## Rearranging dashboard tiles
 
 The dashboard's **Sort by** list starts on **My order**, each user's own tile order:
@@ -705,9 +760,12 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Shared folders: unless the owner shares the folder's reports too, people may see an emptier folder
   than the owner. There is no folder access/audit panel in the UI yet (the API has one), no notification
   when a folder is shared with you, and no share expiry.
+- Folder audit export and deletion audit: deleted-folder records are admin-only and API-only (no screen
+  yet), are kept forever (no retention or purge), and only cover deletions made through Uncle Bob after
+  migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+). The CSV export's
+  keyset cursor binds back Db2's own timestamp text; not yet confirmed on a real IBM i.
 - Sharing a folder's reports: only reports the folder owner owns and placed there are covered (no way to
-  share someone else's report, by design). Turning the option on or off is not written to the folder audit
-  trail (only its last change is kept). The folder's Share dialog lists only reports the owner can see.
+  share someone else's report, by design). The folder's Share dialog lists only reports the owner can see.
   Folder-granted schedule visibility covers up to 1000 such reports per person. Migration 011 has not been
   applied to a real Db2 for i.
   Folder names are unique per owner only, so two shared folders can have the same name (the owner's name
