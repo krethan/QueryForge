@@ -52,7 +52,7 @@ Put it behind TLS; set `APP_ORIGIN`, `COOKIE_SECURE=true`, `TRUST_PROXY` as appr
 for both Mapepire and the metadata store. It never connects to IBM i, ignores `.env`, refuses
 `NODE_ENV=production`, and is not used by `npm start`/`npm run dev`. Login `demo` / `demo-password-123`;
 all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders,
-two schedules (e-mail is captured in memory and logged as `[demo mail — not sent]`), a fake SSO button
+three schedules (one with a delivery already in its history; e-mail is captured in memory and logged as `[demo mail — not sent]`), a fake SSO button
 ("Contoso SSO (demo fake)", signs in as Carol in Finance) and a fake directory login (`dave` / `directory-pass`).
 The fakes live in `server/test/helpers` and are only reachable from `npm run demo`, which binds 127.0.0.1. With it running, `npm run screenshots` captures 1440×900 PNGs into `screenshots/`
 (first time: `npx playwright install chromium`).
@@ -554,6 +554,22 @@ check, and its foreign keys to `QF_USERS` and `QF_REPORTS` use ON DELETE CASCADE
 user's rows in one transaction. The table is on the protected-objects list. As with 006, this has only been
 tested against the in-memory fake metadata database, not on a real IBM i.
 
+## Scheduled report delivery
+
+Owners and Editors (and administrators, who are Editor-equivalent) can e-mail a saved report as its **Excel export** on a schedule. Open the report and choose **Schedule**, or use the **Schedules** page, to create, edit, pause, resume, run now, delete and see the delivery history of each schedule. Viewers can't manage schedules.
+
+- **When:** daily, weekdays (Monday to Friday), weekly on a chosen day, or monthly on day 1–28 or the **last day of the month**, at a chosen time in a chosen **IANA time zone**. Days 29–31 aren't offered because some months don't have them. A custom 5-field cron expression is still available for anything else, and existing cron schedules keep working. Friendly cadences are stored as the equivalent cron expression in `QF_SCHEDULES.CRON_EXPR` and the next run is always computed in the schedule's own zone (`cron-parser`), never the server's local clock; the editor previews the next runs.
+- **Who:** every recipient must be an active Uncle Bob user who can **already open the report** (owner, a user or group share, or an administrator), matched by the e-mail address on their account, and must be in `SCHEDULE_RECIPIENT_DOMAINS`. The editor lists the people the report is shared with; anyone else is refused with `RECIPIENT_NO_ACCESS` until the report is shared with them. Access is checked again at **every delivery**: someone who has lost access is left out (and named in the schedule's last result and delivery history); if nobody is left, the run fails and nothing is sent.
+- **Runs:** the in-process scheduler (`SCHEDULER_ENABLED=true`) polls, takes the Db2 lease, claims each due schedule with a conditional update, runs the report with the report owner's access, and records the last run, status, error and next run. Pausing clears the next run; resuming starts from the next occurrence after now (missed runs are not replayed) and resets the failure count. After `SCHEDULE_MAX_FAILURES` failures in a row a schedule pauses itself.
+- **Mail:** SMTP settings and credentials live only in the server environment; the browser only learns whether e-mail is configured. Without SMTP, saving an active schedule, resuming and **Run now** fail with `503 MAIL_NOT_CONFIGURED` (a paused schedule can still be saved), and a due schedule records a clear failure. Demo mode and tests use an in-memory mailer that never sends anything.
+- **History (migration 010):** `QF_SCHEDULE_DELIVERIES` keeps one row per delivery attempt (on schedule or Run now, who pressed it, rows, who it went to, who was left out, error). Deleting a schedule removes its delivery history; the runs stay in report history. Nothing else is altered.
+
+API: `GET/POST /api/reports/:id/schedules`, `GET /api/reports/:id/schedule-recipients`, `PUT/DELETE /api/schedules/:id`, `POST /api/schedules/:id/pause`, `/resume`, `/run`, `GET /api/schedules/:id/deliveries`, `POST /api/schedules/preview` (send `cadence` or `cron` plus `timezone`).
+
+**Not tested on a real IBM i or a real mail server.** The scheduler, recipient checks, delivery history and migration 010 have only been exercised against the fake metadata/query adapters, the in-memory mailer and the demo; migration 010 has never been applied to Db2 for i.
+
+Limitations: no per-recipient bursting or filtering, no Slack/Teams delivery, no calendar invites, no external (non-user) addresses or distribution lists, no notification when someone is left out other than the schedule's status and history, no retention limit on delivery history, and one Excel attachment per run (capped by `MAX_EXPORT_ROWS`).
+
 ## Security model
 
 - Session JWT in HttpOnly SameSite=Strict cookie; double-submit CSRF token + Origin check; login lockout.
@@ -572,7 +588,8 @@ tested against the in-memory fake metadata database, not on a real IBM i.
   service-account lookup. External users are created on first sign-in (`authSource` OIDC/LDAP is returned
   by `/api/auth/me`); they cannot collide with an existing local username. Groups are re-synced each sign-in.
 - Schedules run with the report owner's access via the same validator and read-only job, are recorded in
-  history (kind SCHEDULE), and mail only to allow-listed domains over TLS.
+  history (kind SCHEDULE), and mail only over TLS to allow-listed domains and only to users who can
+  already open the report (re-checked at every delivery).
 - XLSX built server-side with formula-injection escaping. Credentials only in env, never sent to the browser.
 
 ## Conditional formatting
@@ -624,8 +641,8 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Schedule times are computed with the server runtime's ICU time-zone data. Alberta moved to permanent
   UTC−6 (tzdata 2026c); an older Node/ICU will still assume a fall-back on 2026-11-01 for
   `America/Edmonton`, shifting runs by an hour. Keep Node current (or use a fixed zone such as `Etc/GMT+6`).
-- Schedules use 5-field cron; one scheduler runner at a time (DB lease). Missed runs while stopped are not
-  back-filled; the next future time is used.
+- Schedules are stored as 5-field cron (friendly cadences included); one scheduler runner at a time (DB
+  lease). Missed runs while stopped or paused are not back-filled; the next future time is used.
 - Attachments are capped by `MAX_EXPORT_ROWS`; very large exports may exceed mail-server size limits.
 - Sharing/global-admin visibility has no expiry. The audit records changes made through Uncle Bob only (not direct SQL edits), and
   is not written for shares removed by report deletion.

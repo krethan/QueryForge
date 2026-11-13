@@ -5,6 +5,13 @@ import { NOW_UTC, T, q, toDbTimestamp } from '../db/schema.js';
 import { parameterValuesSchema } from '../reports/parameters.js';
 import { AppError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
+import {
+  cadenceSchema,
+  cadenceToCron,
+  cronToCadence,
+  describeCadence,
+  type Cadence,
+} from './cadence.js';
 
 export type ScheduleStatus = 'NEVER' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
 export interface Schedule {
@@ -13,6 +20,10 @@ export interface Schedule {
   reportName?: string;
   createdBy: string;
   cron: string;
+  /** The friendly cadence the cron expression came from, or null for a custom cron schedule. */
+  cadence: Cadence | null;
+  /** Plain-English cadence, e.g. "Every Monday at 07:00" (in `timezone`). */
+  description: string;
   timezone: string;
   recipients: string[];
   parameters: Record<string, string | number | null>;
@@ -25,14 +36,92 @@ export interface Schedule {
   version: number;
 }
 
-export const scheduleInputSchema = z.object({
-  cron: z.string().trim().min(1).max(128),
+/**
+ * Request body for creating or replacing a schedule. Send either a friendly `cadence`
+ * (daily / weekdays / weekly / monthly at a time) or, for advanced use, a raw 5-field `cron`.
+ */
+export const scheduleBodySchema = z.object({
+  cadence: cadenceSchema.optional(),
+  cron: z.string().trim().min(1).max(128).optional(),
   timezone: z.string().trim().min(1).max(64),
   recipients: z.array(z.string().max(320)).max(100),
   parameters: parameterValuesSchema,
   enabled: z.boolean().default(true),
 });
-export type ScheduleInput = z.infer<typeof scheduleInputSchema>;
+export type ScheduleBody = z.infer<typeof scheduleBodySchema>;
+
+/** Normalised schedule input: the cadence is resolved to the cron expression that is stored. */
+export interface ScheduleInput {
+  cron: string;
+  timezone: string;
+  recipients: string[];
+  parameters: Record<string, string | number | null>;
+  enabled: boolean;
+}
+
+export function normaliseScheduleBody(b: ScheduleBody): ScheduleInput {
+  if (b.cadence && b.cron)
+    throw new AppError(
+      400,
+      'INVALID_CADENCE',
+      'Send either a cadence or a cron expression, not both.',
+    );
+  if (!b.cadence && !b.cron)
+    throw new AppError(400, 'INVALID_CADENCE', 'Choose how often the report should be delivered.');
+  return {
+    cron: b.cadence ? cadenceToCron(b.cadence) : b.cron!,
+    timezone: b.timezone,
+    recipients: b.recipients,
+    parameters: b.parameters ?? {},
+    enabled: b.enabled,
+  };
+}
+
+export type DeliveryTrigger = 'SCHEDULE' | 'MANUAL';
+export interface ScheduleDelivery {
+  id: string;
+  scheduleId: string;
+  reportId: string;
+  trigger: DeliveryTrigger;
+  requestedBy: string | null;
+  requestedByName?: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  status: 'SUCCEEDED' | 'FAILED';
+  rowCount: number | null;
+  deliveredTo: string[];
+  skipped: string[];
+  error: string | null;
+}
+export interface NewDelivery {
+  scheduleId: string;
+  reportId: string;
+  trigger: DeliveryTrigger;
+  requestedBy: string | null;
+  startedAt: Date;
+  finishedAt: Date;
+  status: 'SUCCEEDED' | 'FAILED';
+  rowCount: number | null;
+  deliveredTo: string[];
+  skipped: string[];
+  error: string | null;
+}
+
+/** Join a list into a VARCHAR(4000) column without cutting an address in half. */
+const joinList = (xs: string[], max = 4000) => {
+  let out = '';
+  for (const x of xs) {
+    const next = out ? `${out},${x}` : x;
+    if (next.length > max) break;
+    out = next;
+  }
+  return out || null;
+};
+const splitList = (v: unknown) =>
+  String(v ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
 
 const COLS = `S.SCHEDULE_ID, S.REPORT_ID, S.CREATED_BY, S.CRON_EXPR, S.TIMEZONE, S.RECIPIENTS, S.PARAMS_JSON, S.IS_ENABLED,
   S.NEXT_RUN_AT, S.LAST_RUN_AT, S.LAST_STATUS, S.LAST_ERROR, S.FAILURE_COUNT, S.VERSION, R.REPORT_NAME`;
@@ -47,17 +136,18 @@ const toSchedule = (r: Row): Schedule => {
   } catch {
     parameters = {};
   }
+  const cron = String(r.CRON_EXPR);
+  const cadence = cronToCadence(cron);
   return {
     id: String(r.SCHEDULE_ID),
     reportId: String(r.REPORT_ID),
     reportName: r.REPORT_NAME ? String(r.REPORT_NAME) : undefined,
     createdBy: String(r.CREATED_BY),
-    cron: String(r.CRON_EXPR),
+    cron,
+    cadence,
+    description: describeCadence(cadence, cron),
     timezone: String(r.TIMEZONE),
-    recipients: String(r.RECIPIENTS ?? '')
-      .split(',')
-      .map((x) => x.trim())
-      .filter(Boolean),
+    recipients: splitList(r.RECIPIENTS),
     parameters,
     enabled: Number(r.IS_ENABLED) === 1,
     nextRunAt: dbTimestampToIso(r.NEXT_RUN_AT),
@@ -74,6 +164,8 @@ export class ScheduleRepository {
   private readonly table: string;
   private readonly reports: string;
   private readonly locks: string;
+  private readonly deliveries: string;
+  private readonly users: string;
   constructor(
     private readonly db: MetadataDb,
     schema: string,
@@ -81,6 +173,8 @@ export class ScheduleRepository {
     this.table = q(schema, T.schedules);
     this.reports = q(schema, T.reports);
     this.locks = q(schema, T.locks);
+    this.deliveries = q(schema, T.scheduleDeliveries);
+    this.users = q(schema, T.users);
   }
 
   private from() {
@@ -185,6 +279,98 @@ export class ScheduleRepository {
     return this.get(id);
   }
 
+  /**
+   * Pause or resume. Resuming starts again from the next occurrence after now (missed runs are
+   * not replayed) and clears the consecutive-failure counter.
+   */
+  async setEnabled(
+    id: string,
+    enabled: boolean,
+    nextRunAt: Date | null,
+    version?: number,
+  ): Promise<Schedule> {
+    const params: (string | number | null)[] = [
+      enabled ? 1 : 0,
+      nextRunAt ? toDbTimestamp(nextRunAt) : null,
+      enabled ? 1 : 0,
+      id,
+    ];
+    let vc = '';
+    if (version !== undefined) {
+      vc = ' AND VERSION = ?';
+      params.push(version);
+    }
+    const n = await this.db.update(
+      `UPDATE ${this.table}
+          SET IS_ENABLED = ?, NEXT_RUN_AT = ?, FAILURE_COUNT = CASE WHEN ? = 1 THEN 0 ELSE FAILURE_COUNT END,
+              VERSION = VERSION + 1, UPDATED_AT = ${NOW_UTC}
+        WHERE SCHEDULE_ID = ?${vc}`,
+      params,
+    );
+    if (n === 0) {
+      await this.get(id);
+      throw new AppError(
+        409,
+        'VERSION_CONFLICT',
+        'This schedule was changed elsewhere. Reload and try again.',
+      );
+    }
+    return this.get(id);
+  }
+
+  /** Record one finished delivery attempt (QF_SCHEDULE_DELIVERIES, migration 010). */
+  async recordDelivery(d: NewDelivery): Promise<string> {
+    const id = randomUUID();
+    await this.db.update(
+      `INSERT INTO ${this.deliveries} (DELIVERY_ID, SCHEDULE_ID, REPORT_ID, RUN_TRIGGER, REQUESTED_BY, STARTED_AT, FINISHED_AT,
+          STATUS, RESULT_ROWS, DELIVERED_TO, SKIPPED_TO, ERROR_MESSAGE)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        d.scheduleId,
+        d.reportId,
+        d.trigger,
+        d.requestedBy,
+        toDbTimestamp(d.startedAt),
+        toDbTimestamp(d.finishedAt),
+        d.status,
+        d.rowCount,
+        joinList(d.deliveredTo),
+        joinList(d.skipped),
+        d.error ? d.error.slice(0, 1000) : null,
+      ],
+    );
+    return id;
+  }
+
+  /** Delivery history for one schedule, newest first. */
+  async listDeliveries(scheduleId: string, limit = 25): Promise<ScheduleDelivery[]> {
+    const n = Math.max(1, Math.min(Math.floor(limit) || 25, 100));
+    const rows = await this.db.query<Row>(
+      `SELECT D.DELIVERY_ID, D.SCHEDULE_ID, D.REPORT_ID, D.RUN_TRIGGER, D.REQUESTED_BY, D.STARTED_AT, D.FINISHED_AT,
+              D.STATUS, D.RESULT_ROWS, D.DELIVERED_TO, D.SKIPPED_TO, D.ERROR_MESSAGE, U.DISPLAY_NAME AS REQUESTED_BY_NAME
+         FROM ${this.deliveries} D LEFT JOIN ${this.users} U ON U.USER_ID = D.REQUESTED_BY
+        WHERE D.SCHEDULE_ID = ? ORDER BY D.STARTED_AT DESC, D.DELIVERY_ID FETCH FIRST ${n} ROWS ONLY`,
+      [scheduleId],
+    );
+    return rows.map((r) => ({
+      id: String(r.DELIVERY_ID),
+      scheduleId: String(r.SCHEDULE_ID),
+      reportId: String(r.REPORT_ID),
+      trigger: r.RUN_TRIGGER === 'MANUAL' ? 'MANUAL' : 'SCHEDULE',
+      requestedBy: r.REQUESTED_BY ? String(r.REQUESTED_BY) : null,
+      requestedByName: r.REQUESTED_BY_NAME ? String(r.REQUESTED_BY_NAME) : undefined,
+      startedAt: dbTimestampToIso(r.STARTED_AT),
+      finishedAt: dbTimestampToIso(r.FINISHED_AT),
+      status: r.STATUS === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
+      rowCount:
+        r.RESULT_ROWS === null || r.RESULT_ROWS === undefined ? null : Number(r.RESULT_ROWS),
+      deliveredTo: splitList(r.DELIVERED_TO),
+      skipped: splitList(r.SKIPPED_TO),
+      error: r.ERROR_MESSAGE ? String(r.ERROR_MESSAGE) : null,
+    }));
+  }
+
   async delete(id: string): Promise<void> {
     const n = await this.db.update(`DELETE FROM ${this.table} WHERE SCHEDULE_ID = ?`, [id]);
     if (n === 0) throw new AppError(404, 'SCHEDULE_NOT_FOUND', 'Schedule not found.');
@@ -221,14 +407,28 @@ export class ScheduleRepository {
 
   async recordResult(
     id: string,
-    r: { status: 'SUCCEEDED' | 'FAILED'; error: string | null; failures: number; disable: boolean },
+    r: {
+      status: 'SUCCEEDED' | 'FAILED';
+      error: string | null;
+      failures: number;
+      disable: boolean;
+      /** When the run started (also set by "Run now", which is not claimed by the tick). */
+      ranAt: Date;
+    },
   ) {
     await this.db.update(
       `UPDATE ${this.table}
           SET LAST_STATUS = ?, LAST_ERROR = ?, FAILURE_COUNT = ?, IS_ENABLED = CASE WHEN ? = 1 THEN 0 ELSE IS_ENABLED END,
-              UPDATED_AT = ${NOW_UTC}
+              LAST_RUN_AT = ?, UPDATED_AT = ${NOW_UTC}
         WHERE SCHEDULE_ID = ?`,
-      [r.status, r.error ? r.error.slice(0, 1000) : null, r.failures, r.disable ? 1 : 0, id],
+      [
+        r.status,
+        r.error ? r.error.slice(0, 1000) : null,
+        r.failures,
+        r.disable ? 1 : 0,
+        toDbTimestamp(r.ranAt),
+        id,
+      ],
     );
   }
 

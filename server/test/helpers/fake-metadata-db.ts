@@ -28,6 +28,7 @@ export class FakeMetadataDb implements MetadataDb {
   /** key `${folderId}|${reportId}` */
   folderReports = new Map<string, Row>();
   folderShareAudit: Row[] = [];
+  scheduleDeliveries: Row[] = [];
   statements: { sql: string; params: P }[] = [];
   private clock = 0;
   failNext?: Error;
@@ -71,6 +72,12 @@ export class FakeMetadataDb implements MetadataDb {
       EXTERNAL_ID: null,
       EMAIL: null,
     });
+  }
+
+  setEmail(userId: string, email: string | null) {
+    const u = this.users.get(userId);
+    if (!u) throw new Error(`FakeMetadataDb: no user ${userId}`);
+    u.EMAIL = email;
   }
 
   removeGroup(userId: string, group: string) {
@@ -302,6 +309,62 @@ export class FakeMetadataDb implements MetadataDb {
     });
   }
 
+  /** Scheduled delivery recipients (users by e-mail, report recipient options) and history. */
+  private deliveryQuery(s: string, params: P): Row[] | undefined {
+    if (/FROM \w+\.QF_USERS WHERE IS_ACTIVE = 1 AND LOWER\(EMAIL\) IN \(/.test(s)) {
+      return [...this.users.values()].filter(
+        (u) =>
+          u.IS_ACTIVE === 1 && u.EMAIL !== null && params.includes(String(u.EMAIL).toLowerCase()),
+      );
+    }
+    if (
+      /^SELECT U\.USER_ID, U\.DISPLAY_NAME, U\.EMAIL FROM \w+\.QF_USERS U WHERE U\.IS_ACTIVE = 1 AND U\.EMAIL IS NOT NULL AND \(U\.USER_ID = \? OR U\.USER_ID IN \(SELECT S\.PRINCIPAL_ID FROM \w+\.QF_REPORT_SHARES S WHERE S\.REPORT_ID = \? AND S\.PRINCIPAL_TYPE = 'USER'\) OR U\.USER_ID IN \(SELECT G\.USER_ID FROM \w+\.QF_USER_GROUPS G JOIN \w+\.QF_REPORT_SHARES S ON S\.PRINCIPAL_TYPE = 'GROUP' AND S\.PRINCIPAL_ID = G\.GROUP_NAME WHERE S\.REPORT_ID = \?\)\) ORDER BY U\.DISPLAY_NAME FETCH FIRST 500 ROWS ONLY$/.test(
+        s,
+      )
+    ) {
+      const [ownerId, rid] = params;
+      const shares = this.shares.filter((x) => x.REPORT_ID === rid);
+      const groups = new Set(
+        shares.filter((x) => x.PRINCIPAL_TYPE === 'GROUP').map((x) => x.PRINCIPAL_ID),
+      );
+      return [...this.users.values()]
+        .filter(
+          (u) =>
+            u.IS_ACTIVE === 1 &&
+            u.EMAIL !== null &&
+            (u.USER_ID === ownerId ||
+              shares.some((x) => x.PRINCIPAL_TYPE === 'USER' && x.PRINCIPAL_ID === u.USER_ID) ||
+              [...this.userGroups.values()].some(
+                (g) => g.USER_ID === u.USER_ID && groups.has(g.GROUP_NAME),
+              )),
+        )
+        .sort((a, b) => String(a.DISPLAY_NAME).localeCompare(String(b.DISPLAY_NAME)))
+        .map((u) => ({ USER_ID: u.USER_ID, DISPLAY_NAME: u.DISPLAY_NAME, EMAIL: u.EMAIL }));
+    }
+    if (
+      /^SELECT D\.DELIVERY_ID, .* FROM \w+\.QF_SCHEDULE_DELIVERIES D LEFT JOIN \w+\.QF_USERS U ON U\.USER_ID = D\.REQUESTED_BY WHERE D\.SCHEDULE_ID = \? ORDER BY D\.STARTED_AT DESC, D\.DELIVERY_ID FETCH FIRST (\d+) ROWS ONLY$/.test(
+        s,
+      )
+    ) {
+      const n = Number(/FETCH FIRST (\d+) ROWS/.exec(s)![1]);
+      return this.scheduleDeliveries
+        .filter((d) => d.SCHEDULE_ID === params[0])
+        .sort(
+          (a, b) =>
+            String(b.STARTED_AT).localeCompare(String(a.STARTED_AT)) ||
+            String(a.DELIVERY_ID).localeCompare(String(b.DELIVERY_ID)),
+        )
+        .slice(0, n)
+        .map((d) => ({
+          ...d,
+          REQUESTED_BY_NAME: d.REQUESTED_BY
+            ? (this.users.get(String(d.REQUESTED_BY))?.DISPLAY_NAME ?? null)
+            : null,
+        }));
+    }
+    return undefined;
+  }
+
   private withReportName(sc: Row): Row {
     const r = this.reports.get(String(sc.REPORT_ID));
     return {
@@ -317,6 +380,8 @@ export class FakeMetadataDb implements MetadataDb {
     if (s.startsWith('SELECT 1 AS OK')) return [{ OK: 1 }] as T[];
     const folderRows = this.folderQuery(s, params);
     if (folderRows) return folderRows as T[];
+    const deliveryRows = this.deliveryQuery(s, params);
+    if (deliveryRows) return deliveryRows as T[];
     if (/FROM \w+\.QF_USERS WHERE USERNAME = \?/.test(s)) {
       const u = [...this.users.values()].find((x) => x.USERNAME === params[0]);
       return (u ? [u] : []) as T[];
@@ -466,6 +531,13 @@ export class FakeMetadataDb implements MetadataDb {
               String(x.NEXT_RUN_AT) <= String(params[0]),
           )
           .sort((a, b) => String(a.NEXT_RUN_AT).localeCompare(String(b.NEXT_RUN_AT)));
+      else if (/ ORDER BY R\.REPORT_NAME_KEY, S\.CREATED_AT$/.test(s) && !s.includes(' WHERE '))
+        // admins: every schedule
+        rows = rows.sort(
+          (a, b) =>
+            String(a.REPORT_NAME_KEY).localeCompare(String(b.REPORT_NAME_KEY)) ||
+            String(a.CREATED_AT).localeCompare(String(b.CREATED_AT)),
+        );
       else throw new Error(`FakeMetadataDb: unsupported schedule query ${s}`);
       return rows as T[];
     }
@@ -636,6 +708,9 @@ export class FakeMetadataDb implements MetadataDb {
       this.reports.delete(String(params[0]));
       this.shares = this.shares.filter((x) => x.REPORT_ID !== params[0]); // ON DELETE CASCADE
       for (const [k, v] of this.schedules) if (v.REPORT_ID === params[0]) this.schedules.delete(k);
+      this.scheduleDeliveries = this.scheduleDeliveries.filter((d) =>
+        this.schedules.has(String(d.SCHEDULE_ID)),
+      ); // ON DELETE CASCADE (through QF_SCHEDULES)
       for (const e of this.executions.values()) if (e.REPORT_ID === params[0]) e.REPORT_ID = null; // ON DELETE SET NULL
       for (const [k, v] of this.reportPrefs)
         if (v.REPORT_ID === params[0]) this.reportPrefs.delete(k); // ON DELETE CASCADE
@@ -841,7 +916,54 @@ export class FakeMetadataDb implements MetadataDb {
       return 1;
     }
     if (/^DELETE FROM \w+\.QF_SCHEDULES WHERE SCHEDULE_ID = \?$/.test(s)) {
+      this.scheduleDeliveries = this.scheduleDeliveries.filter((d) => d.SCHEDULE_ID !== params[0]); // ON DELETE CASCADE
       return this.schedules.delete(String(params[0])) ? 1 : 0;
+    }
+    if (
+      /^UPDATE \w+\.QF_SCHEDULES SET IS_ENABLED = \?, NEXT_RUN_AT = \?, FAILURE_COUNT = CASE WHEN \? = 1 THEN 0 ELSE FAILURE_COUNT END, VERSION = VERSION \+ 1, UPDATED_AT = .* WHERE SCHEDULE_ID = \?( AND VERSION = \?)?$/.test(
+        s,
+      )
+    ) {
+      const [enabled, next, reset, id, version] = params;
+      const x = this.schedules.get(String(id));
+      if (!x || (version !== undefined && x.VERSION !== version)) return 0;
+      Object.assign(x, {
+        IS_ENABLED: enabled,
+        NEXT_RUN_AT: next,
+        FAILURE_COUNT: reset === 1 ? 0 : x.FAILURE_COUNT,
+        VERSION: Number(x.VERSION) + 1,
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_SCHEDULE_DELIVERIES \(DELIVERY_ID, SCHEDULE_ID, REPORT_ID, RUN_TRIGGER, REQUESTED_BY, STARTED_AT, FINISHED_AT, STATUS, RESULT_ROWS, DELIVERED_TO, SKIPPED_TO, ERROR_MESSAGE\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, \?, \?, \?, \?\)$/.test(
+        s,
+      )
+    ) {
+      const [id, sid, rid, trig, by, started, finished, status, rows, to, skipped, err] = params;
+      if (!this.schedules.has(String(sid)))
+        throw new DbError('Foreign key violation.', '23503', -530);
+      if (
+        !['SCHEDULE', 'MANUAL'].includes(String(trig)) ||
+        !['SUCCEEDED', 'FAILED'].includes(String(status))
+      )
+        throw new DbError('Check constraint violation.', '23513', -545);
+      this.scheduleDeliveries.push({
+        DELIVERY_ID: id,
+        SCHEDULE_ID: sid,
+        REPORT_ID: rid,
+        RUN_TRIGGER: trig,
+        REQUESTED_BY: by,
+        STARTED_AT: started,
+        FINISHED_AT: finished,
+        STATUS: status,
+        RESULT_ROWS: rows,
+        DELIVERED_TO: to,
+        SKIPPED_TO: skipped,
+        ERROR_MESSAGE: err,
+      });
+      return 1;
     }
     if (
       /^UPDATE \w+\.QF_SCHEDULES SET NEXT_RUN_AT = \?, LAST_RUN_AT = \?, LAST_STATUS = 'RUNNING' WHERE SCHEDULE_ID = \? AND IS_ENABLED = 1 AND NEXT_RUN_AT = \?$/.test(
@@ -859,7 +981,7 @@ export class FakeMetadataDb implements MetadataDb {
         s,
       )
     ) {
-      const [status, err, failures, disable, id] = params;
+      const [status, err, failures, disable, ranAt, id] = params;
       const x = this.schedules.get(String(id));
       if (!x) return 0;
       Object.assign(x, {
@@ -867,6 +989,7 @@ export class FakeMetadataDb implements MetadataDb {
         LAST_ERROR: err,
         FAILURE_COUNT: failures,
         IS_ENABLED: disable === 1 ? 0 : x.IS_ENABLED,
+        LAST_RUN_AT: ranAt,
         UPDATED_AT: this.now(),
       });
       return 1;
@@ -1046,6 +1169,7 @@ export class FakeMetadataDb implements MetadataDb {
       folderShares: this.folderShares.map((x) => ({ ...x })),
       folderReports: new Map([...this.folderReports].map(([k, v]) => [k, { ...v }])),
       folderShareAudit: this.folderShareAudit.map((x) => ({ ...x })),
+      scheduleDeliveries: this.scheduleDeliveries.map((x) => ({ ...x })),
     };
     try {
       return await fn(this);
@@ -1064,6 +1188,7 @@ export class FakeMetadataDb implements MetadataDb {
       this.folderShares = snapshot.folderShares;
       this.folderReports = snapshot.folderReports;
       this.folderShareAudit = snapshot.folderShareAudit;
+      this.scheduleDeliveries = snapshot.scheduleDeliveries;
       throw e;
     }
   }

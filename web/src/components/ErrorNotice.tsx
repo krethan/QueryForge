@@ -10,6 +10,14 @@ export function describeError(e: unknown): { title: string; subtitle: string } {
       NOT_AUTHORIZED: 'Not authorized.',
       RATE_LIMITED: 'Too many requests.',
       NETWORK_ERROR: 'Network error.',
+      RECIPIENT_NO_ACCESS: 'Some recipients can’t open this report.',
+      INVALID_RECIPIENTS: 'Check the recipients.',
+      MAIL_NOT_CONFIGURED: 'E-mail delivery isn’t set up.',
+      INVALID_CADENCE: 'Check when the schedule runs.',
+      INVALID_CRON: 'Check when the schedule runs.',
+      INVALID_TIMEZONE: 'Check the time zone.',
+      SCHEDULE_TOO_FREQUENT: 'This schedule runs too often.',
+      VERSION_CONFLICT: 'Changed elsewhere.',
     };
     const db = [e.sqlState && `SQLSTATE ${e.sqlState}`, e.sqlCode && `SQLCODE ${e.sqlCode}`]
       .filter(Boolean)

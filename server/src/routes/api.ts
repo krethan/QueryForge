@@ -30,10 +30,18 @@ import { datePresetSchema } from '../reports/date-presets.js';
 import { validateCron } from '../scheduler/cron.js';
 import type { Scheduler } from '../scheduler/scheduler.js';
 import {
-  scheduleInputSchema,
+  normaliseScheduleBody,
+  scheduleBodySchema,
   type ScheduleInput,
   type ScheduleRepository,
 } from '../scheduler/schedules.js';
+import {
+  cadenceSchema,
+  cadenceToCron,
+  cronToCadence,
+  describeCadence,
+} from '../scheduler/cadence.js';
+import type { RecipientService } from '../scheduler/recipients.js';
 import { sharesInputSchema, type AccessService } from '../sharing/access.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
 import type { Report } from '../reports/reports.js';
@@ -123,6 +131,7 @@ export interface ApiDeps {
   folderAccess: FolderAccessService;
   tileOrder: TileOrderRepository;
   scheduler: Scheduler;
+  recipients: RecipientService;
   mailer?: Mailer;
   oidc?: OidcProvider;
   ldap?: LdapAuthenticator;
@@ -1783,6 +1792,8 @@ export function apiRouter(d: ApiDeps): Router {
   );
 
   // ---- schedules ----
+  // Mail settings (SMTP host, user, password) never leave the server: the browser only learns
+  // whether e-mail delivery is configured.
   const scheduleSettings = () => ({
     enabled: cfg.scheduler.enabled,
     mailConfigured: Boolean(d.mailer),
@@ -1793,10 +1804,32 @@ export function apiRouter(d: ApiDeps): Router {
     datePresetTimezone: cfg.datePresetTimezone,
     maxFailures: cfg.scheduler.maxFailures,
   });
-  const prepareSchedule = (report: Report, input: ScheduleInput) => {
+  const requireMail = () => {
+    if (!d.mailer)
+      throw new AppError(
+        503,
+        'MAIL_NOT_CONFIGURED',
+        'Scheduled e-mail is not set up on this server (SMTP). Ask an administrator to configure it. You can still save the schedule as paused.',
+      );
+  };
+  /** Every recipient must be someone who can already open the report. */
+  const requireRecipientAccess = async (report: Report, recipients: string[]) => {
+    const { blocked } = await d.recipients.check(report, recipients);
+    if (blocked.length)
+      throw new AppError(
+        400,
+        'RECIPIENT_NO_ACCESS',
+        `${blocked.join(', ')} ${blocked.length === 1 ? 'is not an Uncle Bob user who can' : 'are not Uncle Bob users who can'} open this report. Share the report with them first, or remove them.`,
+        { blocked },
+      );
+  };
+  const prepareSchedule = async (report: Report, input: ScheduleInput) => {
     const upcoming = validateCron(input.cron, input.timezone, cfg.scheduler.minIntervalMinutes);
     const rc = checkRecipients(input.recipients, cfg.scheduler);
     if (!rc.ok) throw new AppError(400, 'INVALID_RECIPIENTS', rc.message);
+    await requireRecipientAccess(report, rc.recipients);
+    // a paused schedule may be saved without SMTP; an active one would only fail at run time
+    if (input.enabled) requireMail();
     // validate required parameters now so the schedule doesn't fail at run time
     const p = resolveParameters(report.sql, report.parameters, input.parameters, {
       timeZone: cfg.datePresetTimezone,
@@ -1826,6 +1859,7 @@ export function apiRouter(d: ApiDeps): Router {
     });
     return { s, report };
   };
+  const versionBody = z.object({ version: z.number().int().positive().optional() });
 
   r.get('/schedules/settings', (_req, res) => {
     res.json(scheduleSettings());
@@ -1834,10 +1868,25 @@ export function apiRouter(d: ApiDeps): Router {
     '/schedules/preview',
     h(async (req, res) => {
       const b = z
-        .object({ cron: z.string().max(128), timezone: z.string().max(64) })
+        .object({
+          cron: z.string().max(128).optional(),
+          cadence: cadenceSchema.optional(),
+          timezone: z.string().max(64),
+        })
         .parse(req.body);
-      const upcoming = validateCron(b.cron, b.timezone, cfg.scheduler.minIntervalMinutes);
-      res.json({ upcoming: upcoming.map((x) => x.toISOString()) });
+      if (!b.cron && !b.cadence)
+        throw new AppError(
+          400,
+          'INVALID_CADENCE',
+          'Choose how often the report should be delivered.',
+        );
+      const cron = b.cadence ? cadenceToCron(b.cadence) : b.cron!;
+      const upcoming = validateCron(cron, b.timezone, cfg.scheduler.minIntervalMinutes);
+      res.json({
+        upcoming: upcoming.map((x) => x.toISOString()),
+        cron,
+        description: describeCadence(cronToCadence(cron), cron),
+      });
     }),
   );
   r.get(
@@ -1863,12 +1912,19 @@ export function apiRouter(d: ApiDeps): Router {
       });
     }),
   );
+  r.get(
+    '/reports/:id/schedule-recipients',
+    h(async (req, res) => {
+      const { report } = await d.access.require(user(req), reportId(req), 'EDIT');
+      res.json({ recipients: await d.recipients.options(report) });
+    }),
+  );
   r.post(
     '/reports/:id/schedules',
     h(async (req, res) => {
-      const body = scheduleInputSchema.parse(req.body);
+      const body = normaliseScheduleBody(scheduleBodySchema.parse(req.body));
       const { report } = await d.access.require(user(req), reportId(req), 'EDIT');
-      const p = prepareSchedule(report, body);
+      const p = await prepareSchedule(report, body);
       res
         .status(201)
         .json({ schedule: await d.schedules.create(report.id, user(req).id, p.input, p.next) });
@@ -1877,12 +1933,43 @@ export function apiRouter(d: ApiDeps): Router {
   r.put(
     '/schedules/:id',
     h(async (req, res) => {
-      const body = scheduleInputSchema
+      const raw = scheduleBodySchema
         .extend({ version: z.number().int().positive() })
         .parse(req.body);
+      const body = normaliseScheduleBody(raw);
       const { s, report } = await loadSchedule(req);
-      const p = prepareSchedule(report, body);
-      res.json({ schedule: await d.schedules.update(s.id, p.input, p.next, body.version) });
+      const p = await prepareSchedule(report, body);
+      res.json({ schedule: await d.schedules.update(s.id, p.input, p.next, raw.version) });
+    }),
+  );
+  r.post(
+    '/schedules/:id/pause',
+    h(async (req, res) => {
+      const { version } = versionBody.parse(req.body ?? {});
+      const { s } = await loadSchedule(req);
+      res.json({ schedule: await d.schedules.setEnabled(s.id, false, null, version) });
+    }),
+  );
+  r.post(
+    '/schedules/:id/resume',
+    h(async (req, res) => {
+      const { version } = versionBody.parse(req.body ?? {});
+      const { s, report } = await loadSchedule(req);
+      requireMail();
+      const rc = checkRecipients(s.recipients, cfg.scheduler);
+      if (!rc.ok) throw new AppError(400, 'INVALID_RECIPIENTS', rc.message);
+      await requireRecipientAccess(report, rc.recipients);
+      // the next occurrence after now: runs missed while paused are not replayed
+      const [next] = validateCron(s.cron, s.timezone, cfg.scheduler.minIntervalMinutes);
+      res.json({ schedule: await d.schedules.setEnabled(s.id, true, next, version) });
+    }),
+  );
+  r.get(
+    '/schedules/:id/deliveries',
+    h(async (req, res) => {
+      const { s } = await loadSchedule(req);
+      const limit = z.coerce.number().int().min(1).max(100).default(25).parse(req.query.limit);
+      res.json({ deliveries: await d.schedules.listDeliveries(s.id, limit) });
     }),
   );
   r.delete(
@@ -1898,7 +1985,8 @@ export function apiRouter(d: ApiDeps): Router {
     execLimiter,
     h(async (req, res) => {
       const { s } = await loadSchedule(req);
-      const result = await d.scheduler.run(s);
+      requireMail();
+      const result = await d.scheduler.run(s, { trigger: 'MANUAL', requestedBy: user(req).id });
       res.json({ result, schedule: await d.schedules.get(s.id) });
     }),
   );
