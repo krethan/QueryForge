@@ -20,13 +20,14 @@ import {
   Logout,
   TableSplit,
   Time,
+  TrashCan,
   UserAvatar,
 } from '@carbon/icons-react';
 import { useEffect, type ComponentType, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 
-const NAV: { to: string; label: string; icon: ComponentType }[] = [
+const NAV: { to: string; label: string; icon: ComponentType; adminOnly?: boolean }[] = [
   { to: '/', label: 'Dashboard', icon: Dashboard },
   { to: '/reports/new', label: 'New Report', icon: Add },
   { to: '/report-builder', label: 'Report Builder', icon: TableSplit },
@@ -34,7 +35,12 @@ const NAV: { to: string; label: string; icon: ComponentType }[] = [
   { to: '/schedules', label: 'Schedules', icon: Time },
   { to: '/datasource', label: 'Data Source', icon: DataBase },
   { to: '/account', label: 'Account', icon: UserAvatar },
+  { to: '/admin/deleted-folders', label: 'Deleted folders', icon: TrashCan, adminOnly: true },
 ];
+
+/** Side navigation entries for a user: admin-only screens are hidden from everyone else. */
+export const navFor = (role: string | undefined) =>
+  NAV.filter((n) => !n.adminOnly || role === 'ADMIN');
 
 const PRODUCT_NAME = 'Uncle Bob';
 
@@ -57,7 +63,9 @@ export function pageTitle(pathname: string): string {
                   ? 'Data Source'
                   : pathname === '/account'
                     ? 'Account'
-                    : null;
+                    : pathname === '/admin/deleted-folders'
+                      ? 'Deleted folders'
+                      : null;
   return page ? `${page} — ${PRODUCT_NAME}` : PRODUCT_NAME;
 }
 
@@ -65,6 +73,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
   const nav = useNavigate();
   const { pathname } = useLocation();
+  const navItems = navFor(user?.role);
   const isActive = (to: string) =>
     to === '/'
       ? pathname === '/'
@@ -125,9 +134,11 @@ export function AppShell({ children }: { children: ReactNode }) {
               href="#main-content"
             >
               <SideNavItems>
-                {NAV.map((n, i) => (
+                {navItems.map((n, i) => (
                   <span key={n.to}>
-                    {i === 5 && <SideNavDivider />}
+                    {(i === 5 || (n.adminOnly && !navItems[i - 1]?.adminOnly)) && (
+                      <SideNavDivider />
+                    )}
                     <SideNavLink as={Link} to={n.to} renderIcon={n.icon} isActive={isActive(n.to)}>
                       {n.label}
                     </SideNavLink>

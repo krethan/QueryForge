@@ -72,4 +72,17 @@ describe('api client', () => {
     await api.listFolderDeletions(50);
     expect(f.mock.calls[0][0]).toBe('/api/admin/folder-deletions?limit=50&offset=50');
   });
+
+  it('pages a deleted folder’s sharing history from the admin endpoint', async () => {
+    const f = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ deletion: {}, events: [], hasMore: false, limit: 25, offset: 25 }),
+        ),
+      );
+    await api.getDeletedFolderAudit('f1', 25);
+    expect(f.mock.calls[0][0]).toBe('/api/admin/folder-deletions/f1/audit?limit=25&offset=25');
+    expect(f.mock.calls[0][1]!.method).toBe('GET');
+  });
 });

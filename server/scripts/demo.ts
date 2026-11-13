@@ -1190,6 +1190,40 @@ async function main() {
     'VIEWER',
   );
 
+  // Two deleted folders for the admin Deleted folders screen (migration 013). Both go through the
+  // real delete path, so each has its QF_FOLDER_DELETIONS row and its closing REVOKE rows in the
+  // folder's sharing history. The demo user is an app admin and can see them; nobody else can.
+  const oldClose = await folders.create('u-pat', 'Q3 Close (old)');
+  const oldCloseRef = { id: oldClose.id, ownerId: 'u-pat' };
+  await folderAccess.replaceShares(
+    oldCloseRef,
+    'u-pat',
+    [{ type: 'GROUP', id: 'finance', role: 'VIEWER' }],
+    exists,
+  );
+  await folderAccess.replaceShares(
+    oldCloseRef,
+    'u-pat',
+    [
+      { type: 'GROUP', id: 'finance', role: 'VIEWER' },
+      { type: 'USER', id: 'u-demo', role: 'EDITOR' },
+    ],
+    exists,
+    'VIEWER',
+  );
+  await folderAccess.addReport(oldCloseRef, created[0].id, 'u-demo');
+  await folders.remove('u-pat', oldClose.id);
+  const scratch = await folders.create('u-demo', 'Scratch');
+  // A report nothing else files: after the delete it is simply Unfiled again.
+  if (created[5]) await folders.setPref('u-demo', created[5].id, { folderId: scratch.id });
+  await folderAccess.replaceShares(
+    { id: scratch.id, ownerId: 'u-demo' },
+    'u-demo',
+    [{ type: 'USER', id: 'u-sam', role: 'VIEWER' }],
+    exists,
+  );
+  await folders.remove('u-demo', scratch.id);
+
   app.listen(PORT, '127.0.0.1', () => {
     console.log(
       `Uncle Bob DEMO (in-memory, no IBM i) on ${origin}  — login: demo / demo-password-123 (LDAP fake: dave / directory-pass; SSO button signs in a fake user)`,

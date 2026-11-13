@@ -40,6 +40,7 @@ import type {
   FolderAccess,
   FolderAuditPage,
   FolderDeletionPage,
+  DeletedFolderAuditPage,
   Formatting,
   ReportPrefs,
 } from './types';
@@ -210,10 +211,16 @@ export const api = {
   /** Deleted folders, newest first (app admins only; migration 013). */
   listFolderDeletions: (offset = 0, limit = 50) =>
     json<FolderDeletionPage>('GET', `/admin/folder-deletions?limit=${limit}&offset=${offset}`),
+  /** One page of a deleted folder's sharing history, newest first (app admins only). */
+  getDeletedFolderAudit: (folderId: string, offset = 0, limit = FOLDER_AUDIT_PAGE) =>
+    json<DeletedFolderAuditPage>(
+      'GET',
+      `/admin/folder-deletions/${encodeURIComponent(folderId)}/audit?limit=${limit}&offset=${offset}`,
+    ),
   /** Downloads a deleted folder's sharing history as CSV (app admins only). */
   async exportDeletedFolderAudit(folderId: string) {
     return downloadFile(
-      await raw('GET', `/admin/folder-deletions/${folderId}/audit/export`),
+      await raw('GET', `/admin/folder-deletions/${encodeURIComponent(folderId)}/audit/export`),
       'folder-audit.csv',
     );
   },

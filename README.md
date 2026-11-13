@@ -53,7 +53,7 @@ Put it behind TLS; set `APP_ORIGIN`, `COOKIE_SECURE=true`, `TRUST_PROXY` as appr
 `npm run demo` builds the UI and starts the app on http://127.0.0.1:3005 with the **in-memory test fakes**
 for both Mapepire and the metadata store. It never connects to IBM i, ignores `.env`, refuses
 `NODE_ENV=production`, and is not used by `npm start`/`npm run dev`. Login `demo` / `demo-password-123`;
-all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders (Sam can open the reports in "Ops Review" because its owner shares them),
+all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders (Sam can open the reports in "Ops Review" because its owner shares them), two deleted folders for the admin **Deleted folders** screen (the demo user is an app admin),
 three schedules (one with a delivery already in its history; e-mail is captured in memory and logged as `[demo mail — not sent]`), a fake SSO button
 ("Contoso SSO (demo fake)", signs in as Carol in Finance) and a fake directory login (`dave` / `directory-pass`).
 The fakes live in `server/test/helpers` and are only reachable from `npm run demo`, which binds 127.0.0.1. With it running, `npm run screenshots` captures 1440×900 PNGs into `screenshots/`
@@ -653,7 +653,17 @@ shareCount, placedCount, filedCount, reportsRole, deletedAt }`.
 limit, offset }`: the deleted folder's sharing history.
 - `GET /api/admin/folder-deletions/:folderId/audit/export` → the same history as CSV (format above).
 
-There is no screen for this yet; it is API only. Storage is migration `013_folder_deletion_audit.sql`,
+**Deleted folders screen.** Admins get a **Deleted folders** entry at the bottom of the side navigation
+(`/admin/deleted-folders`); nobody else sees it, and opening the URL as a non-admin shows "Admins only"
+without calling the API (a 403 from the server is shown the same way). The table lists the deletions newest
+first: folder, owner, deleted by, deleted at (in the browser's locale and time zone), share / placed / filed
+counts and the report-sharing option, 25, 50 or 100 per page using the API's `limit` / `offset`. Each row
+has **Sharing history** (the folder's history in the same style as the Access and audit panel, with **Show
+older changes** and **Export CSV**) and **Export CSV** (the whole history, from the export endpoint). In
+demo mode the demo user is an admin and two deleted folders are seeded ("Q3 Close (old)" by Pat,
+"Scratch" by the demo user), both deleted through the real delete path.
+
+Storage is migration `013_folder_deletion_audit.sql`,
 which is additive: one new table, two indexes (`DELETED_AT DESC, DELETION_ID` for the list, `FOLDER_ID`
 for lookups) and a table label; nothing existing is altered. Folders deleted before 013 was applied have
 no deletion record (their sharing history rows, if any, are still there). **Not tested on a real IBM i:**
@@ -760,9 +770,9 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Shared folders: unless the owner shares the folder's reports too, people may see an emptier folder
   than the owner. There is no folder access/audit panel in the UI yet (the API has one), no notification
   when a folder is shared with you, and no share expiry.
-- Folder audit export and deletion audit: deleted-folder records are admin-only and API-only (no screen
-  yet), are kept forever (no retention or purge), and only cover deletions made through Uncle Bob after
-  migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+). The CSV export's
+- Folder audit export and deletion audit: deleted-folder records are admin-only, are kept forever (no retention or purge), and only cover deletions made through Uncle Bob after
+  migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+); the Deleted folders
+  screen has no search, filter or sort and does not show a total count (the API returns only `hasMore`). The CSV export's
   keyset cursor binds back Db2's own timestamp text; not yet confirmed on a real IBM i.
 - Sharing a folder's reports: only reports the folder owner owns and placed there are covered (no way to
   share someone else's report, by design). The folder's Share dialog lists only reports the owner can see.

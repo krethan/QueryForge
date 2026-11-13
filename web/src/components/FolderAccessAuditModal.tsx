@@ -54,6 +54,35 @@ const actionTag = (e: FolderShareAuditEvent) => {
 };
 
 /**
+ * A folder's sharing history, newest first: one line per grant / change / revoke, including the
+ * report-sharing option. Shared by the folder's Access and audit panel and the admin
+ * Deleted folders screen.
+ */
+export function FolderAuditEventList({ events }: { events: FolderShareAuditEvent[] }) {
+  if (events.length === 0) return <p>No sharing changes recorded.</p>;
+  return (
+    <ol className="qf-audit-list" aria-label="Sharing history">
+      {events.map((e) => {
+        const tag = actionTag(e);
+        const { before, after } = folderEventRoles(e);
+        return (
+          <li key={e.id}>
+            <Tag size="sm" type={tag.type}>
+              {tag.text}
+            </Tag>{' '}
+            {describeFolderEvent(e)}
+            <span className="qf-folder-audit__roles">
+              {folderEventTarget(e)}: {before} → {after}
+            </span>
+            <time dateTime={e.occurredAt}>{formatDateTime(e.occurredAt)}</time>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
  * Owner (or admin) panel for a folder, like the report's Access and audit panel: who can reach
  * the folder now, whether its reports are shared, and the grant / change / revoke history,
  * including the report-sharing option, newest first, a page at a time.
@@ -183,28 +212,7 @@ export function FolderAccessAuditModal({
               Downloaded {exported} with the full sharing history.
             </p>
           )}
-          {events.length === 0 ? (
-            <p>No sharing changes recorded.</p>
-          ) : (
-            <ol className="qf-audit-list" aria-label="Sharing history">
-              {events.map((e) => {
-                const tag = actionTag(e);
-                const { before, after } = folderEventRoles(e);
-                return (
-                  <li key={e.id}>
-                    <Tag size="sm" type={tag.type}>
-                      {tag.text}
-                    </Tag>{' '}
-                    {describeFolderEvent(e)}
-                    <span className="qf-folder-audit__roles">
-                      {folderEventTarget(e)}: {before} → {after}
-                    </span>
-                    <time dateTime={e.occurredAt}>{formatDateTime(e.occurredAt)}</time>
-                  </li>
-                );
-              })}
-            </ol>
-          )}
+          <FolderAuditEventList events={events} />
           {hasMore && (
             <Button
               kind="ghost"

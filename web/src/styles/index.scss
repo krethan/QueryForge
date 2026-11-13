@@ -946,3 +946,31 @@ body {
 .qf-share-audit-link {
   margin-top: -0.75rem;
 }
+
+.qf-deleted-folders__status {
+  min-height: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.qf-deleted-folders td.qf-deleted-folders__count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.qf-deleted-folder__summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin-bottom: 1rem;
+
+  dt {
+    color: var(--cds-text-secondary, #525252);
+  }
+}
+
+.qf-deleted-folders__actions {
+  display: flex;
+  gap: 0.25rem;
+  justify-content: flex-end;
+  white-space: nowrap;
+}

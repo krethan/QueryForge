@@ -465,6 +465,14 @@ export interface FolderDeletionPage {
   limit: number;
   offset: number;
 }
+/** GET /admin/folder-deletions/:folderId/audit: a deleted folder's sharing history, newest first. */
+export interface DeletedFolderAuditPage {
+  deletion: FolderDeletion;
+  events: FolderShareAuditEvent[];
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+}
 
 // ---- Report Builder (catalog-driven SELECT) ----
 export type CatalogTableType = 'T' | 'P' | 'V' | 'L' | 'A' | 'M' | string;
