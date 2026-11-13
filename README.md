@@ -15,7 +15,9 @@ Database access is exclusively through **Mapepire** (`@ibm/mapepire-js` 1.0.2); 
 stored in Db2 for i as well.
 
 > Status: unit/API tests run against in-memory fakes of Mapepire. **This app has not yet been
-> connected to or verified against a real IBM i system.** See `docs/IBMI_SETUP.md`.
+> connected to or verified against a real IBM i system.** See `docs/IBMI_SETUP.md`, and
+> [`docs/ibmi-verification.md`](docs/ibmi-verification.md) for the non-production test plan and the
+> `npm run verify:ibmi` kit.
 
 ## Layout
 
@@ -24,7 +26,7 @@ server/   Express API (auth, SQL validation, Mapepire execution, XLSX export, me
   migrations/  Db2 for i DDL (applied by `npm run migrate`)
   scripts/     migrate.ts, create-user.ts
 web/      React + Vite + @carbon/react UI
-docs/     IBMI_SETUP.md (Mapepire, profiles, authorities, TLS)
+docs/     IBMI_SETUP.md (Mapepire, profiles, authorities, TLS), ibmi-verification.md (test plan)
 PLAN.md   Design plan
 ```
 
@@ -59,17 +61,18 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 
 ## Commands
 
-| Command                                 | Description                                                                                                     |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `npm run dev`                           | Server (tsx watch) + Vite dev server                                                                            |
-| `npm run build`                         | Compile server, typecheck + build web                                                                           |
-| `npm start`                             | Run built server                                                                                                |
-| `npm run lint` / `npm run format:check` | ESLint / Prettier                                                                                               |
-| `npm run typecheck`                     | `tsc --noEmit` for both workspaces                                                                              |
-| `npm test`                              | Server (vitest + supertest, fake Mapepire) and web (vitest + Testing Library)                                   |
-| `npm run test:integration`              | Real Mapepire tests; skipped unless `QF_INTEGRATION=1` — non-production only                                    |
-| `npm run migrate`                       | Apply metadata migrations                                                                                       |
-| `npm run user:create`                   | Create/reset an app user (password via prompt or `QF_NEW_PASSWORD`; `--groups finance,sales` sets local groups) |
+| Command                                 | Description                                                                                                          |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                           | Server (tsx watch) + Vite dev server                                                                                 |
+| `npm run build`                         | Compile server, typecheck + build web                                                                                |
+| `npm start`                             | Run built server                                                                                                     |
+| `npm run lint` / `npm run format:check` | ESLint / Prettier                                                                                                    |
+| `npm run typecheck`                     | `tsc --noEmit` for both workspaces                                                                                   |
+| `npm test`                              | Server (vitest + supertest, fake Mapepire) and web (vitest + Testing Library)                                        |
+| `npm run test:integration`              | Real Mapepire tests; skipped unless `QF_INTEGRATION=1` — non-production only                                         |
+| `npm run migrate`                       | Apply metadata migrations                                                                                            |
+| `npm run verify:ibmi`                   | IBM i verification kit for a **non-production** system; see [`docs/ibmi-verification.md`](docs/ibmi-verification.md) |
+| `npm run user:create`                   | Create/reset an app user (password via prompt or `QF_NEW_PASSWORD`; `--groups finance,sales` sets local groups)      |
 
 ## Environment variables (`server/.env`)
 

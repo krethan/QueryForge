@@ -143,6 +143,12 @@ Notes:
 
 ## 5. Verify (non-production)
 
+Follow [`ibmi-verification.md`](ibmi-verification.md): it covers prerequisites, the
+`npm run verify:ibmi` kit (read-only checks, then migrations applied into a disposable library and
+checked against the QSYS2 catalog), cleanup, and a manual UI checklist with a results template.
+
+The older live smoke test is still available:
+
 ```
 QF_INTEGRATION=1 npm run test:integration
 ```
