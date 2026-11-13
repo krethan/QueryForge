@@ -928,6 +928,21 @@ body {
   margin-top: 0.5rem;
 }
 
+.qf-folder-audit__history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.qf-folder-audit__history-head .cds--inline-loading {
+  width: auto;
+}
+
+.qf-folder-audit__exported {
+  margin: 0 0 0.5rem;
+}
+
 .qf-share-audit-link {
   margin-top: -0.75rem;
 }

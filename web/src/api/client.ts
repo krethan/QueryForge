@@ -39,6 +39,7 @@ import type {
   Folder,
   FolderAccess,
   FolderAuditPage,
+  FolderDeletionPage,
   Formatting,
   ReportPrefs,
 } from './types';
@@ -199,6 +200,23 @@ export const api = {
   /** A later page of a folder's sharing history, newest first (owner or admin). */
   getFolderAudit: (id: string, offset: number, limit = FOLDER_AUDIT_PAGE) =>
     json<FolderAuditPage>('GET', `/folders/${id}/audit?limit=${limit}&offset=${offset}`),
+  /**
+   * Downloads a folder's whole sharing history as CSV, newest first (owner or admin). The
+   * server streams every event; nothing is cut off at a page size.
+   */
+  async exportFolderAudit(id: string) {
+    return downloadFile(await raw('GET', `/folders/${id}/audit/export`), 'folder-audit.csv');
+  },
+  /** Deleted folders, newest first (app admins only; migration 013). */
+  listFolderDeletions: (offset = 0, limit = 50) =>
+    json<FolderDeletionPage>('GET', `/admin/folder-deletions?limit=${limit}&offset=${offset}`),
+  /** Downloads a deleted folder's sharing history as CSV (app admins only). */
+  async exportDeletedFolderAudit(folderId: string) {
+    return downloadFile(
+      await raw('GET', `/admin/folder-deletions/${folderId}/audit/export`),
+      'folder-audit.csv',
+    );
+  },
   /** A folder's shares, its "share the reports" option and which reports that covers. */
   getFolderSharing: (id: string) => json<FolderSharing>('GET', `/folders/${id}/shares`),
   /**
@@ -489,9 +507,10 @@ export const api = {
   },
 };
 
-async function download(res: Response) {
+/** Saves a response body as a file named by its Content-Disposition (or `fallback`). */
+async function downloadFile(res: Response, fallback: string) {
   const blob = await res.blob();
-  const name = filenameFrom(res, 'report.xlsx');
+  const name = filenameFrom(res, fallback);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -500,6 +519,11 @@ async function download(res: Response) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { filename: name, size: blob.size };
+}
+
+async function download(res: Response) {
+  const { filename: name } = await downloadFile(res, 'report.xlsx');
   return {
     filename: name,
     rowCount: Number(res.headers.get('X-QF-Row-Count') ?? 0),

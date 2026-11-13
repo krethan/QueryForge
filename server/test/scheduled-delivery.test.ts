@@ -638,7 +638,7 @@ describe('when e-mail is not configured', () => {
 describe('migration 010: schedule delivery history', () => {
   const migs = loadMigrations('QFMETA');
   it('comes after 009 and only adds the delivery history table', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     const m = migs.find((x) => x.version === 10)!;
     const sql = m.statements.join('\n').toUpperCase();
     expect(sql).toContain('CREATE TABLE QFMETA.QF_SCHEDULE_DELIVERIES');

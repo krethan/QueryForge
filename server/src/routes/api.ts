@@ -51,7 +51,12 @@ import {
   matchPivotFormatting,
   pivotExportFormatting,
 } from '../reports/formatting.js';
-import { folderInputSchema, type FolderRepository } from '../reports/folders.js';
+import {
+  folderDeletionsQuerySchema,
+  folderInputSchema,
+  type FolderRepository,
+} from '../reports/folders.js';
+import { csvFileName, streamCsv } from '../export/csv.js';
 import {
   folderAddInputSchema,
   folderAuditQuerySchema,
@@ -59,6 +64,7 @@ import {
   mergeVisibleOrder,
   type FolderAccessService,
   type FolderMember,
+  type FolderShareAuditEvent,
 } from '../sharing/folder-access.js';
 import {
   folderSharesInputSchema,
@@ -488,6 +494,44 @@ async function sendXlsx(res: Response, file: XlsxFile) {
     ),
   ).finally(() => file.cleanup());
 }
+
+/** Columns of a folder audit CSV export, in order. */
+export const FOLDER_AUDIT_CSV_HEADER = [
+  'Occurred at (UTC)',
+  'Action',
+  'Principal type',
+  'Principal ID',
+  'Principal name',
+  'Role before',
+  'Role after',
+  'Changed by (user ID)',
+  'Changed by',
+  'Folder ID',
+  'Folder name',
+  'Event ID',
+] as const;
+const folderAuditCsvCells = (folderName: string) => (e: FolderShareAuditEvent) => [
+  e.occurredAt,
+  e.action,
+  e.principalType,
+  e.principalId,
+  e.principalName ?? '',
+  e.oldRole ?? '',
+  e.newRole ?? '',
+  e.actorId,
+  e.actorName ?? '',
+  e.folderId,
+  folderName,
+  e.id,
+];
+const folderAuditCsvName = (folderName: string, deleted: boolean) => {
+  const label = `${folderName} audit${deleted ? ' - deleted' : ''}`;
+  return {
+    filename: csvFileName(label, 'folder-audit'),
+    utf8Filename: `${label.replace(/[\\/]+/g, '_')}.csv`,
+    header: FOLDER_AUDIT_CSV_HEADER,
+  };
+};
 
 export function apiRouter(d: ApiDeps): Router {
   const r = Router();
@@ -1385,6 +1429,76 @@ export function apiRouter(d: ApiDeps): Router {
       const { limit, offset } = folderAuditQuerySchema.parse(req.query);
       const page = await d.folderAccess.auditPage(folder.id, limit, offset);
       res.json({ ...page, limit, offset });
+    }),
+  );
+  /**
+   * The folder's whole sharing history as CSV, newest first, for the same people who may read
+   * it above (owner or admin). Streamed a batch at a time with keyset paging, so a long history
+   * is never cut off and is never held in memory.
+   */
+  r.get(
+    '/folders/:folderId/audit/export',
+    h(async (req, res) => {
+      const folder = await requireFolderAuditor(req);
+      await streamCsv(
+        res,
+        folderAuditCsvName(folder.name, false),
+        d.folderAccess.auditAll(folder.id),
+        folderAuditCsvCells(folder.name),
+      );
+    }),
+  );
+
+  // ---- Deleted folders (migration 013): app admins only. ----
+  // A deleted folder has no owner view left, and its history names everyone who had access, so
+  // only a global admin may read it. Everyone else gets 403 whether or not anything was deleted.
+  const requireAdmin = (req: Request) => {
+    if (user(req).role !== 'ADMIN')
+      throw new AppError(403, 'FORBIDDEN', 'Only an admin can view deleted folders.');
+  };
+  /**
+   * A deleted folder's deletion record. A folder that still exists is 404 here even for an
+   * admin, so this can never be used to read a live (possibly never-shared, personal) folder's
+   * history past the normal owner / admin rule above.
+   */
+  const requireDeletedFolder = async (req: Request) => {
+    requireAdmin(req);
+    const id = folderId(req);
+    const [live, deletion] = await Promise.all([
+      d.folders.findById(id),
+      d.folders.findDeletion(id),
+    ]);
+    if (live || !deletion)
+      throw new AppError(404, 'DELETION_NOT_FOUND', 'No deletion is recorded for this folder.');
+    return deletion;
+  };
+  r.get(
+    '/admin/folder-deletions',
+    h(async (req, res) => {
+      requireAdmin(req);
+      const { limit, offset } = folderDeletionsQuerySchema.parse(req.query);
+      res.json({ ...(await d.folders.listDeletions(limit, offset)), limit, offset });
+    }),
+  );
+  r.get(
+    '/admin/folder-deletions/:folderId/audit',
+    h(async (req, res) => {
+      const deletion = await requireDeletedFolder(req);
+      const { limit, offset } = folderAuditQuerySchema.parse(req.query);
+      const page = await d.folderAccess.auditPage(deletion.folderId, limit, offset);
+      res.json({ deletion, ...page, limit, offset });
+    }),
+  );
+  r.get(
+    '/admin/folder-deletions/:folderId/audit/export',
+    h(async (req, res) => {
+      const deletion = await requireDeletedFolder(req);
+      await streamCsv(
+        res,
+        folderAuditCsvName(deletion.folderName, true),
+        d.folderAccess.auditAll(deletion.folderId),
+        folderAuditCsvCells(deletion.folderName),
+      );
     }),
   );
   r.post(

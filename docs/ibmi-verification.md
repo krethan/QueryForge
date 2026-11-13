@@ -1,6 +1,6 @@
 # IBM i verification plan (non-production)
 
-> **Status:** nothing in Uncle Bob has been run on a real IBM i yet, and migrations 001–012 have never
+> **Status:** nothing in Uncle Bob has been run on a real IBM i yet, and migrations 001–013 have never
 > been applied to Db2 for i. This plan and the `verify:ibmi` kit are for you to run on a **test or
 > development partition**. Never point them at production.
 
@@ -85,7 +85,7 @@ If `QF_VERIFY_SCHEMA` and the metadata profile are set and the library already e
 an earlier `--apply-migrations` run without `--cleanup`), it also runs the catalog checks in step 3 and the
 app's metadata read queries, read-only.
 
-**Step 3: apply migrations 001–012 into the disposable library, verify, and drop it.**
+**Step 3: apply migrations 001–013 into the disposable library, verify, and drop it.**
 
 ```bash
 npm run verify:ibmi -- --config verify-ibmi.env --confirm-nonprod \
@@ -101,13 +101,15 @@ As the metadata profile, and only inside `UBVERIFY`:
    `npm run migrate` would, then `REVOKE ALL … FROM PUBLIC` on the metadata tables. A failing statement
    stops the run and is reported with its file, statement number, SQLSTATE and SQLCODE.
 4. Catalog checks (below), the reporting profile's lack of access to `UBVERIFY.QF_USERS`, and the app's
-   metadata read queries (reports, shares, folders, folder audit with `OFFSET` paging, tile order,
-   schedules, deliveries, history).
+   metadata read queries (reports, shares, folders, folder audit with `OFFSET` paging, folder deletions
+   and the audit export's keyset query, tile order, schedules, deliveries, history).
 5. A write smoke test through the app's own repository code (skip it with `--no-smoke`): two test
    users, a report, a folder, filing the report, sharing the folder with "also share the reports"
    (writes the migration 012 `REPORTS` audit row in a commit-controlled transaction), reading it back,
    the viewer seeing the folder, the check constraint rejecting an unknown principal type, deleting the
-   folder (cascades) and the report. It also checks that the app's metadata reads return more than 100
+   folder (cascades), reading back its migration 013 `QF_FOLDER_DELETIONS` row, exporting the deleted
+   folder's sharing history one row per batch (which binds the keyset cursor's `OCCURRED_AT` back as a
+   `TIMESTAMP` parameter), and deleting the report. It also checks that the app's metadata reads return more than 100
    rows (see [Known risks](#8-known-risks-to-watch-for)).
 6. `--cleanup UBVERIFY` drops the library with `DROP SCHEMA UBVERIFY CASCADE`, but only if the
    `QF_VERIFY_KIT` marker is there and it holds nothing except `QF_*` tables, the SQL catalog views
@@ -141,7 +143,7 @@ The kit derives this list from `server/migrations` and compares it with `QSYS2.S
 (type, table, `ESTABLISHED`, enabled, not check-pending), `QSYS2.SYSREFCST` (`DELETE_RULE`),
 `QSYS2.SYSCHKCST` (every literal of the `CHECK` appears in `CHECK_CLAUSE`) and `QSYS2.SYSINDEXES`
 (`IS_UNIQUE`: `D` duplicates allowed, `U` unique, `V` unique where not null). It also checks
-`QF_SCHEMA_VERSION` holds versions 1–12 and that the library has a journal
+`QF_SCHEMA_VERSION` holds versions 1–13 and that the library has a journal
 (`QSYS2.OBJECT_STATISTICS(lib, '*JRN')`). Problems are reported against the migration that creates the
 object.
 
@@ -159,6 +161,7 @@ object.
 | 010 | `010_schedule_deliveries.sql`          | tables `QF_SCHEDULE_DELIVERIES`; primary keys `QF_SDLV_PK`; foreign keys `QF_SDLV_FK_SCHED` (CASCADE); checks `QF_SDLV_CK_TRIGGER`, `QF_SDLV_CK_STATUS`; indexes `QF_SDLV_IX_SCHED`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 011 | `011_folder_report_sharing.sql`        | tables `QF_FOLDER_REPORT_SHARING`; primary keys `QF_FRSH_PK`; foreign keys `QF_FRSH_FK_FOLDER` (CASCADE); checks `QF_FRSH_CK_ROLE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 012 | `012_folder_audit_report_sharing.sql`  | drops and re-adds `QF_FSAU_CK_TYPE`; checks `QF_FSAU_CK_TYPE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 013 | `013_folder_deletion_audit.sql`        | tables `QF_FOLDER_DELETIONS`; primary keys `QF_FDEL_PK`; checks `QF_FDEL_CK_COUNTS`, `QF_FDEL_CK_ROLE`; indexes `QF_FDEL_IX_TIME`, `QF_FDEL_IX_FOLDER`; no foreign keys (by design)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 Not created by a migration file: `QF_SCHEMA_VERSION` (by the migration runner) and, in the disposable
 library only, `QF_VERIFY_KIT` (by the kit). `CREATE SCHEMA` also adds Db2's own catalog views
@@ -201,28 +204,28 @@ metadata profile, `META_SCHEMA=UBVERIFY` (kept from step 3 without `--cleanup`, 
 (`npm run user:create -- --username tester1 --name "Tester One" --admin` and a non-admin `tester2`), then
 `npm run dev`. Use only test data.
 
-| ID    | Feature                | Steps                                                                                                                             | Expected                                                                                                     |
-| ----- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| UI-01 | Sign-in                | Sign in as tester1; sign out; repeated wrong passwords for tester2                                                                | Dashboard loads; tester2 is locked out after repeated failures (`QF_USERS.LOCKED_UNTIL` set)                 |
-| UI-02 | Ad-hoc SQL             | Run a `SELECT` over a `SAMPLELIB` file with > 1,000 rows; scroll/page                                                             | Rows and column types correct; paging loads more; DECIMAL and BIGINT values exact                            |
-| UI-03 | Read-only guard        | Run `DELETE FROM SAMPLELIB.<file>` and `CALL QSYS2.QCMDEXC('DLTF ...')`                                                           | Refused by the validator; nothing changes on IBM i (check row count)                                         |
-| UI-04 | Timeout / cancel       | Run a long query and cancel it                                                                                                    | Job ends (WRKACTJOB shows the QZDASOINIT/Mapepire job gone)                                                  |
-| UI-05 | Save reports           | Save a SQL report with a `?` parameter, and a Report Builder report with joins, filters, grouping, a calculated field and a pivot | Reopens with the same definition; runs on IBM i                                                              |
-| UI-06 | Excel export           | Export both reports                                                                                                               | `.xlsx` opens; numbers, dates and formulas-as-text correct; row limit honoured                               |
-| UI-07 | Date presets           | Use Last month, This quarter, Last 7 days on a date parameter and a builder date filter                                           | Resolved ranges correct for `DATE_PRESET_TIMEZONE`                                                           |
-| UI-08 | Conditional formatting | Add rules (greater than, between, text contains)                                                                                  | Colours in the grid and in the export                                                                        |
-| UI-09 | Charts and drill-down  | Add a chart; drill from a value into a target report                                                                              | Chart renders; drill passes the value                                                                        |
-| UI-10 | Sharing and roles      | Share a report with tester2 as Viewer, then Editor; revoke                                                                        | Viewer can run/export only; Editor can edit; revoke removes access; Access and audit panel lists each change |
-| UI-11 | Folders and favorites  | Create folders, file reports, star favorites, rename, delete a folder                                                             | Reports kept when the folder is deleted                                                                      |
-| UI-12 | Shared folders         | Share a folder with tester2 as Viewer and as Editor                                                                               | Viewer sees the folder (only reports they can already see); Editor can add, remove, reorder                  |
-| UI-13 | Folder report sharing  | Turn on "Also share the reports in this folder" (Viewer, then Editor), then off                                                   | tester2 gains and loses access to the owner's reports in that folder, never above the folder role            |
-| UI-14 | Folder audit           | Open the folder's Access and audit panel; Show older changes                                                                      | Every share and report-sharing change listed, newest first; paging works (uses `OFFSET`)                     |
-| UI-15 | Tile order             | Drag tiles, use the keyboard to move one, reload, Reset order                                                                     | Order persists per user; reset restores the default                                                          |
-| UI-16 | Schedules              | Create daily/weekly/monthly schedules to tester1's address; Run now; pause/resume                                                 | Mail with the Excel attachment arrives in the SMTP sink; delivery history rows; paused schedule does not run |
-| UI-17 | Scheduler lease        | Run two app instances against `UBVERIFY` with `SCHEDULER_ENABLED=true`                                                            | Each due run is delivered once                                                                               |
-| UI-18 | History                | Open execution history                                                                                                            | Runs, exports and scheduled runs recorded with row counts and durations                                      |
-| UI-19 | Admin                  | As tester1 (admin), list all reports; open a personal folder of tester2                                                           | Admin sees every report; a never-shared personal folder of tester2 stays private (404)                       |
-| UI-20 | Authority errors       | Run a report on a file the reporting profile cannot read                                                                          | Clean "not authorized" message (SQLSTATE 42501), no stack trace                                              |
+| ID    | Feature                | Steps                                                                                                                             | Expected                                                                                                                                                                                          |
+| ----- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| UI-01 | Sign-in                | Sign in as tester1; sign out; repeated wrong passwords for tester2                                                                | Dashboard loads; tester2 is locked out after repeated failures (`QF_USERS.LOCKED_UNTIL` set)                                                                                                      |
+| UI-02 | Ad-hoc SQL             | Run a `SELECT` over a `SAMPLELIB` file with > 1,000 rows; scroll/page                                                             | Rows and column types correct; paging loads more; DECIMAL and BIGINT values exact                                                                                                                 |
+| UI-03 | Read-only guard        | Run `DELETE FROM SAMPLELIB.<file>` and `CALL QSYS2.QCMDEXC('DLTF ...')`                                                           | Refused by the validator; nothing changes on IBM i (check row count)                                                                                                                              |
+| UI-04 | Timeout / cancel       | Run a long query and cancel it                                                                                                    | Job ends (WRKACTJOB shows the QZDASOINIT/Mapepire job gone)                                                                                                                                       |
+| UI-05 | Save reports           | Save a SQL report with a `?` parameter, and a Report Builder report with joins, filters, grouping, a calculated field and a pivot | Reopens with the same definition; runs on IBM i                                                                                                                                                   |
+| UI-06 | Excel export           | Export both reports                                                                                                               | `.xlsx` opens; numbers, dates and formulas-as-text correct; row limit honoured                                                                                                                    |
+| UI-07 | Date presets           | Use Last month, This quarter, Last 7 days on a date parameter and a builder date filter                                           | Resolved ranges correct for `DATE_PRESET_TIMEZONE`                                                                                                                                                |
+| UI-08 | Conditional formatting | Add rules (greater than, between, text contains)                                                                                  | Colours in the grid and in the export                                                                                                                                                             |
+| UI-09 | Charts and drill-down  | Add a chart; drill from a value into a target report                                                                              | Chart renders; drill passes the value                                                                                                                                                             |
+| UI-10 | Sharing and roles      | Share a report with tester2 as Viewer, then Editor; revoke                                                                        | Viewer can run/export only; Editor can edit; revoke removes access; Access and audit panel lists each change                                                                                      |
+| UI-11 | Folders and favorites  | Create folders, file reports, star favorites, rename, delete a folder                                                             | Reports kept when the folder is deleted; as tester1 (admin), `GET /api/admin/folder-deletions` lists the deletion with its counts; as tester2 it is 403                                           |
+| UI-12 | Shared folders         | Share a folder with tester2 as Viewer and as Editor                                                                               | Viewer sees the folder (only reports they can already see); Editor can add, remove, reorder                                                                                                       |
+| UI-13 | Folder report sharing  | Turn on "Also share the reports in this folder" (Viewer, then Editor), then off                                                   | tester2 gains and loses access to the owner's reports in that folder, never above the folder role                                                                                                 |
+| UI-14 | Folder audit           | Open the folder's Access and audit panel; Show older changes; Export CSV                                                          | Every share and report-sharing change listed, newest first; paging works (uses `OFFSET`); the CSV opens in Excel as UTF-8 with every event (keyset paging), names starting with `=` shown as text |
+| UI-15 | Tile order             | Drag tiles, use the keyboard to move one, reload, Reset order                                                                     | Order persists per user; reset restores the default                                                                                                                                               |
+| UI-16 | Schedules              | Create daily/weekly/monthly schedules to tester1's address; Run now; pause/resume                                                 | Mail with the Excel attachment arrives in the SMTP sink; delivery history rows; paused schedule does not run                                                                                      |
+| UI-17 | Scheduler lease        | Run two app instances against `UBVERIFY` with `SCHEDULER_ENABLED=true`                                                            | Each due run is delivered once                                                                                                                                                                    |
+| UI-18 | History                | Open execution history                                                                                                            | Runs, exports and scheduled runs recorded with row counts and durations                                                                                                                           |
+| UI-19 | Admin                  | As tester1 (admin), list all reports; open a personal folder of tester2                                                           | Admin sees every report; a never-shared personal folder of tester2 stays private (404)                                                                                                            |
+| UI-20 | Authority errors       | Run a report on a file the reporting profile cannot read                                                                          | Clean "not authorized" message (SQLSTATE 42501), no stack trace                                                                                                                                   |
 
 ## 7. Results template
 
@@ -235,8 +238,8 @@ Copy this table into the PR or an issue and fill it in.
 | Kit dry run                                       |                            |                                             |       |
 | Kit read-only run (exit code)                     |                            | `results-readonly.json`                     |       |
 | Reporting profile read-only on every data library |                            |                                             |       |
-| Migrations 001–012 applied into `UBVERIFY`        |                            | `results-migrations.json`                   |       |
-| Catalog objects 001–012 all PASS                  |                            |                                             |       |
+| Migrations 001–013 applied into `UBVERIFY`        |                            | `results-migrations.json`                   |       |
+| Catalog objects 001–013 all PASS                  |                            |                                             |       |
 | Metadata queries all PASS                         |                            |                                             |       |
 | Smoke test all PASS (incl. > 100-row reads)       |                            |                                             |       |
 | Cleanup dropped `UBVERIFY`                        |                            |                                             |       |
@@ -254,6 +257,11 @@ Tested by: ______ Date: ______ Partition / host (not production): ______ App com
   The smoke test still compares a > 100-row catalog read through the app's metadata store with a
   full read. All of this is tested against fakes that emulate Mapepire's paging; it has not been
   confirmed on a real IBM i.
+- **Audit export cursor.** The folder audit CSV export pages with a keyset cursor
+  (`OCCURRED_AT < CAST(? AS TIMESTAMP) OR (OCCURRED_AT = … AND AUDIT_ID > ?)`), binding back the
+  `OCCURRED_AT` text exactly as Mapepire returned it. If Db2 for i or Mapepire formats timestamps in a
+  way the cast does not accept, or drops microseconds, the export would fail or could repeat rows. The
+  smoke test exports a 4-row history one row per batch to catch this; it has only run against fakes.
 - **Label lengths.** Db2 for i limits `LABEL ON TABLE` text to 50 bytes. Migration 009 originally
   labelled `QF_FOLDER_SHARES` with 52 bytes, which would have failed on Db2 for i. It was shortened
   before any real use, and a unit test now checks every label.

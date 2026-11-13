@@ -31,6 +31,8 @@ export class FakeMetadataDb implements MetadataDb {
   scheduleDeliveries: Row[] = [];
   /** key folderId (migration 011) */
   folderReportSharing = new Map<string, Row>();
+  /** QF_FOLDER_DELETIONS (migration 013): no foreign keys, never cascaded. */
+  folderDeletions: Row[] = [];
   statements: { sql: string; params: P }[] = [];
   private clock = 0;
   failNext?: Error;
@@ -473,6 +475,120 @@ export class FakeMetadataDb implements MetadataDb {
     return undefined;
   }
 
+  /** Statements for auditing folder deletion (migration 013) and exporting folder audit. */
+  private folderDeletionQuery(s: string, params: P): Row[] | undefined {
+    if (
+      /^SELECT FOLDER_NAME FROM \w+\.QF_FOLDERS WHERE FOLDER_ID = \? AND OWNER_ID = \?$/.test(s)
+    ) {
+      const f = this.folders.get(String(params[0]));
+      return f && f.OWNER_ID === params[1] ? [{ FOLDER_NAME: f.FOLDER_NAME }] : [];
+    }
+    if (
+      /^SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM \w+\.QF_FOLDER_SHARES WHERE FOLDER_ID = \? ORDER BY PRINCIPAL_TYPE, PRINCIPAL_ID$/.test(
+        s,
+      )
+    )
+      return this.folderShares
+        .filter((x) => x.FOLDER_ID === params[0])
+        .sort(
+          (a, b) =>
+            String(a.PRINCIPAL_TYPE).localeCompare(String(b.PRINCIPAL_TYPE)) ||
+            String(a.PRINCIPAL_ID).localeCompare(String(b.PRINCIPAL_ID)),
+        )
+        .map((x) => ({ ...x }));
+    if (/^SELECT MAX_ROLE FROM \w+\.QF_FOLDER_REPORT_SHARING WHERE FOLDER_ID = \?$/.test(s)) {
+      const x = this.folderReportSharing.get(String(params[0]));
+      return x ? [{ MAX_ROLE: x.MAX_ROLE }] : [];
+    }
+    // Keyset batch of a folder's audit trail (export).
+    if (
+      /FROM \w+\.QF_FOLDER_SHARE_AUDIT A .* WHERE A\.FOLDER_ID = \? AND \(A\.OCCURRED_AT < CAST\(\? AS TIMESTAMP\) OR \(A\.OCCURRED_AT = CAST\(\? AS TIMESTAMP\) AND A\.AUDIT_ID > \?\)\) ORDER BY A\.OCCURRED_AT DESC, A\.AUDIT_ID FETCH FIRST (\d+) ROWS ONLY$/.test(
+        s,
+      )
+    ) {
+      const take = Number(/FETCH FIRST (\d+) ROWS ONLY$/.exec(s)![1]);
+      const [folderId, at, , afterId] = params;
+      return this.folderShareAudit
+        .filter((a) => a.FOLDER_ID === folderId)
+        .filter(
+          (a) =>
+            String(a.OCCURRED_AT) < String(at) ||
+            (String(a.OCCURRED_AT) === String(at) && String(a.AUDIT_ID) > String(afterId)),
+        )
+        .sort(
+          (a, b) =>
+            String(b.OCCURRED_AT).localeCompare(String(a.OCCURRED_AT)) ||
+            String(a.AUDIT_ID).localeCompare(String(b.AUDIT_ID)),
+        )
+        .slice(0, take)
+        .map((a) => this.withAuditNames(a));
+    }
+    if (/FROM \w+\.QF_FOLDER_DELETIONS D LEFT JOIN/.test(s)) {
+      const page = /(?:OFFSET (\d+) ROWS )?FETCH FIRST (\d+) ROWS ONLY$/.exec(s);
+      const skip = Number(page?.[1] ?? 0);
+      const take = page ? Number(page[2]) : Infinity;
+      const byFolder = /WHERE D\.FOLDER_ID = \?/.test(s);
+      return this.folderDeletions
+        .filter((x) => !byFolder || x.FOLDER_ID === params[0])
+        .sort(
+          (a, b) =>
+            String(b.DELETED_AT).localeCompare(String(a.DELETED_AT)) ||
+            String(a.DELETION_ID).localeCompare(String(b.DELETION_ID)),
+        )
+        .slice(skip, skip + take)
+        .map((x) => ({
+          ...x,
+          OWNER_NAME: this.users.get(String(x.OWNER_ID))?.DISPLAY_NAME ?? null,
+          ACTOR_NAME: this.users.get(String(x.ACTOR_ID))?.DISPLAY_NAME ?? null,
+        }));
+    }
+    return undefined;
+  }
+
+  private withAuditNames(a: Row): Row {
+    return {
+      ...a,
+      ACTOR_NAME: this.users.get(String(a.ACTOR_ID))?.DISPLAY_NAME ?? null,
+      PRINCIPAL_NAME:
+        a.PRINCIPAL_TYPE === 'USER'
+          ? (this.users.get(String(a.PRINCIPAL_ID))?.DISPLAY_NAME ?? null)
+          : null,
+    };
+  }
+
+  private folderDeletionUpdate(s: string, params: P): number | undefined {
+    if (
+      /^INSERT INTO \w+\.QF_FOLDER_DELETIONS \(DELETION_ID, FOLDER_ID, FOLDER_NAME, OWNER_ID, ACTOR_ID, SHARE_COUNT, PLACED_COUNT, FILED_COUNT, REPORTS_ROLE, DELETED_AT\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, \?, /.test(
+        s,
+      )
+    ) {
+      const [id, folderId, name, owner, actor, shares, placed, filed, role] = params;
+      if (this.folderDeletions.some((x) => x.DELETION_ID === id))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      for (const n of [shares, placed, filed])
+        if (typeof n !== 'number' || n < 0)
+          throw new DbError('Check constraint QF_FDEL_CK_COUNTS violated.', '23513', -545);
+      if (![null, 'VIEWER', 'EDITOR'].includes(role as string | null))
+        throw new DbError('Check constraint QF_FDEL_CK_ROLE violated.', '23513', -545);
+      if (name === null || folderId === null || owner === null || actor === null)
+        throw new DbError('Null value not allowed.', '23502', -407);
+      this.folderDeletions.push({
+        DELETION_ID: id,
+        FOLDER_ID: folderId,
+        FOLDER_NAME: name,
+        OWNER_ID: owner,
+        ACTOR_ID: actor,
+        SHARE_COUNT: shares,
+        PLACED_COUNT: placed,
+        FILED_COUNT: filed,
+        REPORTS_ROLE: role,
+        DELETED_AT: this.now(),
+      });
+      return 1;
+    }
+    return undefined;
+  }
+
   addGroup(userId: string, group: string, source = 'LOCAL') {
     this.userGroups.set(`${userId}|${group}`, {
       USER_ID: userId,
@@ -550,6 +666,8 @@ export class FakeMetadataDb implements MetadataDb {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
     if (s.startsWith('SELECT 1 AS OK')) return [{ OK: 1 }] as T[];
+    const deletionRows = this.folderDeletionQuery(s, params);
+    if (deletionRows) return deletionRows as T[];
     const folderRows = this.folderQuery(s, params);
     if (folderRows) return folderRows as T[];
     const deliveryRows = this.deliveryQuery(s, params);
@@ -802,6 +920,8 @@ export class FakeMetadataDb implements MetadataDb {
   async update(sql: string, params: P = []): Promise<number> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
+    const deletionN = this.folderDeletionUpdate(s, params);
+    if (deletionN !== undefined) return deletionN;
     const folderN = this.folderUpdate(s, params);
     if (folderN !== undefined) return folderN;
     if (s.startsWith('INSERT INTO') && s.includes('.QF_REPORTS')) {
@@ -1348,6 +1468,7 @@ export class FakeMetadataDb implements MetadataDb {
       folderShareAudit: this.folderShareAudit.map((x) => ({ ...x })),
       scheduleDeliveries: this.scheduleDeliveries.map((x) => ({ ...x })),
       folderReportSharing: new Map([...this.folderReportSharing].map(([k, v]) => [k, { ...v }])),
+      folderDeletions: this.folderDeletions.map((x) => ({ ...x })),
     };
     try {
       return await fn(this);
@@ -1368,6 +1489,7 @@ export class FakeMetadataDb implements MetadataDb {
       this.folderShareAudit = snapshot.folderShareAudit;
       this.scheduleDeliveries = snapshot.scheduleDeliveries;
       this.folderReportSharing = snapshot.folderReportSharing;
+      this.folderDeletions = snapshot.folderDeletions;
       throw e;
     }
   }

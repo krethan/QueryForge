@@ -218,6 +218,58 @@ describe('Folder Access and audit panel', () => {
   });
 });
 
+describe('exporting the folder history as CSV', () => {
+  it('downloads the whole history from the server and says so', async () => {
+    vi.spyOn(api, 'getFolderAccess').mockResolvedValue(access({ hasMore: true }));
+    const exp = vi
+      .spyOn(api, 'exportFolderAudit')
+      .mockResolvedValue({ filename: 'Finance audit.csv', size: 120 });
+    render(<FolderAccessAuditModal folder={folder()} onClose={() => {}} />);
+    const button = await screen.findByRole('button', { name: 'Export CSV' });
+    await userEvent.click(button);
+    expect(exp).toHaveBeenCalledWith(FIN);
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Downloaded Finance audit.csv with the full sharing history.',
+    );
+    // Exporting does not change what the panel shows.
+    expect(
+      within(screen.getByRole('list', { name: 'Sharing history' })).getAllByRole('listitem'),
+    ).toHaveLength(5);
+  });
+
+  it('is offered even when nothing has been recorded yet', async () => {
+    vi.spyOn(api, 'getFolderAccess').mockResolvedValue(access({ events: [], shares: [] }));
+    render(<FolderAccessAuditModal folder={folder()} onClose={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'Export CSV' })).toBeEnabled();
+  });
+
+  it('shows the server’s refusal and lets you try again', async () => {
+    vi.spyOn(api, 'getFolderAccess').mockResolvedValue(access());
+    const exp = vi
+      .spyOn(api, 'exportFolderAudit')
+      .mockRejectedValueOnce(
+        new ApiError(403, 'FORBIDDEN', 'Only the folder owner or an admin can view access audit.'),
+      )
+      .mockResolvedValueOnce({ filename: 'Finance audit.csv', size: 1 });
+    render(<FolderAccessAuditModal folder={folder()} onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Export CSV' }));
+    expect(
+      await screen.findByText(/Only the folder owner or an admin can view access audit/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Downloaded Finance audit.csv');
+    expect(exp).toHaveBeenCalledTimes(2);
+  });
+
+  it('is not offered when the panel could not load', async () => {
+    vi.spyOn(api, 'getFolderAccess').mockRejectedValue(new ApiError(404, 'FOLDER_NOT_FOUND', 'x'));
+    render(<FolderAccessAuditModal folder={folder()} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('x')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Export CSV' })).not.toBeInTheDocument();
+  });
+});
+
 describe('reaching the panel', () => {
   const manage = (folders: Folder[], onAudit = vi.fn()) => {
     render(
