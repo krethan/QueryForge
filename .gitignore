@@ -5,3 +5,5 @@ coverage/
 *.log
 *.xlsx
 screenshots/
+verify-ibmi.env
+ibmi-verification-report*.json

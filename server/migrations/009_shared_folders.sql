@@ -67,7 +67,7 @@ CREATE TABLE {{SCHEMA}}.QF_FOLDER_SHARE_AUDIT (
 
 CREATE INDEX {{SCHEMA}}.QF_FSAU_IX_FOLDER ON {{SCHEMA}}.QF_FOLDER_SHARE_AUDIT (FOLDER_ID, OCCURRED_AT DESC);
 
-LABEL ON TABLE {{SCHEMA}}.QF_FOLDER_SHARES IS 'Uncle Bob folder user/group Viewer and Editor grants';
+LABEL ON TABLE {{SCHEMA}}.QF_FOLDER_SHARES IS 'Uncle Bob folder user/group Viewer/Editor grants';
 
 LABEL ON TABLE {{SCHEMA}}.QF_FOLDER_REPORTS IS 'Uncle Bob reports placed in shared folders';
 

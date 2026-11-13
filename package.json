@@ -21,6 +21,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "migrate": "npm run migrate -w server",
+    "verify:ibmi": "npm run verify:ibmi -w server --",
     "user:create": "npm run user:create -w server",
     "demo": "npm run build -w web && npm run demo -w server",
     "screenshots": "node scripts/screenshots.mjs"
