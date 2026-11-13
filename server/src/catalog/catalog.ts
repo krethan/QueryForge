@@ -23,7 +23,13 @@ export const CATALOG_TABLE_TYPES = ['T', 'P', 'V', 'L', 'A', 'M'] as const;
 
 /** Hard cap on rows read from the catalog per query (the client cannot raise it). */
 export const MAX_TABLES = 500;
+/** Columns read for one table (QSYS2.SYSCOLUMNS); one more is fetched to detect truncation. */
 export const MAX_COLUMNS = 1000;
+/**
+ * Foreign-key column pairs read for one table (QSYS2.SYSREFCST + SYSKEYCST, one row per key
+ * column, with the table as child or parent); one more is fetched to detect truncation.
+ */
+export const MAX_FOREIGN_KEY_ROWS = 1000;
 
 /** Default page size returned by GET /api/schema/tables. */
 export const DEFAULT_TABLE_LIMIT = 100;
@@ -103,7 +109,24 @@ export interface TableListResult {
 export interface ResolvedTable {
   table: CatalogTableEntry;
   columns: CatalogColumn[];
+  /** True when the table has more than MAX_COLUMNS columns and only the first were read. */
+  columnsTruncated: boolean;
   cachedAt: string;
+}
+
+export interface ColumnListResult {
+  columns: CatalogColumn[];
+  /** True when the catalog holds more than MAX_COLUMNS columns for the table. */
+  truncated: boolean;
+}
+
+export interface ForeignKeyListResult {
+  foreignKeys: ForeignKeyColumn[];
+  /**
+   * True when the catalog holds more than MAX_FOREIGN_KEY_ROWS key-column rows for the table.
+   * The constraint cut off by the cap is dropped, so a suggestion never uses part of a key.
+   */
+  truncated: boolean;
 }
 
 export class CatalogService {
@@ -111,8 +134,16 @@ export class CatalogService {
   /** `more`: the catalog held more than MAX_TABLES matches when this entry was read. */
   private readonly tables = new Map<string, CacheEntry<CatalogTableEntry[]> & { more: boolean }>();
   private readonly oneTable = new Map<string, CacheEntry<CatalogTableEntry | null>>();
-  private readonly columnsByTable = new Map<string, CacheEntry<CatalogColumn[]>>();
-  private readonly foreignKeys = new Map<string, CacheEntry<ForeignKeyColumn[]>>();
+  /** `more`: the table had more than MAX_COLUMNS columns when this entry was read. */
+  private readonly columnsByTable = new Map<
+    string,
+    CacheEntry<CatalogColumn[]> & { more: boolean }
+  >();
+  /** `more`: the catalog held more than MAX_FOREIGN_KEY_ROWS rows when this entry was read. */
+  private readonly foreignKeys = new Map<
+    string,
+    CacheEntry<ForeignKeyColumn[]> & { more: boolean }
+  >();
   private readonly pending = new Map<string, Promise<unknown>>();
 
   constructor(
@@ -216,7 +247,7 @@ FETCH FIRST ${MAX_TABLES + 1} ROWS ONLY`; // one extra row so truncation at MAX_
 FROM QSYS2.SYSCOLUMNS
 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 ORDER BY ORDINAL_POSITION
-FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
+FETCH FIRST ${MAX_COLUMNS + 1} ROWS ONLY`; // one extra row so truncation at MAX_COLUMNS is detected
     return { sql, params: [schema, table] satisfies (string | number | null)[] };
   }
 
@@ -287,9 +318,21 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
 
   /** Cached column metadata for one table, read from QSYS2.SYSCOLUMNS. */
   async listColumns(ownerId: string, schema: string, table: string): Promise<CatalogColumn[]> {
+    return (await this.listColumnsResult(ownerId, schema, table)).columns;
+  }
+
+  /**
+   * Column metadata for one table (at most MAX_COLUMNS, in ordinal order) and whether the
+   * table has more. Reads one row past the cap, like the table list, so `truncated` is exact.
+   */
+  async listColumnsResult(
+    ownerId: string,
+    schema: string,
+    table: string,
+  ): Promise<ColumnListResult> {
     const key = `${schema.toUpperCase()}.${table.toUpperCase()}`;
     const cached = this.columnsByTable.get(key);
-    if (this.fresh(cached, Date.now())) return cached.value;
+    if (this.fresh(cached, Date.now())) return { columns: cached.value, truncated: cached.more };
     return this.once(`columns:${key}`, async () => {
       const { sql, params } = this.columnsQuery(schema, table);
       const run = await this.run(sql, ownerId, params, MAX_COLUMNS);
@@ -310,9 +353,10 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
           };
         })
         .filter((c) => c.name);
-      this.columnsByTable.set(key, { at: Date.now(), value: list });
+      // run.truncated: the extra (MAX_COLUMNS + 1)th row came back, so the list is incomplete
+      this.columnsByTable.set(key, { at: Date.now(), value: list, more: run.truncated });
       CatalogService.trim(this.columnsByTable);
-      return list;
+      return { columns: list, truncated: run.truncated };
     });
   }
 
@@ -363,7 +407,7 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
         'UNKNOWN_TABLE',
         `Table ${JSON.stringify(`${schema}.${table}`)} is not in the catalog the reporting profile can read.`,
       );
-    const columns = await this.listColumns(ownerId, found.schema, found.name);
+    const { columns, truncated } = await this.listColumnsResult(ownerId, found.schema, found.name);
     if (columns.length === 0)
       throw new AppError(
         404,
@@ -373,6 +417,7 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
     return {
       table: found,
       columns,
+      columnsTruncated: truncated,
       cachedAt: new Date(
         this.columnsByTable.get(`${found.schema}.${found.name}`)?.at ?? Date.now(),
       ).toISOString(),
@@ -390,9 +435,23 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
     schema: string,
     table: string,
   ): Promise<ForeignKeyColumn[]> {
+    return (await this.listForeignKeysResult(ownerId, schema, table)).foreignKeys;
+  }
+
+  /**
+   * Foreign-key column pairs for one table (at most MAX_FOREIGN_KEY_ROWS) and whether the
+   * catalog holds more. Reads one row past the cap so `truncated` is exact. When truncated, the
+   * last constraint read may be missing key columns, so it is dropped rather than suggested.
+   */
+  async listForeignKeysResult(
+    ownerId: string,
+    schema: string,
+    table: string,
+  ): Promise<ForeignKeyListResult> {
     const key = `${schema.toUpperCase()}.${table.toUpperCase()}`;
     const cached = this.foreignKeys.get(key);
-    if (this.fresh(cached, Date.now())) return cached.value;
+    if (this.fresh(cached, Date.now()))
+      return { foreignKeys: cached.value, truncated: cached.more };
     return this.once(`fks:${key}`, async () => {
       const sql = `SELECT C.TABLE_SCHEMA, C.TABLE_NAME, K.COLUMN_NAME,
        P.TABLE_SCHEMA, P.TABLE_NAME, PK.COLUMN_NAME,
@@ -408,11 +467,18 @@ JOIN QSYS2.SYSKEYCST PK
   ON PK.CONSTRAINT_SCHEMA = R.UNIQUE_CONSTRAINT_SCHEMA AND PK.CONSTRAINT_NAME = R.UNIQUE_CONSTRAINT_NAME
  AND PK.ORDINAL_POSITION = K.ORDINAL_POSITION
 WHERE (C.TABLE_SCHEMA = ? AND C.TABLE_NAME = ?) OR (P.TABLE_SCHEMA = ? AND P.TABLE_NAME = ?)
-ORDER BY R.CONSTRAINT_NAME, K.ORDINAL_POSITION
-FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
+ORDER BY R.CONSTRAINT_SCHEMA, R.CONSTRAINT_NAME, K.ORDINAL_POSITION
+FETCH FIRST ${MAX_FOREIGN_KEY_ROWS + 1} ROWS ONLY`; // one extra row detects truncation
       let list: ForeignKeyColumn[] = [];
+      let more = false;
       try {
-        const run = await this.run(sql, ownerId, [schema, table, schema, table], MAX_COLUMNS);
+        const run = await this.run(
+          sql,
+          ownerId,
+          [schema, table, schema, table],
+          MAX_FOREIGN_KEY_ROWS,
+        );
+        more = run.truncated;
         list = run.rows
           .map((r) => ({
             childSchema: str(r[0]),
@@ -425,12 +491,20 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
             ordinal: num(r[7]) ?? 0,
           }))
           .filter((f) => f.constraint && f.childColumn && f.parentColumn);
+        if (more && list.length) {
+          // The cap may have cut the last constraint's key columns short: never suggest half a key.
+          const last = list[list.length - 1];
+          const same = (f: ForeignKeyColumn) =>
+            f.childSchema === last.childSchema && f.constraint === last.constraint;
+          list = list.filter((f) => !same(f));
+        }
       } catch {
         list = [];
+        more = false;
       }
-      this.foreignKeys.set(key, { at: Date.now(), value: list });
+      this.foreignKeys.set(key, { at: Date.now(), value: list, more });
       CatalogService.trim(this.foreignKeys);
-      return list;
+      return { foreignKeys: list, truncated: more };
     });
   }
 }

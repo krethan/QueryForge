@@ -88,7 +88,13 @@ import {
   type SortKey,
 } from '../reports/reports.js';
 import type { ExecutionService } from '../sql/execution-service.js';
-import { MAX_TABLES, displayType, type CatalogService } from '../catalog/catalog.js';
+import {
+  MAX_COLUMNS,
+  MAX_FOREIGN_KEY_ROWS,
+  MAX_TABLES,
+  displayType,
+  type CatalogService,
+} from '../catalog/catalog.js';
 import { buildReportSql, suggestReportName, type ReportSpec } from '../catalog/sql-builder.js';
 import {
   JOIN_TYPES,
@@ -826,6 +832,9 @@ export function apiRouter(d: ApiDeps): Router {
         type: resolved.table.type,
         text: resolved.table.text,
         cachedAt: resolved.cachedAt,
+        // More than MAX_COLUMNS columns: only the first MAX_COLUMNS (by ordinal) are listed.
+        truncated: resolved.columnsTruncated,
+        maxColumns: MAX_COLUMNS,
         columns: resolved.columns.map((c) => ({
           name: c.name,
           type: c.type,
@@ -904,8 +913,17 @@ export function apiRouter(d: ApiDeps): Router {
           source: await d.catalog.resolveTable(owner, t.schema, t.table),
         });
       const target = await d.catalog.resolveTable(owner, body.schema, body.table);
-      const fks = await d.catalog.listForeignKeys(owner, target.table.schema, target.table.name);
-      res.json({ suggestions: suggestJoinConditions(existing, target, fks) });
+      const fks = await d.catalog.listForeignKeysResult(
+        owner,
+        target.table.schema,
+        target.table.name,
+      );
+      res.json({
+        suggestions: suggestJoinConditions(existing, target, fks.foreignKeys),
+        // More foreign-key rows than MAX_FOREIGN_KEY_ROWS: some constraints were not considered.
+        foreignKeysTruncated: fks.truncated,
+        maxForeignKeyRows: MAX_FOREIGN_KEY_ROWS,
+      });
     }),
   );
   // Run: builds the SELECT server-side and executes it through the normal read-only path.
