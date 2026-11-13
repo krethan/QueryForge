@@ -79,7 +79,8 @@ export function ManageFoldersModal({
     >
       <p className="qf-folders__note">
         Folders are yours alone until you share one. Sharing a folder does not share the reports in
-        it: each person sees only the reports they already have access to.
+        it unless you turn that on when you share it: otherwise each person sees only the reports
+        they already have access to.
       </p>
       <ErrorNotice error={error} onClose={() => setError(null)} />
       <form className="qf-folders__new" onSubmit={create}>
@@ -168,6 +169,11 @@ export function ManageFoldersModal({
                         Shared
                       </Tag>
                     )}
+                    {f.shared && f.shareReports && (
+                      <Tag size="sm" type="teal">
+                        Reports shared
+                      </Tag>
+                    )}
                   </span>
                   <span className="qf-folders__count">{counts.get(f.id) ?? 0} reports</span>
                   {onShare && (
@@ -208,7 +214,14 @@ export function ManageFoldersModal({
           <ul className="qf-folders__list" aria-label="Folders shared with you">
             {others.map((f) => (
               <li key={f.id} className="qf-folders__item">
-                <span className="qf-folders__name">{f.name}</span>
+                <span className="qf-folders__name">
+                  {f.name}
+                  {f.shareReports && (
+                    <Tag size="sm" type="teal">
+                      Reports shared
+                    </Tag>
+                  )}
+                </span>
                 <span className="qf-folders__count">
                   {f.ownerName || 'Another user'} · {roleLabel(f.access)} · {counts.get(f.id) ?? 0}{' '}
                   reports
@@ -321,7 +334,8 @@ export function MoveToFolderModal({
           ))}
           <p className="qf-folders__note">
             Adding a report to a shared folder does not share the report: people in the folder see
-            it only if it is shared with them.
+            it only if it is shared with them, or if it is your own report and you chose to share
+            the folder&apos;s reports.
           </p>
         </fieldset>
       )}

@@ -60,7 +60,18 @@ export function AccessAuditModal({ report, onClose }: { report: Report; onClose(
                 </Tag>
               </li>
             ))}
-            {data.shares.length === 0 && <li>Not shared with anyone.</li>}
+            {(data.folderGrants ?? []).map((g) => (
+              <li key={`folder:${g.folderId}:${g.type}:${g.id}`}>
+                {g.type === 'GROUP' ? `Group ${g.id}` : (g.displayName ?? g.id)}{' '}
+                <Tag size="sm" type={g.role === 'EDITOR' ? 'purple' : 'gray'}>
+                  {roleLabel(g.role)}
+                </Tag>{' '}
+                <span className="qf-muted">through folder {g.folderName}</span>
+              </li>
+            ))}
+            {data.shares.length === 0 && !data.folderGrants?.length && (
+              <li>Not shared with anyone.</li>
+            )}
           </ul>
           <h3 className="qf-modal-subheading">Sharing history</h3>
           {data.events.length === 0 ? (

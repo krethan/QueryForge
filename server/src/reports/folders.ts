@@ -65,6 +65,7 @@ export class FolderRepository {
   private readonly prefsTable: string;
   private readonly folderReports: string;
   private readonly folderShares: string;
+  private readonly reportSharing: string;
   constructor(
     private readonly db: MetadataDb,
     schema: string,
@@ -73,6 +74,7 @@ export class FolderRepository {
     this.prefsTable = q(schema, T.reportPrefs);
     this.folderReports = q(schema, T.folderReports);
     this.folderShares = q(schema, T.folderShares);
+    this.reportSharing = q(schema, T.folderReportSharing);
   }
 
   async list(userId: string): Promise<Folder[]> {
@@ -139,8 +141,9 @@ export class FolderRepository {
   /**
    * Delete a folder. Its reports become Unfiled; no report is deleted. Returns how many of the
    * owner's own filed reports moved. If the folder was shared, its shares and the reports
-   * others placed in it (migration 009) go with it in the same transaction (the foreign keys
-   * also cascade); the reports themselves are untouched.
+   * others placed in it (migration 009) and its "share the reports" option (011) go with it in
+   * the same transaction (the foreign keys also cascade), so every access that came through the
+   * folder ends; the reports themselves and their own shares are untouched.
    */
   async remove(userId: string, folderId: string): Promise<{ moved: number }> {
     return this.db.transaction(async (tx) => {
@@ -151,6 +154,7 @@ export class FolderRepository {
       // Only the owner's own folder: the DELETE below re-checks OWNER_ID and rolls all of this back.
       await tx.update(`DELETE FROM ${this.folderReports} WHERE FOLDER_ID = ?`, [folderId]);
       await tx.update(`DELETE FROM ${this.folderShares} WHERE FOLDER_ID = ?`, [folderId]);
+      await tx.update(`DELETE FROM ${this.reportSharing} WHERE FOLDER_ID = ?`, [folderId]);
       const n = await tx.update(
         `DELETE FROM ${this.folders} WHERE FOLDER_ID = ? AND OWNER_ID = ?`,
         [folderId, userId],

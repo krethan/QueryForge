@@ -51,7 +51,7 @@ Put it behind TLS; set `APP_ORIGIN`, `COOKIE_SECURE=true`, `TRUST_PROXY` as appr
 `npm run demo` builds the UI and starts the app on http://127.0.0.1:3005 with the **in-memory test fakes**
 for both Mapepire and the metadata store. It never connects to IBM i, ignores `.env`, refuses
 `NODE_ENV=production`, and is not used by `npm start`/`npm run dev`. Login `demo` / `demo-password-123`;
-all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders,
+all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders (Sam can open the reports in "Ops Review" because its owner shares them),
 three schedules (one with a delivery already in its history; e-mail is captured in memory and logged as `[demo mail — not sent]`), a fake SSO button
 ("Contoso SSO (demo fake)", signs in as Carol in Finance) and a fake directory login (`dave` / `directory-pass`).
 The fakes live in `server/test/helpers` and are only reachable from `npm run demo`, which binds 127.0.0.1. With it running, `npm run screenshots` captures 1440×900 PNGs into `screenshots/`
@@ -463,8 +463,9 @@ A folder owner can share a folder with users or app groups, like a report:
   as reports. Grant **Viewer** (see the folder) or **Editor** (also add, remove and reorder its reports),
   change a role or revoke it. The strongest direct or group grant applies, and group membership changes
   take effect at once. **Only the owner** can share, rename or delete a folder.
-- **Sharing a folder never shares the reports in it.** Report access still comes only from the report's
-  owner and its own shares. Each person sees the folder and **only the reports in it that they can already
+- **Sharing a folder does not share the reports in it** unless the owner turns that on (see
+  [Sharing the reports in a folder](#sharing-the-reports-in-a-folder)). Otherwise report access comes only
+  from the report's owner and its own shares. Each person sees the folder and **only the reports in it that they can already
   see**. Counts and order are worked out from those reports alone, so a hidden report is never listed,
   counted or named. If a report's share is revoked, it disappears from the folder for that person at once;
   the folder itself stays.
@@ -521,6 +522,47 @@ nothing existing is altered and no row is touched):
 All three tables are on the protected-objects list. **This feature has not been tested on a real IBM i.**
 The tests run against the in-memory fake metadata database and in-process API; migration 009 has never
 been applied to Db2 for i.
+
+## Sharing the reports in a folder
+
+When you share one of your folders you can also share the reports in it, so the people in the folder do
+not need each report shared separately. It is off for every folder until its owner turns it on, so folders
+shared before this feature keep working exactly as before.
+
+- **Turn it on** in the folder's Share dialog: **Also share the reports in this folder**, then choose
+  **View only, for everyone** (the default) or **Match their folder access** (folder Editors can also edit
+  the reports; folder Viewers still only view them). Nobody ever gets more than their folder role.
+- **Which reports.** Only reports **you own** that **you put in the folder** (filed there with the folder
+  button, or added yourself). A report you do not own is skipped: only its owner can share it, here as
+  everywhere else. A report of yours that a folder editor added is also skipped until you add it to the
+  folder yourself, so an editor cannot widen who sees your reports. The dialog lists what is shared and
+  what is skipped and why; skipped reports never fail the share.
+- **Stronger access wins.** Folder access is added to each person's direct and group report shares; it
+  never lowers them. Recipients cannot share, delete or see the shares of a report they reach through a
+  folder (only the owner can), and filing it into their own shared folders does not re-share it.
+- **It follows the folder.** Nothing is copied into a report's shares: access is worked out on each
+  request. A report you add later is shared at once. Taking a report out of the folder, moving it to
+  another folder, changing or removing a person's folder share, turning the option off or deleting the
+  folder ends only the access that came through the folder; shares made on the report itself stay.
+- **Where it shows.** Recipients see the reports on their dashboard ("Shared by … through a folder") and in
+  the folder. The report's owner sees folder access, read-only, in the report's Share dialog and in
+  **Access and audit**. People with folder access count as schedule recipients and see the report's
+  schedules, and lose both when the folder access ends (checked again at every delivery). Admins are
+  unaffected (they already see every report), and a folder nobody has shared shares nothing.
+
+API: `GET/PUT /api/folders/:folderId/shares` take and return `shareReports` (`'VIEWER' | 'EDITOR' | null`;
+omit it on PUT to leave it unchanged) and return `reports: { included: [{ id, name }], skipped: [{ id, name,
+ownerName, reason: 'NOT_OWNER' | 'ADDED_BY_OTHER' }] }` (only reports the caller can see are listed). The
+shares and the option are saved in one transaction, owner only. `GET /api/folders` adds `shareReports`;
+`GET /api/reports` marks folder access with `viaFolder: true`; `GET /api/reports/:id/shares` and
+`/access` add `folderGrants: [{ folderId, folderName, type, id, role, displayName? }]`.
+
+Storage is migration `011_folder_report_sharing.sql`, which is additive (one new table):
+`QF_FOLDER_REPORT_SHARING` (FOLDER_ID primary key, MAX_ROLE `VIEWER`/`EDITOR`, UPDATED_BY, UPDATED_AT), ON
+DELETE CASCADE from `QF_FOLDERS`, and on the protected-objects list. A folder with no row shares no
+reports. The option's last change (who and when) is kept on the row; there is no separate history of it.
+**This feature has not been tested on a real IBM i.** The tests run against the in-memory fake metadata
+database and in-process API; migration 011 has never been applied to Db2 for i.
 
 ## Rearranging dashboard tiles
 
@@ -606,7 +648,7 @@ Owners can share a saved report with individual users or app groups as **Viewer*
 
 Administrators inherit read/Editor-equivalent access to every report without an explicit user or group share, including dashboard lists, drill targets, run/export, schedules and their own personal folders/favorites. They see an **Admin** access badge. ADMIN is an application role from the authenticated server-side session, not accepted from the browser.
 
-**Migration 007 adds three supporting indexes** to the existing `QF_REPORT_SHARES` (002) and `QF_SCHEDULES` (002): `(PRINCIPAL_ID, PRINCIPAL_TYPE, SHARE_ROLE, REPORT_ID)`, `(REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE)` and `(CREATED_BY, REPORT_ID)`. It also refreshes the `QF_REPORT_SHARES` table label. No sharing table is recreated and no business-data schema is touched. Every saved-report endpoint authorizes through `AccessService`; dashboard and schedule listings use equivalent owner/share filtering. `QF_REPORTS.OWNER_ID`, `QF_REPORT_SHARES` and `QF_USER_GROUPS` are the owner, direct/group grants and membership records; there is no separate grant store for the dashboard. Folders have their own shares (migration 009, see [Shared folders](#shared-folders)), which never grant access to a report. Sharing and deletion remain owner-only; administrators may inspect current grants and audit history but cannot alter grants or delete a report they do not own. Shares have no expiry. Existing schedules stop when their creator loses Editor access. Server tests cover unrelated users, Viewer/Editor direct+group roles, denial and immediate revocation plus admin behavior.
+**Migration 007 adds three supporting indexes** to the existing `QF_REPORT_SHARES` (002) and `QF_SCHEDULES` (002): `(PRINCIPAL_ID, PRINCIPAL_TYPE, SHARE_ROLE, REPORT_ID)`, `(REPORT_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE)` and `(CREATED_BY, REPORT_ID)`. It also refreshes the `QF_REPORT_SHARES` table label. No sharing table is recreated and no business-data schema is touched. Every saved-report endpoint authorizes through `AccessService`; dashboard and schedule listings use equivalent owner/share filtering. `QF_REPORTS.OWNER_ID`, `QF_REPORT_SHARES` and `QF_USER_GROUPS` are the owner, direct/group grants and membership records; there is no separate grant store for the dashboard. Folders have their own shares (migration 009, see [Shared folders](#shared-folders)), which grant no access to a report unless the folder owner opts in to sharing their own reports in it (migration 011, see [Sharing the reports in a folder](#sharing-the-reports-in-a-folder)); `AccessService` then adds that access, capped at the folder role, to the direct and group grants, and the dashboard, schedule and recipient lists use the same rule. Sharing and deletion remain owner-only; administrators may inspect current grants and audit history but cannot alter grants or delete a report they do not own. Shares have no expiry. Existing schedules stop when their creator loses Editor access. Server tests cover unrelated users, Viewer/Editor direct+group roles, denial and immediate revocation plus admin behavior.
 
 **This feature has not been tested on a real IBM i.** API access tests and schedules run against the fake metadata/query adapters; migration 007 is additive but has never been applied to Db2 for i. The sharing UI screenshots are demos of that same local API, not live system validation.
 
@@ -619,9 +661,14 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 
 - Folders and favorites: there is no bulk move (one report at a time) and no dragging a tile into a
   folder, and no nested folders. Migration 006 has not been applied to a real Db2 for i.
-- Shared folders: sharing a folder does not offer to share its reports too, so people may see an emptier
-  folder than the owner (by design: report access stays per report). There is no folder access/audit panel
-  in the UI yet (the API has one), no notification when a folder is shared with you, and no share expiry.
+- Shared folders: unless the owner shares the folder's reports too, people may see an emptier folder
+  than the owner. There is no folder access/audit panel in the UI yet (the API has one), no notification
+  when a folder is shared with you, and no share expiry.
+- Sharing a folder's reports: only reports the folder owner owns and placed there are covered (no way to
+  share someone else's report, by design). Turning the option on or off is not written to the folder audit
+  trail (only its last change is kept). The folder's Share dialog lists only reports the owner can see.
+  Folder-granted schedule visibility covers up to 1000 such reports per person. Migration 011 has not been
+  applied to a real Db2 for i.
   Folder names are unique per owner only, so two shared folders can have the same name (the owner's name
   tells them apart). Migration 009 has not been applied to a real Db2 for i.
 - Tile order: tiles can only be dragged within their own section, not into another section or

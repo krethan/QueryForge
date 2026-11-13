@@ -172,9 +172,10 @@ describe('Saved Reports with shared reports', () => {
 
 describe('Share dialog', () => {
   it('edits a Viewer grant and removes it only after saving', async () => {
-    vi.spyOn(api, 'getShares').mockResolvedValue([
-      { type: 'USER', id: 'u-bob', role: 'VIEWER', displayName: 'Bob' },
-    ]);
+    vi.spyOn(api, 'getReportSharing').mockResolvedValue({
+      shares: [{ type: 'USER', id: 'u-bob', role: 'VIEWER', displayName: 'Bob' }],
+      folderGrants: [],
+    });
     vi.spyOn(api, 'groups').mockResolvedValue(['finance']);
     const save = vi.spyOn(api, 'putShares').mockResolvedValue([]);
     const onClose = vi.fn();

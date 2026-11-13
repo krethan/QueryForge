@@ -11,6 +11,7 @@ import {
 } from '../reports/reports.js';
 import { AppError } from '../util/errors.js';
 import { GROUP_NAME_RE, type GroupRepository } from './groups.js';
+import type { FolderReportGrants } from './folder-report-grants.js';
 
 export type ShareRole = 'VIEWER' | 'EDITOR';
 export interface Share {
@@ -87,8 +88,10 @@ const NEED_RANK: Record<Need, number> = { VIEW: 1, EDIT: 2, OWNER: 3 };
 /**
  * Central authorisation for saved reports. Every report endpoint resolves the
  * caller's effective role (OWNER / EDITOR / VIEWER) from QF_REPORTS.OWNER_ID and
- * QF_REPORT_SHARES (direct user shares and app-group shares) before acting.
- * Reports the caller cannot see are reported as 404 so their existence is not leaked.
+ * QF_REPORT_SHARES (direct user shares and app-group shares) before acting, plus any access the
+ * report's owner gave through one of their shared folders (migration 011, FolderReportGrants);
+ * the strongest role wins. Reports the caller cannot see are reported as 404 so their
+ * existence is not leaked.
  */
 export class AccessService {
   private readonly shares: string;
@@ -99,6 +102,7 @@ export class AccessService {
     schema: string,
     private readonly reports: ReportRepository,
     private readonly groups: GroupRepository,
+    private readonly folderGrants?: FolderReportGrants,
   ) {
     this.shares = q(schema, T.shares);
     this.audit = q(schema, T.shareAudit);
@@ -115,18 +119,22 @@ export class AccessService {
     }>(`SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE FROM ${this.shares} WHERE REPORT_ID = ?`, [
       report.id,
     ]);
-    if (!rows.length) return null;
-    const groups = rows.some((r) => r.PRINCIPAL_TYPE === 'GROUP')
-      ? new Set(await this.groups.forUser(user.id))
-      : new Set<string>();
+    let groupSet: Promise<Set<string>> | undefined;
+    const groups = () => (groupSet ??= this.groups.forUser(user.id).then((g) => new Set(g)));
+    const g = rows.some((r) => r.PRINCIPAL_TYPE === 'GROUP') ? await groups() : new Set<string>();
     let best: AccessRole | null = null;
     for (const r of rows) {
       const match =
         (r.PRINCIPAL_TYPE === 'USER' && r.PRINCIPAL_ID === user.id) ||
-        (r.PRINCIPAL_TYPE === 'GROUP' && groups.has(r.PRINCIPAL_ID));
+        (r.PRINCIPAL_TYPE === 'GROUP' && g.has(r.PRINCIPAL_ID));
       if (!match) continue;
       const role: AccessRole = r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER';
       if (!best || RANK[role] > RANK[best]) best = role;
+    }
+    // A direct share keeps its strength; a folder can only add to it, never lower it.
+    if (best !== 'EDITOR' && this.folderGrants) {
+      const viaFolder = await this.folderGrants.roleFor(user, report, groups);
+      if (viaFolder && (!best || RANK[viaFolder] > RANK[best])) best = viaFolder;
     }
     return best;
   }

@@ -27,6 +27,11 @@ export interface FolderView extends Folder {
   /** True when the folder has at least one share (always true for folders shared with you). */
   shared: boolean;
   /**
+   * The owner's opt-in (migration 011): when set, the people the folder is shared with can also
+   * open the owner's own reports in it, at most at this role. Null: the reports are not shared.
+   */
+  shareReports: ShareRole | null;
+  /**
    * The reports in the folder, in the folder's order, reduced to the ones the viewer can see.
    * Filled in by the route, which knows the viewer's visible reports.
    */
@@ -41,6 +46,10 @@ export interface FolderMember {
   viaOwnerPref: boolean;
   hasItem: boolean;
   nameKey: string;
+  /** Who placed the shared QF_FOLDER_REPORTS row (null when only the owner's filing puts it here). */
+  addedBy: string | null;
+  /** The report's owner. */
+  reportOwnerId: string;
 }
 
 export interface FolderShareAuditEvent {
@@ -109,8 +118,10 @@ export function mergeVisibleOrder(
  * Folder sharing (migration 009). A folder owner shares a folder with users or app groups as
  * VIEWER or EDITOR, exactly like report sharing (QF_REPORT_SHARES). The folder's contents are
  * the owner's own filing (QF_REPORT_PREFS) plus reports anyone who may edit the folder placed
- * in it (QF_FOLDER_REPORTS). Sharing a folder never grants access to a report: every list is
- * reduced to the reports the viewer can already see by the caller. Folders the caller cannot
+ * in it (QF_FOLDER_REPORTS). Sharing a folder grants no access to a report by itself: every
+ * list is reduced to the reports the viewer can see by the caller. Only when the owner opts in
+ * (migration 011, see FolderReportGrants) does the folder also share the owner's own reports in
+ * it, and that access is worked out by AccessService like any other share. Folders the caller cannot
  * see are reported as 404 so their existence is not leaked. Global admins are editor-equivalent
  * on folders that are shared with anyone; a personal (unshared) folder stays private to its
  * owner, like their favorites.
@@ -123,6 +134,7 @@ export class FolderAccessService {
   private readonly prefs: string;
   private readonly users: string;
   private readonly reports: string;
+  private readonly reportSharing: string;
   constructor(
     private readonly db: MetadataDb,
     schema: string,
@@ -136,6 +148,22 @@ export class FolderAccessService {
     this.prefs = q(schema, T.reportPrefs);
     this.users = q(schema, T.users);
     this.reports = q(schema, T.reports);
+    this.reportSharing = q(schema, T.folderReportSharing);
+  }
+
+  /** The owner's "also share the reports" setting for each folder (migration 011). */
+  async reportSharingFor(folderIds: string[]): Promise<Map<string, ShareRole>> {
+    const out = new Map<string, ShareRole>();
+    for (let i = 0; i < folderIds.length; i += 500) {
+      const ids = folderIds.slice(i, i + 500);
+      const rows = await this.db.query<{ FOLDER_ID: string; MAX_ROLE: string }>(
+        `SELECT FOLDER_ID, MAX_ROLE FROM ${this.reportSharing} WHERE FOLDER_ID IN (${placeholders(ids.length)})`,
+        ids,
+      );
+      for (const r of rows)
+        out.set(String(r.FOLDER_ID), r.MAX_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER');
+    }
+    return out;
   }
 
   private async shareRows(folderId: string) {
@@ -207,6 +235,7 @@ export class FolderAccessService {
       ownerName: String(ownName[0]?.DISPLAY_NAME ?? ''),
       access: 'OWNER',
       shared: ownShared.has(f.id),
+      shareReports: null,
       reportIds: [],
     }));
     const cols = `F.FOLDER_ID, F.OWNER_ID, F.FOLDER_NAME, F.FOLDER_NAME_KEY, F.CREATED_AT, F.UPDATED_AT, S.SHARE_ROLE, U.DISPLAY_NAME AS OWNER_NAME`;
@@ -256,6 +285,7 @@ export class FolderAccessService {
         ownerName: String(r.OWNER_NAME ?? ''),
         access,
         shared: true,
+        shareReports: null,
         reportIds: [],
         key: String(r.FOLDER_NAME_KEY ?? r.FOLDER_NAME).toUpperCase(),
       });
@@ -263,7 +293,10 @@ export class FolderAccessService {
     const others = [...byId.values()]
       .sort((a, b) => a.key.localeCompare(b.key) || a.ownerName.localeCompare(b.ownerName))
       .map(({ key: _key, ...f }) => f);
-    return [...out, ...others];
+    const all = [...out, ...others];
+    const sharing = await this.reportSharingFor(all.map((f) => f.id));
+    for (const f of all) f.shareReports = sharing.get(f.id) ?? null;
+    return all;
   }
 
   private async sharedFolderIds(folderIds: string[]): Promise<Set<string>> {
@@ -285,13 +318,13 @@ export class FolderAccessService {
     const ids = folders.map((f) => f.id);
     const owner = new Map(folders.map((f) => [f.id, f.ownerId]));
     const items = await this.db.query<Record<string, unknown>>(
-      `SELECT I.FOLDER_ID, I.REPORT_ID, I.ITEM_POS, R.REPORT_NAME_KEY
+      `SELECT I.FOLDER_ID, I.REPORT_ID, I.ITEM_POS, I.ADDED_BY, R.REPORT_NAME_KEY, R.OWNER_ID
          FROM ${this.items} I JOIN ${this.reports} R ON R.REPORT_ID = I.REPORT_ID
         WHERE I.FOLDER_ID IN (${placeholders(ids.length)})`,
       ids,
     );
     const filed = await this.db.query<Record<string, unknown>>(
-      `SELECT P.USER_ID, P.FOLDER_ID, P.REPORT_ID, R.REPORT_NAME_KEY
+      `SELECT P.USER_ID, P.FOLDER_ID, P.REPORT_ID, R.REPORT_NAME_KEY, R.OWNER_ID
          FROM ${this.prefs} P JOIN ${this.reports} R ON R.REPORT_ID = P.REPORT_ID
         WHERE P.FOLDER_ID IN (${placeholders(ids.length)})`,
       ids,
@@ -305,6 +338,8 @@ export class FolderAccessService {
         viaOwnerPref: false,
         hasItem: true,
         nameKey: String(r.REPORT_NAME_KEY ?? ''),
+        addedBy: r.ADDED_BY === null || r.ADDED_BY === undefined ? null : String(r.ADDED_BY),
+        reportOwnerId: String(r.OWNER_ID ?? ''),
       };
       byKey.set(`${fid}|${m.reportId}`, m);
       out.get(fid)?.push(m);
@@ -325,6 +360,8 @@ export class FolderAccessService {
         viaOwnerPref: true,
         hasItem: false,
         nameKey: String(r.REPORT_NAME_KEY ?? ''),
+        addedBy: null,
+        reportOwnerId: String(r.OWNER_ID ?? ''),
       };
       byKey.set(k, m);
       out.get(fid)?.push(m);
@@ -333,13 +370,30 @@ export class FolderAccessService {
     return out;
   }
 
-  /** Place a report in a folder (caller has checked EDIT on the folder and VIEW on the report). */
-  async addReport(folderId: string, reportId: string, by: string): Promise<boolean> {
-    const rows = await this.db.query(
-      `SELECT REPORT_ID FROM ${this.items} WHERE FOLDER_ID = ? AND REPORT_ID = ?`,
+  /**
+   * Place a report in a folder (caller has checked EDIT on the folder and VIEW on the report).
+   * When the folder owner adds a report someone else already placed there, the placement
+   * becomes the owner's: that is how an owner confirms an editor's addition so it can be
+   * shared through the folder (migration 011).
+   */
+  async addReport(
+    folder: { id: string; ownerId: string },
+    reportId: string,
+    by: string,
+  ): Promise<boolean> {
+    const folderId = folder.id;
+    const rows = await this.db.query<{ REPORT_ID: string; ADDED_BY: string }>(
+      `SELECT REPORT_ID, ADDED_BY FROM ${this.items} WHERE FOLDER_ID = ? AND REPORT_ID = ?`,
       [folderId, reportId],
     );
-    if (rows.length) return false;
+    if (rows.length) {
+      if (by !== folder.ownerId || String(rows[0].ADDED_BY) === by) return false;
+      await this.db.update(
+        `UPDATE ${this.items} SET ADDED_BY = ? WHERE FOLDER_ID = ? AND REPORT_ID = ?`,
+        [by, folderId, reportId],
+      );
+      return true;
+    }
     try {
       await this.db.update(
         `INSERT INTO ${this.items} (FOLDER_ID, REPORT_ID, ITEM_POS, ADDED_BY, ADDED_AT) VALUES (?, ?, NULL, ?, ${NOW_UTC})`,
@@ -424,6 +478,8 @@ export class FolderAccessService {
     by: string,
     shares: z.infer<typeof sharesInputSchema>['shares'],
     userExists: (id: string) => Promise<boolean>,
+    /** Also set the owner's "share the reports" option (migration 011); undefined leaves it. */
+    shareReports?: ShareRole | null,
   ): Promise<Share[]> {
     const seen = new Set<string>();
     for (const s of shares) {
@@ -470,6 +526,15 @@ export class FolderAccessService {
            VALUES (?, ?, ?, ?, ?, ${NOW_UTC})`,
           [folder.id, s.type, s.id, s.role, by],
         );
+      // The opt-in commits or rolls back together with the folder's shares.
+      if (shareReports !== undefined) {
+        await tx.update(`DELETE FROM ${this.reportSharing} WHERE FOLDER_ID = ?`, [folder.id]);
+        if (shareReports)
+          await tx.update(
+            `INSERT INTO ${this.reportSharing} (FOLDER_ID, MAX_ROLE, UPDATED_BY, UPDATED_AT) VALUES (?, ?, ?, ${NOW_UTC})`,
+            [folder.id, shareReports, by],
+          );
+      }
     });
     return this.listShares(folder.id);
   }
