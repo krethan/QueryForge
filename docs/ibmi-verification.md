@@ -246,11 +246,14 @@ Tested by: ______ Date: ______ Partition / host (not production): ______ App com
 
 ## 8. Known risks to watch for
 
-- **Metadata reads may stop at 100 rows.** `@ibm/mapepire-js` 1.0.2's `SQLJob.execute()` fetches 100
-  rows by default, and the app's metadata store uses it. With more than 100 reports, shares, folder
-  items or audit rows, lists may be cut short. The smoke test compares a > 100-row catalog read through
-  the app's metadata store with a full read and fails if they differ. This has not been confirmed on a
-  real IBM i.
+- **Metadata reads past 100 rows.** `@ibm/mapepire-js` 1.0.2's `SQLJob.execute()` fetches only 100
+  rows by default. The app's metadata store no longer relies on it: it pages with
+  `Query.execute(1000)` / `fetchMore(1000)` until Mapepire reports the end, closes the cursor, and
+  fails (rather than returning a partial list) past 100,000 rows. Report runs, exports and the
+  catalog always request explicit row counts and report truncation against the app's own limits.
+  The smoke test still compares a > 100-row catalog read through the app's metadata store with a
+  full read. All of this is tested against fakes that emulate Mapepire's paging; it has not been
+  confirmed on a real IBM i.
 - **Label lengths.** Db2 for i limits `LABEL ON TABLE` text to 50 bytes. Migration 009 originally
   labelled `QF_FOLDER_SHARES` with 52 bytes, which would have failed on Db2 for i. It was shortened
   before any real use, and a unit test now checks every label.

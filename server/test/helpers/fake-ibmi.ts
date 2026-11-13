@@ -244,11 +244,16 @@ class FakeIbmiJob implements SqlJobLike {
   query<T>(sql: string, opts?: { parameters?: unknown[]; isTerseResults?: boolean }): QueryLike<T> {
     let out: { rows: Row[]; updateCount: number } | undefined;
     let pos = 0;
+    let done = false;
+    // Like @ibm/mapepire-js 1.0.2: 100 rows unless told otherwise, is_done only after a short
+    // block, and no fetching once the statement is fully run.
     const page = async (n = 100): Promise<QueryResult<T>> => {
+      if (done) throw new Error('Statement has already been fully run');
       out ??= this.db.run(this.user, sql, opts?.parameters);
       const all = out.rows;
       const slice = all.slice(pos, pos + n);
       pos += slice.length;
+      done = slice.length < n || out.updateCount >= 0;
       const names = Object.keys(all[0] ?? {});
       const columns = names.map((name) => ({
         name,
@@ -266,16 +271,27 @@ class FakeIbmiJob implements SqlJobLike {
         sql_state: '00000',
         execution_time: 1,
         metadata: { column_count: columns.length, columns },
-        is_done: pos >= all.length,
+        is_done: done,
         has_results: out.updateCount < 0,
         update_count: out.updateCount,
         data: (opts?.isTerseResults ? slice.map((r) => names.map((k) => r[k])) : slice) as T[],
       } as unknown as QueryResult<T>;
     };
-    return { execute: page, fetchMore: page, close: async () => ({}) };
+    return {
+      execute: page,
+      fetchMore: page,
+      close: async () => {
+        done = true;
+        return {};
+      },
+    };
   }
+  /** SQLJob.execute(): one default-size block (100 rows), then close. */
   async execute<T>(sql: string, opts?: { parameters?: unknown[] }) {
-    return this.query<T>(sql, opts).execute();
+    const q = this.query<T>(sql, opts);
+    const res = await q.execute();
+    await q.close();
+    return res;
   }
   async endTransaction() {
     return {};

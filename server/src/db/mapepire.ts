@@ -3,7 +3,7 @@ import mapepire from '@ibm/mapepire-js';
 // The package is CommonJS; Node ESM cannot statically see its named exports.
 const { SQLJob } = mapepire;
 import type { AppConfig, DbIdentity } from '../config/config.js';
-import { AppError, toDbError } from '../util/errors.js';
+import { AppError, DbError, toDbError } from '../util/errors.js';
 import type { DaemonServer, JDBCOptions, JobFactory, MetadataDb, SqlJobLike } from './types.js';
 
 export const APPLICATION_NAME = 'Uncle Bob';
@@ -60,6 +60,69 @@ export function withTimeout<T>(p: Promise<T>, ms: number, onTimeout?: () => void
     }, ms);
   });
   return Promise.race([p, t]).finally(() => clearTimeout(timer));
+}
+
+/** Rows requested per Mapepire round trip when a caller needs the whole result. */
+export const READ_ALL_PAGE_SIZE = 1000;
+
+/**
+ * Upper bound for readAllRows. Metadata reads are app-owned and paged in SQL, so a result this
+ * large means a bug or a runaway query: it fails loudly instead of being silently cut short.
+ */
+export const READ_ALL_MAX_ROWS = 100_000;
+
+/**
+ * Read every row of a statement.
+ *
+ * `SQLJob.execute()` in @ibm/mapepire-js 1.0.2 runs `query().execute()` with Query's default
+ * `rowsToFetch` of 100 and then closes the cursor, so anything past the first 100 rows is dropped
+ * without an error. This pages with `Query.execute(n)` + `Query.fetchMore(n)` until the server
+ * reports `is_done`, and always closes the query (which ends an open server-side cursor when the
+ * read stops early). After a failure the close is not awaited: the job may be dead and the caller
+ * discards it.
+ */
+export async function readAllRows<T>(
+  job: SqlJobLike,
+  sql: string,
+  params: (string | number | null)[] = [],
+  opts: { pageSize?: number; maxRows?: number } = {},
+): Promise<T[]> {
+  const pageSize = Math.max(1, Math.floor(opts.pageSize ?? READ_ALL_PAGE_SIZE));
+  const maxRows = Math.max(0, Math.floor(opts.maxRows ?? READ_ALL_MAX_ROWS));
+  const query = job.query<T>(sql, params.length ? { parameters: params } : undefined);
+  let ok = false;
+  try {
+    const rows: T[] = [];
+    let res = await query.execute(pageSize);
+    for (;;) {
+      if (res.success === false) throw res;
+      const data = res.data ?? [];
+      for (const r of data) rows.push(r);
+      if (rows.length > maxRows)
+        throw new DbError(
+          `A metadata query returned more than ${maxRows.toLocaleString('en-US')} rows; refusing to load a partial list.`,
+          undefined,
+          undefined,
+          'RESULT_TOO_LARGE',
+          500,
+        );
+      if (res.is_done || res.has_results === false) break;
+      if (data.length === 0)
+        throw new DbError(
+          'Mapepire reported more rows but returned none; the result may be incomplete.',
+          undefined,
+          undefined,
+          'DB_ERROR',
+          502,
+        );
+      res = await query.fetchMore(pageSize);
+    }
+    ok = true;
+    return rows;
+  } finally {
+    const closing = (async () => query.close())().catch(() => undefined);
+    if (ok) await closing;
+  }
 }
 
 /** Open and connect a fresh Mapepire job for an identity. Caller owns close(). */
@@ -153,10 +216,8 @@ export class MapepireMetadataDb implements MetadataDb {
   }
 
   async query<T>(sql: string, params: (string | number | null)[] = []): Promise<T[]> {
-    return this.run(async (job) => {
-      const res = await job.execute<T>(sql, params.length ? { parameters: params } : undefined);
-      return res.data ?? [];
-    });
+    // Not job.execute(): that returns only the first 100 rows (see readAllRows).
+    return this.run((job) => readAllRows<T>(job, sql, params));
   }
 
   async update(sql: string, params: (string | number | null)[] = []): Promise<number> {
@@ -174,9 +235,8 @@ export class MapepireMetadataDb implements MetadataDb {
       this.factory,
     );
     const tx: Omit<MetadataDb, 'transaction'> = {
-      query: async <T>(sql: string, params: (string | number | null)[] = []) =>
-        ((await job.execute<T>(sql, params.length ? { parameters: params } : undefined)).data ??
-          []) as T[],
+      query: <T>(sql: string, params: (string | number | null)[] = []) =>
+        readAllRows<T>(job, sql, params),
       update: async (sql, params = []) =>
         (await job.execute(sql, params.length ? { parameters: params } : undefined)).update_count ??
         0,

@@ -222,7 +222,9 @@ describe('server-side paging with Query.fetchMore', () => {
     expect(p3.body.rows).toHaveLength(3);
     expect(jobs[0].closed).toBe(true);
     expect(built.executor.cursors.size).toBe(0);
-    expect(jobs[0].fetchSizes).toEqual([10, 10, 10]);
+    // explicit sizes only (never Mapepire's default 100); one look-ahead row past the first page
+    // keeps hasMore exact, and later pages top it back up to page size + 1
+    expect(jobs[0].fetchSizes).toEqual([11, 10, 10]);
 
     // the history row is finished again with the final row count
     const exec = [...db.executions.values()][0];

@@ -8,7 +8,7 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config/config.js';
-import { openJob, metadataJdbcOptions } from '../src/db/mapepire.js';
+import { openJob, metadataJdbcOptions, readAllRows } from '../src/db/mapepire.js';
 import { loadMigrations, versionTableDdl } from '../src/db/migration-files.js';
 import { T, NOW_UTC } from '../src/db/schema.js';
 
@@ -64,9 +64,10 @@ async function main() {
       await job.execute(versionDdl);
     }
     const applied = new Set(
+      // every applied version, not just the first 100 that job.execute() returns
       (
-        await job.execute<{ VERSION: number }>(`SELECT VERSION FROM ${schema}.${T.version}`)
-      ).data.map((r) => Number(r.VERSION)),
+        await readAllRows<{ VERSION: number }>(job, `SELECT VERSION FROM ${schema}.${T.version}`)
+      ).map((r) => Number(r.VERSION)),
     );
     for (const m of migrations) {
       if (applied.has(m.version)) {
