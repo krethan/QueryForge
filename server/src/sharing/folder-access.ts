@@ -52,11 +52,20 @@ export interface FolderMember {
   reportOwnerId: string;
 }
 
+/**
+ * Who a folder audit row is about: a user or group the folder is shared with, or (migration 012)
+ * REPORTS for the owner's "also share the reports in this folder" option, whose OLD_ROLE /
+ * NEW_ROLE are the option's level before and after (null: off).
+ */
+export type FolderAuditPrincipal = 'USER' | 'GROUP' | 'REPORTS';
+/** PRINCIPAL_ID of a REPORTS audit row. Not a valid group name, so it never reads as one. */
+export const FOLDER_REPORTS_PRINCIPAL = '*REPORTS';
+
 export interface FolderShareAuditEvent {
   id: string;
   folderId: string;
   action: AuditAction;
-  principalType: 'USER' | 'GROUP';
+  principalType: FolderAuditPrincipal;
   principalId: string;
   principalName?: string;
   oldRole: ShareRole | null;
@@ -65,6 +74,34 @@ export interface FolderShareAuditEvent {
   actorName?: string;
   /** ISO-8601 UTC */
   occurredAt: string;
+}
+
+/** One page of a folder's audit trail, newest first. */
+export interface FolderAuditPage {
+  events: FolderShareAuditEvent[];
+  /** True when older events exist past this page. */
+  hasMore: boolean;
+}
+
+/** Default and largest page of folder audit events. */
+export const FOLDER_AUDIT_PAGE = 25;
+export const MAX_FOLDER_AUDIT_PAGE = 100;
+export const MAX_FOLDER_AUDIT_OFFSET = 100_000;
+
+export const folderAuditQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_FOLDER_AUDIT_PAGE).default(FOLDER_AUDIT_PAGE),
+  offset: z.coerce.number().int().min(0).max(MAX_FOLDER_AUDIT_OFFSET).default(0),
+});
+
+/** The audit event (if any) for changing the folder's report-sharing option from `before` to `after`. */
+export function reportSharingAuditAction(
+  before: ShareRole | null,
+  after: ShareRole | null,
+): AuditAction | null {
+  if (before === after) return null;
+  if (before === null) return 'GRANT';
+  if (after === null) return 'REVOKE';
+  return 'CHANGE';
 }
 
 /** Most reports one folder reorder may list. */
@@ -526,8 +563,34 @@ export class FolderAccessService {
            VALUES (?, ?, ?, ?, ?, ${NOW_UTC})`,
           [folder.id, s.type, s.id, s.role, by],
         );
-      // The opt-in commits or rolls back together with the folder's shares.
+      // The opt-in commits or rolls back together with the folder's shares, and so does its
+      // audit row (migration 012): on = GRANT, off = REVOKE, a new level = CHANGE.
       if (shareReports !== undefined) {
+        const was = await tx.query<{ FOLDER_ID: string; MAX_ROLE: string }>(
+          `SELECT FOLDER_ID, MAX_ROLE FROM ${this.reportSharing} WHERE FOLDER_ID IN (?)`,
+          [folder.id],
+        );
+        const before: ShareRole | null = was.length
+          ? was[0].MAX_ROLE === 'EDITOR'
+            ? 'EDITOR'
+            : 'VIEWER'
+          : null;
+        const action = reportSharingAuditAction(before, shareReports);
+        if (action)
+          await tx.update(
+            `INSERT INTO ${this.audit} (AUDIT_ID, FOLDER_ID, ACTION, PRINCIPAL_TYPE, PRINCIPAL_ID, OLD_ROLE, NEW_ROLE, ACTOR_ID, OCCURRED_AT)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
+            [
+              randomUUID(),
+              folder.id,
+              action,
+              'REPORTS',
+              FOLDER_REPORTS_PRINCIPAL,
+              before,
+              shareReports,
+              by,
+            ],
+          );
         await tx.update(`DELETE FROM ${this.reportSharing} WHERE FOLDER_ID = ?`, [folder.id]);
         if (shareReports)
           await tx.update(
@@ -542,22 +605,35 @@ export class FolderAccessService {
   /** Folder sharing audit trail, newest first (owner/admin; caller has checked). */
   async listAudit(folderId: string, limit = 100): Promise<FolderShareAuditEvent[]> {
     const n = Math.max(1, Math.min(Math.floor(limit) || 100, 500));
+    return (await this.auditPage(folderId, n, 0)).events;
+  }
+
+  /**
+   * One page of the folder sharing audit trail, newest first (owner/admin; caller has checked).
+   * Reads one row past the page to tell whether older events exist.
+   */
+  async auditPage(folderId: string, limit: number, offset: number): Promise<FolderAuditPage> {
+    const n = Math.max(1, Math.min(Math.floor(limit) || FOLDER_AUDIT_PAGE, 500));
+    const skip = Math.max(0, Math.min(Math.floor(offset) || 0, MAX_FOLDER_AUDIT_OFFSET));
     const rows = await this.db.query<Record<string, unknown>>(
       `SELECT A.AUDIT_ID, A.FOLDER_ID, A.ACTION, A.PRINCIPAL_TYPE, A.PRINCIPAL_ID, A.OLD_ROLE, A.NEW_ROLE,
               A.ACTOR_ID, A.OCCURRED_AT, ACT.DISPLAY_NAME AS ACTOR_NAME, PU.DISPLAY_NAME AS PRINCIPAL_NAME
          FROM ${this.audit} A
          LEFT JOIN ${this.users} ACT ON ACT.USER_ID = A.ACTOR_ID
          LEFT JOIN ${this.users} PU ON A.PRINCIPAL_TYPE = 'USER' AND PU.USER_ID = A.PRINCIPAL_ID
-        WHERE A.FOLDER_ID = ? ORDER BY A.OCCURRED_AT DESC, A.AUDIT_ID FETCH FIRST ${n} ROWS ONLY`,
+        WHERE A.FOLDER_ID = ? ORDER BY A.OCCURRED_AT DESC, A.AUDIT_ID
+        OFFSET ${skip} ROWS FETCH FIRST ${n + 1} ROWS ONLY`,
       [folderId],
     );
     const role = (v: unknown): ShareRole | null =>
       v === 'EDITOR' ? 'EDITOR' : v === 'VIEWER' ? 'VIEWER' : null;
-    return rows.map((r) => ({
+    const type = (v: unknown): FolderAuditPrincipal =>
+      v === 'GROUP' ? 'GROUP' : v === 'REPORTS' ? 'REPORTS' : 'USER';
+    const events = rows.slice(0, n).map((r) => ({
       id: String(r.AUDIT_ID),
       folderId: String(r.FOLDER_ID),
       action: r.ACTION as AuditAction,
-      principalType: r.PRINCIPAL_TYPE === 'GROUP' ? 'GROUP' : 'USER',
+      principalType: type(r.PRINCIPAL_TYPE),
       principalId: String(r.PRINCIPAL_ID),
       principalName: r.PRINCIPAL_NAME ? String(r.PRINCIPAL_NAME) : undefined,
       oldRole: role(r.OLD_ROLE),
@@ -566,5 +642,6 @@ export class FolderAccessService {
       actorName: r.ACTOR_NAME ? String(r.ACTOR_NAME) : undefined,
       occurredAt: dbTimestampToIso(r.OCCURRED_AT) ?? String(r.OCCURRED_AT),
     }));
+    return { events, hasMore: rows.length > n };
   }
 }

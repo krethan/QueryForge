@@ -410,6 +410,40 @@ export interface ReportAccess {
   events: ShareAuditEvent[];
 }
 
+/**
+ * One row of a folder's sharing history. principalType REPORTS (migration 012) is the owner's
+ * "also share the reports in this folder" option: oldRole / newRole are its level before and
+ * after, null meaning off.
+ */
+export interface FolderShareAuditEvent {
+  id: string;
+  folderId: string;
+  action: 'GRANT' | 'CHANGE' | 'REVOKE';
+  principalType: 'USER' | 'GROUP' | 'REPORTS';
+  principalId: string;
+  principalName?: string;
+  oldRole: 'VIEWER' | 'EDITOR' | null;
+  newRole: 'VIEWER' | 'EDITOR' | null;
+  actorId: string;
+  actorName?: string;
+  occurredAt: string;
+}
+/** GET /folders/:id/access: owner or admin only. */
+export interface FolderAccess {
+  owner: { id: string; displayName: string };
+  shares: Share[];
+  shareReports: FolderShareReports;
+  events: FolderShareAuditEvent[];
+  hasMore: boolean;
+}
+/** GET /folders/:id/audit: one page of the history, newest first. */
+export interface FolderAuditPage {
+  events: FolderShareAuditEvent[];
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+}
+
 // ---- Report Builder (catalog-driven SELECT) ----
 export type CatalogTableType = 'T' | 'P' | 'V' | 'L' | 'A' | 'M' | string;
 

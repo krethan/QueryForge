@@ -913,3 +913,21 @@ body {
 .qf-folders__shared .qf-folders__note {
   margin-top: 0.5rem;
 }
+
+.qf-folder-audit__roles {
+  display: block;
+  color: var(--cds-text-secondary, #525252);
+  font-size: 0.875rem;
+}
+
+.qf-folder-audit__reports {
+  margin: 0.5rem 0 1rem;
+}
+
+.qf-folder-audit__more {
+  margin-top: 0.5rem;
+}
+
+.qf-share-audit-link {
+  margin-top: -0.75rem;
+}

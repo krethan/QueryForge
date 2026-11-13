@@ -34,6 +34,7 @@ import {
   roleLabel,
 } from '../components/Folders';
 import { FolderShareModal, ShareModal } from '../components/ShareModal';
+import { FolderAccessAuditModal } from '../components/FolderAccessAuditModal';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
@@ -379,6 +380,7 @@ export function DashboardPage() {
   const [toMove, setToMove] = useState<Report | null>(null);
   const [manage, setManage] = useState(false);
   const [folderToShare, setFolderToShare] = useState<Folder | null>(null);
+  const [folderToAudit, setFolderToAudit] = useState<Folder | null>(null);
   const [folderFilter, setFolderFilter] = useState(ALL);
   const [grouped, setGrouped] = useState(false);
   /** Optimistic local changes to stars / folders until the next reload. */
@@ -727,6 +729,10 @@ export function DashboardPage() {
           setManage(false);
           setFolderToShare(f);
         }}
+        onAudit={(f) => {
+          setManage(false);
+          setFolderToAudit(f);
+        }}
         onChanged={async () => {
           await reloadFolders();
           setLocal({});
@@ -740,6 +746,19 @@ export function DashboardPage() {
             setFolderToShare(null);
             setManage(true);
             if (saved) void reloadFolders();
+          }}
+          onAudit={(f) => {
+            setFolderToShare(null);
+            setFolderToAudit(f);
+          }}
+        />
+      )}
+      {folderToAudit && (
+        <FolderAccessAuditModal
+          folder={folderToAudit}
+          onClose={() => {
+            setFolderToAudit(null);
+            setManage(true);
           }}
         />
       )}

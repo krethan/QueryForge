@@ -310,10 +310,19 @@ export class FakeMetadataDb implements MetadataDb {
       /FROM \w+\.QF_FOLDER_SHARE_AUDIT A .* WHERE A\.FOLDER_ID = \? ORDER BY A\.OCCURRED_AT DESC/.test(
         s,
       )
-    )
+    ) {
+      // ORDER BY A.OCCURRED_AT DESC, A.AUDIT_ID [OFFSET n ROWS] FETCH FIRST m ROWS ONLY
+      const page = /(?:OFFSET (\d+) ROWS )?FETCH FIRST (\d+) ROWS ONLY$/.exec(s);
+      const skip = Number(page?.[1] ?? 0);
+      const take = page ? Number(page[2]) : Infinity;
       return this.folderShareAudit
         .filter((a) => a.FOLDER_ID === params[0])
-        .sort((a, b) => String(b.OCCURRED_AT).localeCompare(String(a.OCCURRED_AT)))
+        .sort(
+          (a, b) =>
+            String(b.OCCURRED_AT).localeCompare(String(a.OCCURRED_AT)) ||
+            String(a.AUDIT_ID).localeCompare(String(b.AUDIT_ID)),
+        )
+        .slice(skip, skip + take)
         .map((a) => ({
           ...a,
           ACTOR_NAME: this.users.get(String(a.ACTOR_ID))?.DISPLAY_NAME ?? null,
@@ -322,6 +331,7 @@ export class FakeMetadataDb implements MetadataDb {
               ? (this.users.get(String(a.PRINCIPAL_ID))?.DISPLAY_NAME ?? null)
               : null,
         }));
+    }
     return undefined;
   }
 
@@ -440,6 +450,13 @@ export class FakeMetadataDb implements MetadataDb {
       )
     ) {
       const [id, folderId, action, type, pid, oldRole, newRole, actor] = params;
+      // QF_FSAU_CK_TYPE as widened by migration 012
+      if (!['USER', 'GROUP', 'REPORTS'].includes(String(type)))
+        throw new DbError('Check constraint QF_FSAU_CK_TYPE violated.', '23513', -545);
+      if (![null, 'VIEWER', 'EDITOR'].includes(oldRole as string | null))
+        throw new DbError('Check constraint QF_FSAU_CK_OLD violated.', '23513', -545);
+      if (![null, 'VIEWER', 'EDITOR'].includes(newRole as string | null))
+        throw new DbError('Check constraint QF_FSAU_CK_NEW violated.', '23513', -545);
       this.folderShareAudit.push({
         AUDIT_ID: id,
         FOLDER_ID: folderId,

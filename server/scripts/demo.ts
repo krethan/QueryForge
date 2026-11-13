@@ -1155,8 +1155,35 @@ async function main() {
   await folders.setPref('u-demo', created[2].id, { folderId: ops.id });
   await folders.setPref('u-demo', created[4].id, { folderId: ops.id });
   if (patOwned[0]) await folders.setPref('u-demo', patOwned[0].id, { folderId: ops.id });
+  // A little folder sharing history for the folder's Access and audit panel (migration 012
+  // records the report-sharing option too): Sam was added as Viewer, then made Editor with the
+  // reports shared at folder level; Pat was added and removed again, and the reports were
+  // narrowed to view only. The end state is Sam as Editor, reports shared view only.
+  const opsRef = { id: ops.id, ownerId: 'u-demo' };
   await folderAccess.replaceShares(
-    { id: ops.id, ownerId: 'u-demo' },
+    opsRef,
+    'u-demo',
+    [{ type: 'USER', id: 'u-sam', role: 'VIEWER' }],
+    exists,
+  );
+  await folderAccess.replaceShares(
+    opsRef,
+    'u-demo',
+    [{ type: 'USER', id: 'u-sam', role: 'EDITOR' }],
+    exists,
+    'EDITOR',
+  );
+  await folderAccess.replaceShares(
+    opsRef,
+    'u-demo',
+    [
+      { type: 'USER', id: 'u-sam', role: 'EDITOR' },
+      { type: 'USER', id: 'u-pat', role: 'VIEWER' },
+    ],
+    exists,
+  );
+  await folderAccess.replaceShares(
+    opsRef,
     'u-demo',
     [{ type: 'USER', id: 'u-sam', role: 'EDITOR' }],
     exists,

@@ -1,6 +1,14 @@
 import type React from 'react';
 import { Button, Checkbox, Modal, Select, SelectItem, Tag, TextInput } from '@carbon/react';
-import { Checkmark, Close, Edit, FolderAdd, Share, TrashCan } from '@carbon/icons-react';
+import {
+  Checkmark,
+  Close,
+  Edit,
+  FolderAdd,
+  RecentlyViewed,
+  Share,
+  TrashCan,
+} from '@carbon/icons-react';
 import { useState } from 'react';
 import { api } from '../api/client';
 import type { Folder, Report } from '../api/types';
@@ -29,11 +37,17 @@ export function ManageFoldersModal({
   onClose,
   onChanged,
   onShare,
+  onAudit,
 }: {
   open: boolean;
   folders: Folder[];
   /** Open the share dialog for one of your folders (rendered by the page, not nested here). */
   onShare?(f: Folder): void;
+  /**
+   * Open a folder's Access and audit panel (rendered by the page). Offered for your own folders
+   * and, for admins, folders shared with anyone; the server enforces the same rule.
+   */
+  onAudit?(f: Folder): void;
   /** Number of the user's visible reports in each folder. */
   counts: Map<string, number>;
   onClose(): void;
@@ -186,6 +200,16 @@ export function ManageFoldersModal({
                       onClick={() => onShare(f)}
                     />
                   )}
+                  {onAudit && (
+                    <Button
+                      size="sm"
+                      kind="ghost"
+                      hasIconOnly
+                      renderIcon={RecentlyViewed}
+                      iconDescription={`Access and audit for ${f.name}`}
+                      onClick={() => onAudit(f)}
+                    />
+                  )}
                   <Button
                     size="sm"
                     kind="ghost"
@@ -226,6 +250,16 @@ export function ManageFoldersModal({
                   {f.ownerName || 'Another user'} · {roleLabel(f.access)} · {counts.get(f.id) ?? 0}{' '}
                   reports
                 </span>
+                {onAudit && f.access === 'ADMIN' && (
+                  <Button
+                    size="sm"
+                    kind="ghost"
+                    hasIconOnly
+                    renderIcon={RecentlyViewed}
+                    iconDescription={`Access and audit for ${f.name}`}
+                    onClick={() => onAudit(f)}
+                  />
+                )}
               </li>
             ))}
           </ul>
