@@ -1,0 +1,87 @@
+import type { AppConfig } from '../config/config.js';
+import type { UserRepository } from '../auth/users.js';
+import type { MetadataDb } from '../db/types.js';
+import { T, q } from '../db/schema.js';
+import type { Report } from '../reports/reports.js';
+import type { AccessService } from '../sharing/access.js';
+
+export interface RecipientOption {
+  userId: string;
+  displayName: string;
+  email: string;
+  /** True for the report owner. */
+  owner: boolean;
+  /** False when the address is outside SCHEDULE_RECIPIENT_DOMAINS, so it can't be chosen. */
+  allowedDomain: boolean;
+}
+
+const domainOf = (email: string) => email.slice(email.lastIndexOf('@') + 1).toLowerCase();
+
+/**
+ * Who a scheduled report may be e-mailed to. A recipient address must belong to an active
+ * Uncle Bob user who can already open the report (owner, a user or group share, or an admin),
+ * so scheduling never becomes a way to send a report to someone who could not see it.
+ * The check runs when a schedule is saved and again at every delivery.
+ */
+export class RecipientService {
+  private readonly users: string;
+  private readonly shares: string;
+  private readonly groups: string;
+  constructor(
+    private readonly db: MetadataDb,
+    schema: string,
+    private readonly userRepo: UserRepository,
+    private readonly access: AccessService,
+    private readonly cfg: Pick<AppConfig['scheduler'], 'recipientDomains'>,
+  ) {
+    this.users = q(schema, T.users);
+    this.shares = q(schema, T.shares);
+    this.groups = q(schema, T.userGroups);
+  }
+
+  /** People with an e-mail address who can open the report through ownership or its shares. */
+  async options(report: Report): Promise<RecipientOption[]> {
+    const rows = await this.db.query<Record<string, unknown>>(
+      `SELECT U.USER_ID, U.DISPLAY_NAME, U.EMAIL FROM ${this.users} U
+        WHERE U.IS_ACTIVE = 1 AND U.EMAIL IS NOT NULL AND (U.USER_ID = ?
+           OR U.USER_ID IN (SELECT S.PRINCIPAL_ID FROM ${this.shares} S WHERE S.REPORT_ID = ? AND S.PRINCIPAL_TYPE = 'USER')
+           OR U.USER_ID IN (SELECT G.USER_ID FROM ${this.groups} G JOIN ${this.shares} S
+                              ON S.PRINCIPAL_TYPE = 'GROUP' AND S.PRINCIPAL_ID = G.GROUP_NAME WHERE S.REPORT_ID = ?))
+        ORDER BY U.DISPLAY_NAME FETCH FIRST 500 ROWS ONLY`,
+      [report.ownerId, report.id, report.id],
+    );
+    const seen = new Set<string>();
+    const out: RecipientOption[] = [];
+    for (const r of rows) {
+      const email = String(r.EMAIL ?? '')
+        .trim()
+        .toLowerCase();
+      if (!email || seen.has(email)) continue;
+      seen.add(email);
+      out.push({
+        userId: String(r.USER_ID),
+        displayName: String(r.DISPLAY_NAME),
+        email,
+        owner: r.USER_ID === report.ownerId,
+        allowedDomain: this.cfg.recipientDomains.includes(domainOf(email)),
+      });
+    }
+    return out;
+  }
+
+  /** Split addresses into those that belong to someone who can open the report and those that don't. */
+  async check(report: Report, emails: string[]): Promise<{ allowed: string[]; blocked: string[] }> {
+    const list = [...new Set(emails.map((e) => e.trim().toLowerCase()).filter(Boolean))];
+    const users = await this.userRepo.findActiveByEmails(list);
+    const ok = new Set<string>();
+    for (const u of users) {
+      const email = String(u.email ?? '').toLowerCase();
+      if (ok.has(email)) continue;
+      if (await this.access.roleFor(u, report)) ok.add(email);
+    }
+    return {
+      allowed: list.filter((e) => ok.has(e)),
+      blocked: list.filter((e) => !ok.has(e)),
+    };
+  }
+}

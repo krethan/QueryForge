@@ -989,6 +989,10 @@ async function main() {
     displayName: 'Sam Finance (fake)',
     hash: await bcrypt.hash('sam-demo-password', 10),
   });
+  // scheduled e-mail only goes to users who can open the report, matched by these addresses
+  metadataDb.setEmail('u-demo', 'demo@example.com');
+  metadataDb.setEmail('u-pat', 'pat@example.com');
+  metadataDb.setEmail('u-sam', 'sam@example.com');
   metadataDb.addGroup('u-demo', 'sales', 'LOCAL');
   metadataDb.addGroup('u-sam', 'finance', 'LOCAL');
   const patOwned = [
@@ -1018,7 +1022,7 @@ async function main() {
 
   const { factory } = fakeFactory(script);
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const { app, access, schedules, folders, folderAccess } = createApp({
+  const { app, access, schedules, scheduler, folders, folderAccess } = createApp({
     cfg,
     metadataDb,
     jobFactory: factory,
@@ -1077,22 +1081,23 @@ async function main() {
     exists,
   );
   const weekly = {
-    cron: '0 7 * * 1',
+    cron: '0 7 * * 1', // Every Monday at 07:00
     timezone: 'America/Edmonton',
-    recipients: ['sales-leads@example.com', 'ops@example.com'],
+    recipients: ['demo@example.com'],
     parameters: { region: 'West', since: '2026-10-01' },
     enabled: true,
   };
-  await schedules.create(
+  const weeklySchedule = await schedules.create(
     parameterized.id,
     'u-demo',
     weekly,
     validateCron(weekly.cron, weekly.timezone, 15)[0],
   );
   const daily = {
-    cron: '30 6 * * 1-5',
+    cron: '30 6 * * 1-5', // Weekdays at 06:30
     timezone: 'America/Edmonton',
-    recipients: ['finance@example.com'],
+    // the report is shared with the finance group (Sam) and with Pat
+    recipients: ['demo@example.com', 'sam@example.com', 'pat@example.com'],
     parameters: {},
     enabled: false,
   };
@@ -1102,6 +1107,21 @@ async function main() {
     daily,
     validateCron(daily.cron, daily.timezone, 15)[0],
   );
+  const monthly = {
+    cron: '0 8 L * *', // Monthly on the last day at 08:00
+    timezone: 'America/Edmonton',
+    recipients: ['demo@example.com'],
+    parameters: {},
+    enabled: true,
+  };
+  await schedules.create(
+    rawTotals.id,
+    'u-demo',
+    monthly,
+    validateCron(monthly.cron, monthly.timezone, 15)[0],
+  );
+  // one delivery so the schedule shows a last run and delivery history (MemoryMailer: not sent)
+  await scheduler.run(weeklySchedule, { trigger: 'MANUAL', requestedBy: 'u-demo' });
 
   // Shared folders (migration 009). Sharing a folder never shares its reports: Sam (finance
   // group) sees the demo user's "Month-end Pack" but only the report shared with finance.

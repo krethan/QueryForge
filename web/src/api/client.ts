@@ -11,7 +11,11 @@ import type {
   ParameterValues,
   PivotRun,
   Schedule,
+  ScheduleCadence,
+  ScheduleDelivery,
   ScheduleInput,
+  ScheduleRecipientOption,
+  ScheduleRunResult,
   ScheduleSettings,
   Share,
   UserSummary,
@@ -292,10 +296,11 @@ export const api = {
   groups: () => json<{ groups: string[] }>('GET', '/groups').then((r) => r.groups),
 
   scheduleSettings: () => json<ScheduleSettings>('GET', '/schedules/settings'),
-  previewSchedule: (cron: string, timezone: string) =>
-    json<{ upcoming: string[] }>('POST', '/schedules/preview', { cron, timezone }).then(
-      (r) => r.upcoming,
-    ),
+  previewSchedule: (when: { cron?: string; cadence?: ScheduleCadence }, timezone: string) =>
+    json<{ upcoming: string[]; cron: string; description: string }>('POST', '/schedules/preview', {
+      ...when,
+      timezone,
+    }),
   listSchedules: () =>
     json<{ schedules: Schedule[]; settings: ScheduleSettings }>('GET', '/schedules'),
   reportSchedules: (reportId: string) =>
@@ -311,10 +316,24 @@ export const api = {
     json<{ schedule: Schedule }>('PUT', `/schedules/${id}`, input).then((r) => r.schedule),
   deleteSchedule: (id: string) => json<void>('DELETE', `/schedules/${id}`),
   runScheduleNow: (id: string) =>
-    json<{ result: { status: 'SUCCEEDED' | 'FAILED'; error?: string | null }; schedule: Schedule }>(
-      'POST',
-      `/schedules/${id}/run`,
+    json<{ result: ScheduleRunResult; schedule: Schedule }>('POST', `/schedules/${id}/run`),
+  pauseSchedule: (id: string, version?: number) =>
+    json<{ schedule: Schedule }>('POST', `/schedules/${id}/pause`, { version }).then(
+      (r) => r.schedule,
     ),
+  resumeSchedule: (id: string, version?: number) =>
+    json<{ schedule: Schedule }>('POST', `/schedules/${id}/resume`, { version }).then(
+      (r) => r.schedule,
+    ),
+  scheduleDeliveries: (id: string) =>
+    json<{ deliveries: ScheduleDelivery[] }>('GET', `/schedules/${id}/deliveries`).then(
+      (r) => r.deliveries,
+    ),
+  scheduleRecipients: (reportId: string) =>
+    json<{ recipients: ScheduleRecipientOption[] }>(
+      'GET',
+      `/reports/${reportId}/schedule-recipients`,
+    ).then((r) => r.recipients),
   cancel: (executionId: string) =>
     json<{ cancelled: boolean }>('POST', `/query/${executionId}/cancel`),
 

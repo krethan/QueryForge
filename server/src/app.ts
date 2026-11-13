@@ -20,6 +20,7 @@ import { LdaptsAuthenticator, type LdapAuthenticator } from './auth/ldap.js';
 import { SmtpMailer, type Mailer } from './mail/mailer.js';
 import { Scheduler } from './scheduler/scheduler.js';
 import { ScheduleRepository } from './scheduler/schedules.js';
+import { RecipientService } from './scheduler/recipients.js';
 import { AccessService } from './sharing/access.js';
 import { GroupRepository } from './sharing/groups.js';
 import { FolderAccessService } from './sharing/folder-access.js';
@@ -58,7 +59,14 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     cfg.auth.ldap ? new LdaptsAuthenticator(cfg.auth.ldap) : undefined,
   );
   const mailer = pick(o.mailer, () => (cfg.smtp ? new SmtpMailer(cfg.smtp) : undefined));
-  const scheduler = new Scheduler(cfg, schedules, users, access, execution, mailer);
+  const recipients = new RecipientService(
+    metadataDb,
+    cfg.metadata.schema,
+    users,
+    access,
+    cfg.scheduler,
+  );
+  const scheduler = new Scheduler(cfg, schedules, users, access, execution, mailer, recipients);
 
   const app = express();
   app.disable('x-powered-by');
@@ -103,6 +111,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       folderAccess,
       tileOrder,
       scheduler,
+      recipients,
       mailer,
       oidc,
       ldap,
@@ -133,6 +142,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     folderAccess,
     tileOrder,
     scheduler,
+    recipients,
     mailer,
   };
 }

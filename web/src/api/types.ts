@@ -267,12 +267,27 @@ export interface UserSummary {
 }
 
 export type ScheduleStatus = 'NEVER' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+export type ScheduleFrequency = 'DAILY' | 'WEEKDAYS' | 'WEEKLY' | 'MONTHLY';
+/** Friendly cadence; the server stores it as a cron expression in the schedule's time zone. */
+export interface ScheduleCadence {
+  frequency: ScheduleFrequency;
+  /** "HH:MM", 24-hour, in the schedule's time zone */
+  time: string;
+  /** 0 = Sunday ... 6 = Saturday (WEEKLY) */
+  weekday?: number;
+  /** 1-28 or 'LAST' (MONTHLY) */
+  dayOfMonth?: number | 'LAST';
+}
 export interface Schedule {
   id: string;
   reportId: string;
   reportName?: string;
   createdBy: string;
   cron: string;
+  /** null for a custom cron schedule */
+  cadence: ScheduleCadence | null;
+  /** e.g. "Every Monday at 07:00" */
+  description: string;
   timezone: string;
   recipients: string[];
   parameters: ParameterValues;
@@ -285,12 +300,43 @@ export interface Schedule {
   version: number;
 }
 export interface ScheduleInput {
-  cron: string;
+  /** Send either a cadence or (advanced) a cron expression. */
+  cadence?: ScheduleCadence;
+  cron?: string;
   timezone: string;
   recipients: string[];
   parameters: ParameterValues;
   enabled: boolean;
   version?: number;
+}
+export interface ScheduleDelivery {
+  id: string;
+  scheduleId: string;
+  reportId: string;
+  trigger: 'SCHEDULE' | 'MANUAL';
+  requestedBy: string | null;
+  requestedByName?: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  status: 'SUCCEEDED' | 'FAILED';
+  rowCount: number | null;
+  deliveredTo: string[];
+  skipped: string[];
+  error: string | null;
+}
+/** Someone who can open the report and has an e-mail address. */
+export interface ScheduleRecipientOption {
+  userId: string;
+  displayName: string;
+  email: string;
+  owner: boolean;
+  allowedDomain: boolean;
+}
+export interface ScheduleRunResult {
+  status: 'SUCCEEDED' | 'FAILED';
+  error?: string | null;
+  deliveredTo?: string[];
+  skipped?: string[];
 }
 export interface ScheduleSettings {
   enabled: boolean;

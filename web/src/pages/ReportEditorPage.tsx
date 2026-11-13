@@ -19,11 +19,10 @@ import type {
   PivotRun,
   Report,
   RunResponse,
-  ScheduleSettings,
 } from '../api/types';
 import { ParameterEditor } from '../components/ParameterEditor';
 import { RunParamsModal } from '../components/RunParamsModal';
-import { ScheduleEditorModal } from '../components/ScheduleEditorModal';
+import { ReportSchedulesModal } from '../components/ReportSchedulesModal';
 import { ShareModal } from '../components/ShareModal';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ExportButton } from '../components/ExportButton';
@@ -63,7 +62,6 @@ export function ReportEditorPage() {
   const [lastValues, setLastValues] = useState<ParameterValues | undefined>(undefined);
   const [shareOpen, setShareOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
-  const [schedSettings, setSchedSettings] = useState<ScheduleSettings | null>(null);
   const [chart, setChart] = useState<ChartDef | null>(null);
   const [view, setView] = useState<ChartView>('table');
   const [loadedRows, setLoadedRows] = useState<{ rows: Cell[][]; hasMore: boolean }>({
@@ -362,10 +360,7 @@ export function ReportEditorPage() {
             kind="tertiary"
             renderIcon={Time}
             disabled={dirty}
-            onClick={async () => {
-              setSchedSettings(await api.scheduleSettings().catch(() => null));
-              setSchedOpen(true);
-            }}
+            onClick={() => setSchedOpen(true)}
           >
             Schedule
           </Button>
@@ -593,17 +588,9 @@ export function ReportEditorPage() {
         onPresetChange={setDefs}
       />
       {shareOpen && report && <ShareModal report={report} onClose={() => setShareOpen(false)} />}
-      <ScheduleEditorModal
-        open={schedOpen}
-        schedule={null}
-        report={report}
-        settings={schedSettings}
-        onClose={() => setSchedOpen(false)}
-        onSaved={() => {
-          setSchedOpen(false);
-          setNotice('Schedule saved. Manage it on the Schedules page.');
-        }}
-      />
+      {schedOpen && report && (
+        <ReportSchedulesModal report={report} onClose={() => setSchedOpen(false)} />
+      )}
       <Modal
         open={blocker.state === 'blocked'}
         danger

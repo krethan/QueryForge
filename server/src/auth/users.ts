@@ -84,6 +84,18 @@ export class UserRepository {
     return rows[0] ? toUser(rows[0]) : null;
   }
 
+  /** Active users whose e-mail address matches one of `emails` (case-insensitive). */
+  async findActiveByEmails(emails: string[]): Promise<AppUser[]> {
+    const list = [...new Set(emails.map((e) => e.trim().toLowerCase()).filter(Boolean))];
+    if (!list.length) return [];
+    const rows = await this.db.query<UserRow>(
+      `SELECT USER_ID, USERNAME, DISPLAY_NAME, ROLE, IS_ACTIVE, AUTH_SOURCE, EMAIL FROM ${this.table}
+        WHERE IS_ACTIVE = 1 AND LOWER(EMAIL) IN (${list.map(() => '?').join(', ')})`,
+      list,
+    );
+    return rows.map(toUser);
+  }
+
   async verifyCredentials(username: string, password: string): Promise<AppUser | null> {
     const uname = username.trim().toLowerCase();
     const rows = await this.db.query<UserRow>(

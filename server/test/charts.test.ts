@@ -170,6 +170,7 @@ beforeEach(() => {
   db = new FakeMetadataDb();
   db.addUser({ id: 'u-alice', username: 'alice', hash, displayName: 'Alice' });
   db.addUser({ id: 'u-bob', username: 'bob', hash, displayName: 'Bob' });
+  db.setEmail('u-alice', 'alice@example.com');
   mailer = new MemoryMailer();
   const f = fakeFactory(() => ({
     columns: [col('REGION', 'CHAR', 5), col('REVENUE', 'DECIMAL', 11, 2)],
@@ -332,7 +333,7 @@ describe('chart API', () => {
       await a.send('post', `/api/reports/${rep.id}/schedules`).send({
         cron: '0 7 * * 1',
         timezone: 'America/Edmonton',
-        recipients: ['ops@example.com'],
+        recipients: ['alice@example.com'],
       })
     ).body.schedule;
     expect((await a.send('post', `/api/schedules/${s.id}/run`).send({})).status).toBe(200);
@@ -403,7 +404,7 @@ describe('chart API', () => {
       await a.send('post', `/api/reports/${rep.id}/schedules`).send({
         cron: '0 7 * * 1',
         timezone: 'UTC',
-        recipients: ['ops@example.com'],
+        recipients: ['alice@example.com'],
       })
     ).body.schedule;
     await a.send('post', `/api/schedules/${s.id}/run`).send({});
