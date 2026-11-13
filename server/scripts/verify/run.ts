@@ -18,7 +18,7 @@ import {
   versionTableDdl,
   type MigrationFile,
 } from '../../src/db/migration-files.js';
-import { NOW_UTC, T } from '../../src/db/schema.js';
+import { NOW_UTC, T, toDbTimestamp } from '../../src/db/schema.js';
 import type { JobFactory, MetadataDb, SqlJobLike } from '../../src/db/types.js';
 import { UserRepository } from '../../src/auth/users.js';
 import { CatalogService } from '../../src/catalog/catalog.js';
@@ -36,6 +36,7 @@ import { toDbError } from '../../src/util/errors.js';
 import { MemoryMailer } from '../../src/mail/mailer.js';
 import { ShareNotifier } from '../../src/notifications/share-notifier.js';
 import { UserSettingsRepository } from '../../src/notifications/settings.js';
+import { RetentionService } from '../../src/retention/retention.js';
 import {
   confinedFactory,
   PolicyViolation,
@@ -1119,6 +1120,18 @@ async function metadataQueries(job: SqlJobLike, rec: Recorder, schema: string) {
       },
     ],
     ['Execution history', () => new HistoryRepository(db, schema).list(nobody)],
+    [
+      'History retention: rows past each cutoff (COUNT only, nothing is deleted)',
+      () =>
+        new RetentionService(db, schema, {
+          deliveryDays: 365,
+          reminderDays: 180,
+          executionDays: 30,
+          auditDays: 365,
+          batchSize: 1000,
+          maxBatches: 1,
+        }).countEligible(),
+    ],
   ];
   for (const [title, fn] of steps) {
     try {
@@ -1298,6 +1311,48 @@ async function smokeTest(
         r.rows === 1
           ? undefined
           : `First run ${JSON.stringify(r.first)}, second run ${JSON.stringify(r.second)}, rows ${r.rows}; expected one reminder claimed once.`,
+    );
+    // History retention (no migration): the batched DELETE ... IN (SELECT ... FETCH FIRST n ROWS
+    // ONLY) on a table that names itself in the subselect. Rows are seeded here, in the
+    // disposable library only; QF_SHARE_REMINDERS has no foreign keys.
+    await step(
+      'Retention deletes old history in batches and keeps recent rows (QF_SHARE_REMINDERS)',
+      async () => {
+        const day = 24 * 60 * 60 * 1000;
+        const ids: string[] = [];
+        const seed = async (expiresMs: number) => {
+          const id = randomUUID();
+          ids.push(id);
+          await db.update(
+            `INSERT INTO ${schema}.${T.shareReminders} (REMINDER_ID, SHARE_KIND, TARGET_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, EXPIRES_AT, STATUS, ATTEMPTS, RECIPIENT_COUNT, CLAIMED_BY, CREATED_AT, UPDATED_AT)
+             VALUES (?, 'REPORT', ?, 'USER', 'ubverify', CAST(? AS TIMESTAMP), 'SENT', 1, 1, 'ubverify', ${NOW_UTC}, ${NOW_UTC})`,
+            [id, randomUUID(), toDbTimestamp(new Date(expiresMs))],
+          );
+        };
+        const now = Date.now();
+        for (let i = 0; i < 3; i++) await seed(now - (400 + i) * day);
+        await seed(now + 2 * day); // a future end date: must survive
+        const retention = new RetentionService(db, schema, {
+          deliveryDays: 0,
+          reminderDays: 7,
+          executionDays: 0,
+          auditDays: 0,
+          batchSize: 2,
+          maxBatches: 10,
+        });
+        const run = await retention.run({ now: new Date(now) });
+        const left = await db.query<{ REMINDER_ID: string }>(
+          `SELECT REMINDER_ID FROM ${schema}.${T.shareReminders} WHERE PRINCIPAL_ID = 'ubverify'`,
+        );
+        const t = run.tables.find((x) => x.key === 'reminders')!;
+        return { t, left: left.map((r) => r.REMINDER_ID), future: ids[3] };
+      },
+      (r) =>
+        r.t.error
+          ? `DELETE failed: ${r.t.error}`
+          : r.t.deleted === 3 && r.t.batches === 2 && r.left.length === 1 && r.left[0] === r.future
+            ? undefined
+            : `Deleted ${r.t.deleted} in ${r.t.batches} batch(es), ${r.left.length} left; expected 3 in 2 batches and only the future reminder left.`,
     );
     await step(
       'Save and change a per-user setting (QF_USER_SETTINGS, migration 015)',

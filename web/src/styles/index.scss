@@ -987,3 +987,25 @@ body {
   justify-content: flex-end;
   white-space: nowrap;
 }
+
+// Data retention (admin)
+.qf-retention {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 64rem;
+}
+
+.qf-retention__tag {
+  margin-left: 0.5rem;
+}
+
+.qf-retention__note,
+.qf-retention__status {
+  margin: 0;
+  max-width: 60rem;
+}
+
+.qf-retention .cds--btn {
+  align-self: flex-start;
+}

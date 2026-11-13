@@ -821,3 +821,42 @@ export interface DrillTargetOption {
   name: string;
   parameters: { name: string; label?: string; type: string }[];
 }
+
+/** History retention (no migration): one table's setting. days 0 = kept for ever. */
+export type RetentionKey =
+  'deliveries' | 'reminders' | 'executions' | 'shareAudit' | 'folderShareAudit' | 'folderDeletions';
+export interface RetentionSetting {
+  key: RetentionKey;
+  table: string;
+  label: string;
+  group: 'history' | 'audit';
+  days: number;
+}
+export interface RetentionTableResult {
+  key: RetentionKey;
+  table: string;
+  days: number;
+  cutoff: string | null;
+  deleted: number;
+  batches: number;
+  complete: boolean;
+  error: string | null;
+}
+export interface RetentionRun {
+  trigger: 'SCHEDULE' | 'MANUAL';
+  requestedBy: string | null;
+  startedAt: string;
+  finishedAt: string;
+  deleted: number;
+  tables: RetentionTableResult[];
+}
+/** GET /admin/retention (app admins only). */
+export interface RetentionState {
+  settings: RetentionSetting[];
+  batchSize: number;
+  maxBatches: number;
+  automatic: boolean;
+  running: boolean;
+  nextAutomaticAfter: string | null;
+  lastRun: RetentionRun | null;
+}

@@ -125,21 +125,26 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 
 ### Scheduled runs and e-mail
 
-| Variable                                    | Default         | Purpose                                                                                                                                                                                         |
-| ------------------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SCHEDULER_ENABLED`                         | false           | Run the scheduler loop in this process (DB lease keeps one runner across instances)                                                                                                             |
-| `SCHEDULER_POLL_MS` / `SCHEDULER_LEASE_MS`  | 30000 / 120000  | Poll interval and lease length                                                                                                                                                                  |
-| `SCHEDULE_MAX_FAILURES`                     | 3               | Consecutive failures before a schedule is paused                                                                                                                                                |
-| `SCHEDULE_MIN_INTERVAL_MINUTES`             | 15              | Reject cron expressions that fire more often                                                                                                                                                    |
-| `SCHEDULE_MAX_RECIPIENTS`                   | 20              | Per schedule                                                                                                                                                                                    |
-| `SCHEDULE_RECIPIENT_DOMAINS`                | —               | Comma-separated allow-list. **Exact domain match**: `example.com` allows `a@example.com` but **not** `a@sales.example.com` — list each subdomain explicitly. Empty = scheduled e-mail disabled. |
-| `SCHEDULE_DEFAULT_TIMEZONE`                 | UTC             | IANA zone pre-selected in the editor                                                                                                                                                            |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE`   | — / 587 / false | `SMTP_SECURE=false` means STARTTLS is **required** (no plaintext fallback)                                                                                                                      |
-| `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | —               | Credentials and sender                                                                                                                                                                          |
-| `QF_PUBLIC_BASE_URL`                        | `APP_ORIGIN`    | Public address used for links in e-mails (http/https only); never taken from the request                                                                                                        |
-| `QF_SHARE_REMINDER_DAYS`                    | 3               | Days before a share ends that its owner gets a reminder; `0` turns reminders off                                                                                                                |
-| `QF_SHARE_REMINDER_TO_RECIPIENT`            | false           | Also remind the people whose access is ending                                                                                                                                                   |
-| `SMTP_REJECT_UNAUTHORIZED` / `SMTP_CA_FILE` | true / —        | TLS verification                                                                                                                                                                                |
+| Variable                                         | Default         | Purpose                                                                                                                                                                                         |
+| ------------------------------------------------ | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SCHEDULER_ENABLED`                              | false           | Run the scheduler loop in this process (DB lease keeps one runner across instances)                                                                                                             |
+| `SCHEDULER_POLL_MS` / `SCHEDULER_LEASE_MS`       | 30000 / 120000  | Poll interval and lease length                                                                                                                                                                  |
+| `SCHEDULE_MAX_FAILURES`                          | 3               | Consecutive failures before a schedule is paused                                                                                                                                                |
+| `SCHEDULE_MIN_INTERVAL_MINUTES`                  | 15              | Reject cron expressions that fire more often                                                                                                                                                    |
+| `SCHEDULE_MAX_RECIPIENTS`                        | 20              | Per schedule                                                                                                                                                                                    |
+| `SCHEDULE_RECIPIENT_DOMAINS`                     | —               | Comma-separated allow-list. **Exact domain match**: `example.com` allows `a@example.com` but **not** `a@sales.example.com` — list each subdomain explicitly. Empty = scheduled e-mail disabled. |
+| `SCHEDULE_DEFAULT_TIMEZONE`                      | UTC             | IANA zone pre-selected in the editor                                                                                                                                                            |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE`        | — / 587 / false | `SMTP_SECURE=false` means STARTTLS is **required** (no plaintext fallback)                                                                                                                      |
+| `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM`      | —               | Credentials and sender                                                                                                                                                                          |
+| `QF_PUBLIC_BASE_URL`                             | `APP_ORIGIN`    | Public address used for links in e-mails (http/https only); never taken from the request                                                                                                        |
+| `QF_SHARE_REMINDER_DAYS`                         | 3               | Days before a share ends that its owner gets a reminder; `0` turns reminders off                                                                                                                |
+| `QF_SHARE_REMINDER_TO_RECIPIENT`                 | false           | Also remind the people whose access is ending                                                                                                                                                   |
+| `QF_RETAIN_DELIVERY_DAYS`                        | 365             | Days of scheduled delivery history to keep; `0` keeps it for ever (else at least 7). See [History retention](#history-retention)                                                                |
+| `QF_RETAIN_REMINDER_DAYS`                        | 180             | Days to keep reminder records after the share's end date; `0` keeps them for ever (else at least 7)                                                                                             |
+| `QF_RETAIN_EXECUTION_DAYS`                       | 0               | Days of report run history (`QF_EXECUTIONS`) to keep; `0` (default) keeps it for ever (else at least 30)                                                                                        |
+| `QF_RETAIN_AUDIT_DAYS`                           | 0               | Days of sharing audit and folder deletion records to keep; `0` (default) keeps them for ever (else at least 365)                                                                                |
+| `QF_RETAIN_BATCH_SIZE` / `QF_RETAIN_MAX_BATCHES` | 1000 / 100      | Rows per `DELETE` statement, and statements per table per run                                                                                                                                   |
+| `SMTP_REJECT_UNAUTHORIZED` / `SMTP_CA_FILE`      | true / —        | TLS verification                                                                                                                                                                                |
 
 ## Exact numbers
 
@@ -743,7 +748,7 @@ Storage is migration `015_share_notifications.sql`, additive only: new tables `Q
 **Not tested on a real IBM i or a real mail server:** the notifications, the reminder claims and
 migration 015 have only run against the in-memory fake metadata database, the in-memory mailer and the
 demo. Limitations: e-mail only (no in-app notification list), no digest (one e-mail per save per person,
-one per reminder), at most 500 group members per save, reminder rows are kept with no retention limit,
+one per reminder), at most 500 group members per save, reminder rows are kept until [History retention](#history-retention) removes them (180 days after the end date by default),
 and a reminder that was claimed but whose app instance stopped before sending is not sent (at most
 once, never twice).
 
@@ -794,6 +799,46 @@ API: `GET/POST /api/reports/:id/schedules`, `GET /api/reports/:id/schedule-recip
 **Not tested on a real IBM i or a real mail server.** The scheduler, recipient checks, delivery history and migration 010 have only been exercised against the fake metadata/query adapters, the in-memory mailer and the demo; migration 010 has never been applied to Db2 for i.
 
 Limitations: no per-recipient bursting or filtering, no Slack/Teams delivery, no calendar invites, no external (non-user) addresses or distribution lists, no notification when someone is left out other than the schedule's status and history, no retention limit on delivery history, and one Excel attachment per run (capped by `MAX_EXPORT_ROWS`).
+
+## History retention
+
+History tables would otherwise grow for ever. Retention deletes old rows from them; it needs **no
+migration** (it only issues `DELETE`s on existing tables) and never touches reports, shares, schedules,
+folders, users or `QF_SCHEMA_VERSION`.
+
+| Table                                                            | Setting                    | Default  | Age measured from                              |
+| ---------------------------------------------------------------- | -------------------------- | -------- | ---------------------------------------------- |
+| `QF_SCHEDULE_DELIVERIES`                                         | `QF_RETAIN_DELIVERY_DAYS`  | 365      | `STARTED_AT`                                   |
+| `QF_SHARE_REMINDERS`                                             | `QF_RETAIN_REMINDER_DAYS`  | 180      | the share's end date (`EXPIRES_AT`)            |
+| `QF_EXECUTIONS`                                                  | `QF_RETAIN_EXECUTION_DAYS` | 0 (keep) | `STARTED_AT`; a `RUNNING` row is never deleted |
+| `QF_SHARE_AUDIT`, `QF_FOLDER_SHARE_AUDIT`, `QF_FOLDER_DELETIONS` | `QF_RETAIN_AUDIT_DAYS`     | 0 (keep) | `OCCURRED_AT` / `DELETED_AT`                   |
+
+- **0 keeps rows for ever**, for every setting. The audit tables are compliance records, so they are
+  only pruned when `QF_RETAIN_AUDIT_DAYS` is set, and then to at least 365 days. Run history is kept by
+  default because it records who ran which SQL; set `QF_RETAIN_EXECUTION_DAYS` (30 or more) to prune it.
+  A value below a minimum stops the server at start-up with a configuration error.
+- **Reminders stay idempotent.** A `QF_SHARE_REMINDERS` row is the "already reminded" claim for one
+  share and end date. Reminders are only ever sent for end dates still in the future, and retention only
+  deletes rows whose end date is at least `QF_RETAIN_REMINDER_DAYS` (7 or more) in the past, so a
+  deleted row can never let a reminder be sent twice.
+- **When it runs.** On the scheduler leader (`SCHEDULER_ENABLED=true`), at most once a day per app
+  instance, in the background so it never delays due schedules. The "once a day" is kept in memory, so
+  a restart or a change of leader runs it again; that is harmless, because a second run finds nothing
+  old left. An admin can also run it from **Data retention** in the side navigation, which shows the
+  settings and what the last run deleted (since the server started).
+- **Bounded batches.** Each statement deletes at most `QF_RETAIN_BATCH_SIZE` rows
+  (`DELETE FROM t WHERE id IN (SELECT id FROM t WHERE ts < ? FETCH FIRST n ROWS ONLY)`) and commits on
+  its own, so no statement locks a large part of a table; after `QF_RETAIN_MAX_BATCHES` statements per
+  table the rest waits for the next run. Counts are logged (`history retention (...): deleted N row(s)`).
+
+API (app admins only): `GET /api/admin/retention` (settings, batch limits, whether automatic runs are on,
+the last run's counts) and `POST /api/admin/retention/run` (CSRF; `409 RETENTION_RUNNING` if a run is
+already going).
+
+**Not tested on a real IBM i.** Only fakes and a fake clock have run it. The kit's smoke test runs the
+batched `DELETE` in its disposable library. Limitations: there are no time-leading indexes on these
+tables (adding one would need a migration), so each batch may scan the table; the last-run counts are in
+memory only and are not audited in the database; there is no per-table schedule or time-of-day setting.
 
 ## Security model
 
@@ -847,7 +892,7 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Shared folders: unless the owner shares the folder's reports too, people may see an emptier folder
   than the owner. Notifications about folder shares are e-mail only (see
   [Share notifications](#share-notifications)).
-- Folder audit export and deletion audit: deleted-folder records are admin-only, are kept forever (no retention or purge), and only cover deletions made through Uncle Bob after
+- Folder audit export and deletion audit: deleted-folder records are admin-only, are kept forever unless `QF_RETAIN_AUDIT_DAYS` is set (see [History retention](#history-retention)), and only cover deletions made through Uncle Bob after
   migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+); the Deleted folders
   screen has no search, filter or sort and does not show a total count (the API returns only `hasMore`). The CSV export's
   keyset cursor binds back Db2's own timestamp text; not yet confirmed on a real IBM i.

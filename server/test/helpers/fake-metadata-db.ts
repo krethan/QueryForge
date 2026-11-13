@@ -872,10 +872,88 @@ export class FakeMetadataDb implements MetadataDb {
     return undefined;
   }
 
+  // ---- History retention (no migration): batched DELETEs on the history and audit tables ----
+
+  /** Every table retention may delete from, by name: its rows and how to remove one. */
+  private retentionTables(): Record<string, { rows: () => Row[]; remove: (r: Row) => void }> {
+    // Removed in place, so tests holding a reference to an array see the change.
+    const list = (rows: Row[]) => ({
+      rows: () => rows,
+      remove: (r: Row) => {
+        const i = rows.indexOf(r);
+        if (i >= 0) rows.splice(i, 1);
+      },
+    });
+    return {
+      QF_SCHEDULE_DELIVERIES: list(this.scheduleDeliveries),
+      QF_SHARE_REMINDERS: list(this.shareReminders),
+      QF_SHARE_AUDIT: list(this.shareAudit),
+      QF_FOLDER_SHARE_AUDIT: list(this.folderShareAudit),
+      QF_FOLDER_DELETIONS: list(this.folderDeletions),
+      QF_EXECUTIONS: {
+        rows: () => [...this.executions.values()],
+        remove: (r: Row) => this.executions.delete(String(r.EXECUTION_ID)),
+      },
+    };
+  }
+
+  /** A stored timestamp (Db2 text, ISO or Date) as epoch milliseconds. */
+  static tsMs(v: unknown): number {
+    if (v instanceof Date) return v.getTime();
+    const t = String(v)
+      .trim()
+      .replace(' ', 'T')
+      .replace(/(\.\d{3})\d*/, '$1');
+    return Date.parse(/[zZ]$|[+-]\d{2}:\d{2}$/.test(t) ? t : `${t}Z`);
+  }
+
+  private retentionMatches(rows: Row[], col: string, cutoff: unknown, notRunning: boolean) {
+    const c = FakeMetadataDb.tsMs(cutoff);
+    if (Number.isNaN(c)) throw new Error(`FakeMetadataDb: bad retention cutoff ${String(cutoff)}`);
+    return rows.filter((r) => {
+      const t = FakeMetadataDb.tsMs(r[col]);
+      return !Number.isNaN(t) && t < c && (!notRunning || r.STATUS !== 'RUNNING');
+    });
+  }
+
+  /** Retention DELETEs seen, per table (tests check the batching). */
+  retentionDeletes: { table: string; deleted: number }[] = [];
+
+  private retentionUpdate(s: string, params: P): number | undefined {
+    const m =
+      /^DELETE FROM \w+\.(QF_[A-Z_]+) WHERE ([A-Z_]+) IN \(SELECT \2 FROM \w+\.\1 WHERE ([A-Z_]+) < CAST\(\? AS TIMESTAMP\)( AND STATUS <> 'RUNNING')? FETCH FIRST (\d+) ROWS ONLY\)$/.exec(
+        s,
+      );
+    if (!m) return undefined;
+    const [, table, , col, notRunning, n] = m;
+    const t = this.retentionTables()[table];
+    if (!t) throw new Error(`FakeMetadataDb: retention may not delete from ${table}`);
+    const doomed = [...this.retentionMatches(t.rows(), col, params[0], !!notRunning)].slice(
+      0,
+      Number(n),
+    );
+    for (const r of doomed) t.remove(r);
+    this.retentionDeletes.push({ table, deleted: doomed.length });
+    return doomed.length;
+  }
+
+  private retentionQuery(s: string, params: P): Row[] | undefined {
+    const m =
+      /^SELECT COUNT\(\*\) AS N FROM \w+\.(QF_[A-Z_]+) WHERE ([A-Z_]+) < CAST\(\? AS TIMESTAMP\)( AND STATUS <> 'RUNNING')?$/.exec(
+        s,
+      );
+    if (!m) return undefined;
+    const t = this.retentionTables()[m[1]];
+    if (!t) throw new Error(`FakeMetadataDb: no retention table ${m[1]}`);
+    return [{ N: this.retentionMatches(t.rows(), m[2], params[0], !!m[3]).length }];
+  }
+
   async query<T>(sql: string, params: P = []): Promise<T[]> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
     if (s.startsWith('SELECT 1 AS OK')) return [{ OK: 1 }] as T[];
+    const retentionRows = this.retentionQuery(s, params);
+    if (retentionRows) return retentionRows as T[];
     const notificationRows = this.notificationQuery(s, params);
     if (notificationRows) return notificationRows as T[];
     const deletionRows = this.folderDeletionQuery(s, params);
@@ -1138,6 +1216,8 @@ export class FakeMetadataDb implements MetadataDb {
   async update(sql: string, params: P = []): Promise<number> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
+    const retentionN = this.retentionUpdate(s, params);
+    if (retentionN !== undefined) return retentionN;
     const notificationN = this.notificationUpdate(s, params);
     if (notificationN !== undefined) return notificationN;
     const deletionN = this.folderDeletionUpdate(s, params);

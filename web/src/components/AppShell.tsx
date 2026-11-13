@@ -14,6 +14,7 @@ import {
 } from '@carbon/react';
 import {
   Add,
+  Archive,
   Dashboard,
   DataBase,
   DocumentMultiple_01,
@@ -36,6 +37,7 @@ const NAV: { to: string; label: string; icon: ComponentType; adminOnly?: boolean
   { to: '/datasource', label: 'Data Source', icon: DataBase },
   { to: '/account', label: 'Account', icon: UserAvatar },
   { to: '/admin/deleted-folders', label: 'Deleted folders', icon: TrashCan, adminOnly: true },
+  { to: '/admin/retention', label: 'Data retention', icon: Archive, adminOnly: true },
 ];
 
 /** Side navigation entries for a user: admin-only screens are hidden from everyone else. */
@@ -65,7 +67,9 @@ export function pageTitle(pathname: string): string {
                     ? 'Account'
                     : pathname === '/admin/deleted-folders'
                       ? 'Deleted folders'
-                      : null;
+                      : pathname === '/admin/retention'
+                        ? 'Data retention'
+                        : null;
   return page ? `${page} — ${PRODUCT_NAME}` : PRODUCT_NAME;
 }
 

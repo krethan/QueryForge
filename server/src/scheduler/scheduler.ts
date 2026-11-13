@@ -10,6 +10,7 @@ import { nextRun } from './cron.js';
 import type { RecipientService } from './recipients.js';
 import type { DeliveryTrigger, Schedule, ScheduleRepository } from './schedules.js';
 import type { ShareNotifier } from '../notifications/share-notifier.js';
+import type { RetentionService } from '../retention/retention.js';
 
 export const SCHEDULER_LOCK = 'SCHEDULER';
 const CHART_CID = 'chart@uncle-bob';
@@ -68,7 +69,17 @@ export class Scheduler {
     private readonly recipients: RecipientService,
     /** Share expiry reminders (migration 015), sent by the leader after the due schedules. */
     private readonly notifier?: ShareNotifier,
+    /**
+     * History retention, started by the leader at most once a day. It runs in the background so
+     * a long prune never delays due schedules; the service itself refuses overlapping runs.
+     */
+    private readonly retention?: RetentionService,
   ) {}
+
+  /** True between start() and stop(): this process polls (and may become the leader). */
+  get started(): boolean {
+    return this.timer !== undefined && !this.stopped;
+  }
 
   start() {
     this.stopped = false;
@@ -83,6 +94,7 @@ export class Scheduler {
   async stop() {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    await this.retention?.idle();
     await this.schedules.releaseLease(SCHEDULER_LOCK, this.instanceId).catch(() => undefined);
   }
 
@@ -111,6 +123,7 @@ export class Scheduler {
         await this.run(s, { trigger: 'SCHEDULE', ranAt: now });
       }
       if (this.notifier) await this.notifier.runReminders(now, this.instanceId);
+      if (this.retention) void this.retention.runIfDue(now);
     } catch (e) {
       console.error('scheduler tick failed:', sanitizeErrorMessage(e));
     } finally {

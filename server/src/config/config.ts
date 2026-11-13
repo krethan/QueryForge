@@ -6,6 +6,15 @@ const bool = z
     typeof v === 'boolean' ? v : ['1', 'true', 'yes', 'on'].includes(v.toLowerCase()),
   );
 const int = (def: number, min = 1) => z.coerce.number().int().min(min).default(def);
+/** A retention period in days: 0 (keep for ever) or at least `min`, at most 100 years. */
+const retainDays = (def: number, min: number, name: string) =>
+  z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(36500)
+    .refine((v) => v === 0 || v >= min, `${name} must be 0 (keep for ever) or at least ${min}`)
+    .default(def);
 const identifier = z
   .string()
   .regex(/^[A-Za-z][A-Za-z0-9_#@$]{0,127}$/, 'must be an unquoted Db2 for i identifier');
@@ -146,6 +155,20 @@ const schema = z.object({
   QF_SHARE_REMINDER_DAYS: z.coerce.number().int().min(0).max(60).default(3),
   /** Also remind the people whose access is ending (default: only the owner). */
   QF_SHARE_REMINDER_TO_RECIPIENT: bool.default(false),
+
+  // History retention (no migration): days to keep rows; 0 keeps them for ever.
+  /** Scheduled delivery history (QF_SCHEDULE_DELIVERIES). 0, or 7 or more. */
+  QF_RETAIN_DELIVERY_DAYS: retainDays(365, 7, 'QF_RETAIN_DELIVERY_DAYS'),
+  /** Reminder records (QF_SHARE_REMINDERS), counted from the share's end date. 0, or 7 or more. */
+  QF_RETAIN_REMINDER_DAYS: retainDays(180, 7, 'QF_RETAIN_REMINDER_DAYS'),
+  /** Report run history (QF_EXECUTIONS). Default 0: kept for ever. 0, or 30 or more. */
+  QF_RETAIN_EXECUTION_DAYS: retainDays(0, 30, 'QF_RETAIN_EXECUTION_DAYS'),
+  /** Sharing audit and folder deletion records. Default 0: kept for ever. 0, or 365 or more. */
+  QF_RETAIN_AUDIT_DAYS: retainDays(0, 365, 'QF_RETAIN_AUDIT_DAYS'),
+  /** Rows removed per DELETE statement. */
+  QF_RETAIN_BATCH_SIZE: z.coerce.number().int().min(10).max(10000).default(1000),
+  /** DELETE statements per table per run; anything left waits for the next run. */
+  QF_RETAIN_MAX_BATCHES: z.coerce.number().int().min(1).max(10000).default(100),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -239,6 +262,15 @@ export interface AppConfig {
     from: string;
     rejectUnauthorized: boolean;
     caFile?: string;
+  };
+  /** History retention (no migration); days, 0 = keep for ever. */
+  retention: {
+    deliveryDays: number;
+    reminderDays: number;
+    executionDays: number;
+    auditDays: number;
+    batchSize: number;
+    maxBatches: number;
   };
   /** Share notification e-mails and expiry reminders (migration 015). */
   notifications: {
@@ -431,6 +463,14 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
           caFile: e.SMTP_CA_FILE,
         }
       : undefined,
+    retention: {
+      deliveryDays: e.QF_RETAIN_DELIVERY_DAYS,
+      reminderDays: e.QF_RETAIN_REMINDER_DAYS,
+      executionDays: e.QF_RETAIN_EXECUTION_DAYS,
+      auditDays: e.QF_RETAIN_AUDIT_DAYS,
+      batchSize: e.QF_RETAIN_BATCH_SIZE,
+      maxBatches: e.QF_RETAIN_MAX_BATCHES,
+    },
     notifications: {
       publicBaseUrl: e.QF_PUBLIC_BASE_URL ?? e.APP_ORIGIN,
       reminderDays: e.QF_SHARE_REMINDER_DAYS,

@@ -1247,6 +1247,35 @@ async function main() {
   );
   await folders.remove('u-demo', scratch.id);
 
+  // History retention: a few delivery and reminder rows from long ago, so Admin > Data retention
+  // has something to show. They are removed by the first automatic run (or Run now).
+  const lastDelivery = metadataDb.scheduleDeliveries[0];
+  if (lastDelivery)
+    for (let i = 0; i < 14; i++) {
+      const at = new Date(Date.now() - (400 + i * 7) * DAY_MS).toISOString().replace('T', ' ');
+      metadataDb.scheduleDeliveries.push({
+        ...lastDelivery,
+        DELIVERY_ID: `demo-old-delivery-${i}`,
+        STARTED_AT: at,
+        FINISHED_AT: at,
+      });
+    }
+  for (let i = 0; i < 3; i++)
+    metadataDb.shareReminders.push({
+      REMINDER_ID: `demo-old-reminder-${i}`,
+      SHARE_KIND: 'REPORT',
+      TARGET_ID: created[0].id,
+      PRINCIPAL_TYPE: 'USER',
+      PRINCIPAL_ID: 'u-sam',
+      EXPIRES_AT: new Date(Date.now() - (200 + i * 30) * DAY_MS).toISOString().replace('T', ' '),
+      STATUS: 'SENT',
+      ATTEMPTS: 1,
+      RECIPIENT_COUNT: 1,
+      CLAIMED_BY: 'demo',
+      CREATED_AT: new Date(Date.now() - 210 * DAY_MS).toISOString().replace('T', ' '),
+      UPDATED_AT: new Date(Date.now() - 210 * DAY_MS).toISOString().replace('T', ' '),
+    });
+
   app.listen(PORT, '127.0.0.1', () => {
     console.log(
       `Uncle Bob DEMO (in-memory, no IBM i) on ${origin}  — login: demo / demo-password-123 (LDAP fake: dave / directory-pass; SSO button signs in a fake user)`,
