@@ -28,7 +28,7 @@ import type {
   PageResponse,
   ReportAccess,
   Report,
-  JoinSuggestion,
+  JoinSuggestionsResponse,
   ReportBuilderRun,
   ReportInput,
   ReportSpec,
@@ -464,7 +464,7 @@ export const api = {
     schema: string,
     table: string,
   ) =>
-    json<{ suggestions: JoinSuggestion[] }>('POST', '/schema/join-suggestions', {
+    json<JoinSuggestionsResponse>('POST', '/schema/join-suggestions', {
       tables,
       schema,
       table,

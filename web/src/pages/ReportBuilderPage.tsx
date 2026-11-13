@@ -42,6 +42,7 @@ import type {
   ReportSpec,
   RunResponse,
   SchemaColumn,
+  SchemaColumnsResponse,
   SchemaTable,
   SortDirection,
   CalcType,
@@ -143,8 +144,12 @@ interface JoinedTable {
   type: JoinType;
   on: CondRow[];
   columns: SchemaColumn[] | null;
+  /** Column cap when the table has more columns than the server lists, else null. */
+  columnsCap: number | null;
   error: unknown;
   suggestions: JoinSuggestion[] | null;
+  /** Foreign-key row cap when the server could not check every foreign key, else null. */
+  foreignKeysCap: number | null;
   /** Label of the suggestion currently applied, if the user has not edited it. */
   applied: string | null;
 }
@@ -163,6 +168,26 @@ const splitKey = (k: string): ColPick => {
 };
 
 const DEFAULT_LIMIT = 100;
+
+/** Server cap on catalog columns per table (MAX_COLUMNS), used if an older server omits it. */
+const DEFAULT_MAX_COLUMNS = 1000;
+/** Server cap on foreign-key column rows per table (MAX_FOREIGN_KEY_ROWS). */
+const DEFAULT_MAX_FK_ROWS = 1000;
+
+/** The column cap to show when the server says the column list was cut short, else null. */
+export const columnsCapOf = (r: SchemaColumnsResponse): number | null =>
+  r.truncated ? (r.maxColumns ?? DEFAULT_MAX_COLUMNS) : null;
+
+/** Notice shown under a column list that the server cut short at its cap. */
+export function ColumnsCapNotice({ cap }: { cap: number | null }) {
+  if (cap === null) return null;
+  return (
+    <p className="qf-muted qf-builder__cap-notice" role="note">
+      This table has more than {cap.toLocaleString()} columns. Only the first {cap.toLocaleString()}{' '}
+      (by position) are listed; use the SQL editor for the others.
+    </p>
+  );
+}
 
 /** Short human sentence describing the current selection, used for hints and the saved name. */
 export function describeSelection(spec: ReportSpec): string {
@@ -209,8 +234,10 @@ export async function hydrate(spec: ReportSpec): Promise<Hydration> {
         type: j.type,
         on: [],
         columns: cols.columns,
+        columnsCap: columnsCapOf(cols),
         error: null,
         suggestions: [],
+        foreignKeysCap: null,
         applied: null,
       };
     }),
@@ -287,6 +314,7 @@ export async function hydrate(spec: ReportSpec): Promise<Hydration> {
   return {
     table,
     columns: base.columns,
+    columnsCap: columnsCapOf(base),
     joins,
     pivot,
     calcs,
@@ -310,6 +338,7 @@ export async function hydrate(spec: ReportSpec): Promise<Hydration> {
 interface Hydration {
   table: SchemaTable;
   columns: SchemaColumn[];
+  columnsCap: number | null;
   joins: JoinedTable[];
   pivot: PivotState;
   calcs: CalcRow[];
@@ -340,6 +369,7 @@ export function ReportBuilderPage() {
 
   const [selected, setSelected] = useState<SchemaTable | null>(null);
   const [columns, setColumns] = useState<SchemaColumn[] | null>(null);
+  const [columnsCap, setColumnsCap] = useState<number | null>(null);
   const [columnsLoading, setColumnsLoading] = useState(false);
   const [columnsError, setColumnsError] = useState<unknown>(null);
 
@@ -444,6 +474,7 @@ export function ReportBuilderPage() {
   useEffect(() => {
     if (!selected) {
       setColumns(null);
+      setColumnsCap(null);
       return;
     }
     setResult(null);
@@ -456,6 +487,7 @@ export function ReportBuilderPage() {
       setColumnsError(null);
       setColumnsLoading(false);
       setColumns(h.columns);
+      setColumnsCap(h.columnsCap);
       setJoins(h.joins);
       setCalcs(h.calcs);
       setPicked(h.picked);
@@ -472,6 +504,7 @@ export function ReportBuilderPage() {
     setColumnsLoading(true);
     setColumnsError(null);
     setColumns(null);
+    setColumnsCap(null);
     setPicked([]);
     setSort([]);
     setJoins([]);
@@ -489,6 +522,7 @@ export function ReportBuilderPage() {
       .then((r) => {
         if (cancelled) return;
         setColumns(r.columns);
+        setColumnsCap(columnsCapOf(r));
       })
       .catch((e) => !cancelled && setColumnsError(e))
       .finally(() => !cancelled && setColumnsLoading(false));
@@ -705,11 +739,16 @@ export function ReportBuilderPage() {
     () =>
       selected
         ? [
-            { key: BASE, table: selected, columns: columns ?? [] },
-            ...joins.map((j) => ({ key: j.key, table: j.table, columns: j.columns ?? [] })),
+            { key: BASE, table: selected, columns: columns ?? [], cap: columnsCap },
+            ...joins.map((j) => ({
+              key: j.key,
+              table: j.table,
+              columns: j.columns ?? [],
+              cap: j.columnsCap,
+            })),
           ]
         : [],
-    [selected, columns, joins],
+    [selected, columns, columnsCap, joins],
   );
   const joined = joins.length > 0;
   /** Display name of a picked column: plain for one table, alias-qualified with joins. */
@@ -808,8 +847,10 @@ export function ReportBuilderPage() {
         type: joinType,
         on: [],
         columns: null,
+        columnsCap: null,
         error: null,
         suggestions: null,
+        foreignKeysCap: null,
         applied: null,
       },
     ]);
@@ -817,7 +858,7 @@ export function ReportBuilderPage() {
     setResult(null);
     try {
       const cols = await api.schemaColumns(table.schema, table.name);
-      updateJoin(key, { columns: cols.columns });
+      updateJoin(key, { columns: cols.columns, columnsCap: columnsCapOf(cols) });
     } catch (e) {
       updateJoin(key, { error: e, columns: [] });
       return;
@@ -845,6 +886,9 @@ export function ReportBuilderPage() {
             })),
             on: keep ? j.on : toRows(best, aliasToKey),
             applied: keep ? j.applied : best.label,
+            foreignKeysCap: r.foreignKeysTruncated
+              ? (r.maxForeignKeyRows ?? DEFAULT_MAX_FK_ROWS)
+              : null,
           };
         }),
       );
@@ -1187,6 +1231,12 @@ export function ReportBuilderPage() {
                   No foreign key or same-name column found — choose the columns yourself.
                 </span>
               )}
+              {j.foreignKeysCap !== null && (
+                <span className="qf-muted qf-builder__cap-notice" role="note">
+                  This table has more than {j.foreignKeysCap.toLocaleString()} foreign-key columns;
+                  only the first {j.foreignKeysCap.toLocaleString()} were checked for join keys.
+                </span>
+              )}
             </div>
           </div>
         );
@@ -1481,6 +1531,7 @@ export function ReportBuilderPage() {
                               <Loading small withOverlay={false} description="Loading columns" />
                             )}
                             {j && <ErrorNotice error={j.error} />}
+                            <ColumnsCapNotice cap={src.cap} />
                             <Checkbox
                               id={`qb-select-all-${src.key}`}
                               labelText={base ? 'Select all' : `Select all ${alias}`}

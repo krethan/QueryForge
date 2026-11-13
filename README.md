@@ -17,7 +17,9 @@ stored in Db2 for i as well.
 > Status: unit/API tests run against in-memory fakes of Mapepire. **This app has not yet been
 > connected to or verified against a real IBM i system.** See `docs/IBMI_SETUP.md`, and
 > [`docs/ibmi-verification.md`](docs/ibmi-verification.md) for the non-production test plan and the
-> `npm run verify:ibmi` kit.
+> `npm run verify:ibmi` kit. Upgrading an existing install: follow [`docs/upgrade.md`](docs/upgrade.md)
+> (backup, migrations 001–015 and their locking, new settings, rollback); changes are listed in
+> [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Layout
 
@@ -26,7 +28,9 @@ server/   Express API (auth, SQL validation, Mapepire execution, XLSX export, me
   migrations/  Db2 for i DDL (applied by `npm run migrate`)
   scripts/     migrate.ts, create-user.ts
 web/      React + Vite + @carbon/react UI
-docs/     IBMI_SETUP.md (Mapepire, profiles, authorities, TLS), ibmi-verification.md (test plan)
+docs/     IBMI_SETUP.md (Mapepire, profiles, authorities, TLS), ibmi-verification.md (test plan),
+          upgrade.md (upgrade runbook)
+CHANGELOG.md  Unreleased changes and every migration's locking/risk notes
 PLAN.md   Design plan
 ```
 
@@ -47,6 +51,8 @@ npm run dev                      # API on :3001, UI on http://localhost:5173
 
 Production: `npm run build && NODE_ENV=production npm start` (server also serves `web/dist`).
 Put it behind TLS; set `APP_ORIGIN`, `COOKIE_SECURE=true`, `TRUST_PROXY` as appropriate.
+To upgrade an existing install, follow [`docs/upgrade.md`](docs/upgrade.md): save `QFMETA` first, stop the
+app for migration 014, and note that history retention prunes old delivery and reminder rows by default.
 
 ## Demo mode (development only)
 
@@ -197,8 +203,11 @@ POST /api/schema/join-suggestions                       { tables: [{ alias, sche
   is filtered with `QSYS2.SQL_CHECK_AUTHORITY(library, file) = 1`, i.e. it shows what the read-only reporting
   profile can actually read (directly, via a group profile, `*PUBLIC` or an authorization list). Columns come
   from `QSYS2.SYSCOLUMNS`. When `REPORT_LIBRARIES` is set only those libraries are listed, otherwise everything
-  except the system catalogs and `PROTECTED_SCHEMAS`. Results are bounded (500 tables / 1000 columns per read,
-  100 tables per page) and cached in memory for `CATALOG_CACHE_TTL_MS`.
+  except the system catalogs and `PROTECTED_SCHEMAS`. Results are bounded (500 tables / 1000 columns / 1000
+  foreign-key column rows per read, 100 tables per page) and cached in memory for `CATALOG_CACHE_TTL_MS`.
+  Each read fetches one row past its cap, so a cut-short list is reported exactly: `truncated` on the table
+  list and on a table's columns (with `maxColumns`), and `foreignKeysTruncated` on join suggestions (with
+  `maxForeignKeyRows`). The builder then shows a notice; a foreign key cut off by the cap is never suggested.
 - Search terms, schema and table names are always **bound as `?` parameters**; they are never interpolated into
   the catalog SQL. The list runs through the same validator, read-only job and rate limits as an ad-hoc query.
 - The browser **never sends SQL**. It sends a schema, a table, column names and sort directions; the server

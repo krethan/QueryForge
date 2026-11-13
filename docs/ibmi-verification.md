@@ -12,6 +12,11 @@ The plan has three parts:
 3. Work through the [manual UI checklist](#6-manual-ui-checklist) with the app pointed at that library,
    and record everything in the [results table](#7-results-template).
 
+Once this passes, [`upgrade.md`](upgrade.md) is the runbook for upgrading a real install (save `QFMETA`,
+journaling, a quiet window for migration 014, new settings including history retention, rollback per
+migration and a post-upgrade checklist). [`CHANGELOG.md`](../CHANGELOG.md) lists every migration's
+locking and risk notes.
+
 ## 1. Prerequisites
 
 | Item                          | Requirement                                                                                                                                                                                                                                                                                                                              |
@@ -204,7 +209,8 @@ SELECT VERSION, FILE_NAME, APPLIED_AT FROM UBVERIFY.QF_SCHEMA_VERSION ORDER BY 1
   this) once you are done; revoke any test grants you added on the data library.
 - **Mapepire:** nothing to undo; the kit only opens client connections.
 - Migrations have no "down" scripts. A real metadata library is rolled back by restoring the save taken
-  before the migration (`SAVLIB` / `RSTLIB`), never by dropping objects by hand.
+  before the migration (`SAVLIB` / `RSTLIB`), never by dropping objects by hand. See
+  [`upgrade.md` → Rollback](upgrade.md#6-rollback) for the full procedure and what each migration changes.
 
 ## 6. Manual UI checklist
 

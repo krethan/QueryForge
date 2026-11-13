@@ -540,6 +540,10 @@ export interface SchemaColumnsResponse {
   type: CatalogTableType;
   text: string | null;
   cachedAt: string;
+  /** The table has more than `maxColumns` columns; only the first ones (by position) are listed. */
+  truncated?: boolean;
+  /** Server cap on columns read per table (1000). */
+  maxColumns?: number;
   columns: SchemaColumn[];
 }
 
@@ -747,6 +751,14 @@ export interface JoinSuggestion {
   constraint?: string;
   label: string;
   on: JoinCondition[];
+}
+
+export interface JoinSuggestionsResponse {
+  suggestions: JoinSuggestion[];
+  /** More foreign-key rows than `maxForeignKeyRows`: some constraints were not considered. */
+  foreignKeysTruncated?: boolean;
+  /** Server cap on foreign-key column rows read per table (1000). */
+  maxForeignKeyRows?: number;
 }
 
 export interface ReportSqlPreview {
