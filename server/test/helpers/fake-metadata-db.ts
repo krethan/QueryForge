@@ -33,6 +33,10 @@ export class FakeMetadataDb implements MetadataDb {
   folderReportSharing = new Map<string, Row>();
   /** QF_FOLDER_DELETIONS (migration 013): no foreign keys, never cascaded. */
   folderDeletions: Row[] = [];
+  /** QF_SHARE_REMINDERS (migration 015): unique on kind, target, principal and EXPIRES_AT. */
+  shareReminders: Row[] = [];
+  /** QF_USER_SETTINGS (migration 015), key USER_ID. */
+  userSettings = new Map<string, Row>();
   statements: { sql: string; params: P }[] = [];
   private clock = 0;
   failNext?: Error;
@@ -678,10 +682,202 @@ export class FakeMetadataDb implements MetadataDb {
     };
   }
 
+  /** Share notifications and per-user settings (migration 015). */
+  private notificationQuery(s: string, params: P): Row[] | undefined {
+    const ts = (v: unknown) => Date.parse(String(v).trim().replace(' ', 'T').slice(0, 23) + 'Z');
+    const optedIn = (uid: unknown) => this.userSettings.get(String(uid))?.SHARE_EMAILS !== 0;
+    if (/^SELECT SHARE_EMAILS FROM \w+\.QF_USER_SETTINGS WHERE USER_ID = \?$/.test(s)) {
+      const r = this.userSettings.get(String(params[0]));
+      return r ? [{ SHARE_EMAILS: r.SHARE_EMAILS }] : [];
+    }
+    if (/^SELECT DISPLAY_NAME FROM \w+\.QF_USERS WHERE USER_ID = \?$/.test(s)) {
+      const u = this.users.get(String(params[0]));
+      return u ? [{ DISPLAY_NAME: u.DISPLAY_NAME }] : [];
+    }
+    if (
+      /^SELECT U\.USER_ID, U\.DISPLAY_NAME, U\.EMAIL FROM \w+\.QF_USERS U WHERE U\.IS_ACTIVE = 1 AND U\.EMAIL IS NOT NULL AND U\.USER_ID IN \([?, ]+\) AND NOT EXISTS \(SELECT 1 FROM \w+\.QF_USER_SETTINGS X WHERE X\.USER_ID = U\.USER_ID AND X\.SHARE_EMAILS = 0\)$/.test(
+        s,
+      )
+    )
+      return [...this.users.values()]
+        .filter(
+          (u) =>
+            u.IS_ACTIVE === 1 &&
+            u.EMAIL !== null &&
+            params.includes(u.USER_ID as string) &&
+            optedIn(u.USER_ID),
+        )
+        .map((u) => ({ USER_ID: u.USER_ID, DISPLAY_NAME: u.DISPLAY_NAME, EMAIL: u.EMAIL }));
+    if (
+      /^SELECT G\.GROUP_NAME, U\.USER_ID, U\.DISPLAY_NAME, U\.EMAIL FROM \w+\.QF_USER_GROUPS G JOIN \w+\.QF_USERS U ON U\.USER_ID = G\.USER_ID WHERE G\.GROUP_NAME IN \([?, ]+\) AND U\.IS_ACTIVE = 1 AND U\.EMAIL IS NOT NULL AND NOT EXISTS \(SELECT 1 FROM \w+\.QF_USER_SETTINGS X WHERE X\.USER_ID = U\.USER_ID AND X\.SHARE_EMAILS = 0\) ORDER BY G\.GROUP_NAME, U\.USER_ID FETCH FIRST (\d+) ROWS ONLY$/.test(
+        s,
+      )
+    ) {
+      const n = Number(/FETCH FIRST (\d+) ROWS/.exec(s)![1]);
+      const out: Row[] = [];
+      for (const g of [...this.userGroups.values()].sort(
+        (a, b) =>
+          String(a.GROUP_NAME).localeCompare(String(b.GROUP_NAME)) ||
+          String(a.USER_ID).localeCompare(String(b.USER_ID)),
+      )) {
+        const u = this.users.get(String(g.USER_ID));
+        if (!params.includes(g.GROUP_NAME as string) || !u) continue;
+        if (u.IS_ACTIVE !== 1 || u.EMAIL === null || !optedIn(u.USER_ID)) continue;
+        out.push({
+          GROUP_NAME: g.GROUP_NAME,
+          USER_ID: u.USER_ID,
+          DISPLAY_NAME: u.DISPLAY_NAME,
+          EMAIL: u.EMAIL,
+        });
+      }
+      return out.slice(0, n);
+    }
+    const due =
+      /^SELECT S\.(REPORT_ID|FOLDER_ID) AS TARGET_ID, S\.PRINCIPAL_TYPE, S\.PRINCIPAL_ID, S\.SHARE_ROLE, S\.EXPIRES_AT, T\.(REPORT_NAME|FOLDER_NAME) AS TARGET_NAME, T\.OWNER_ID FROM \w+\.(QF_REPORT_SHARES|QF_FOLDER_SHARES) S JOIN \w+\.(QF_REPORTS|QF_FOLDERS) T ON T\.\1 = S\.\1 WHERE S\.EXPIRES_AT > CAST\(\? AS TIMESTAMP\) AND S\.EXPIRES_AT <= CAST\(\? AS TIMESTAMP\) AND NOT EXISTS \(SELECT 1 FROM \w+\.QF_SHARE_REMINDERS M WHERE M\.SHARE_KIND = '(REPORT|FOLDER)' AND M\.TARGET_ID = S\.\1 AND M\.PRINCIPAL_TYPE = S\.PRINCIPAL_TYPE AND M\.PRINCIPAL_ID = S\.PRINCIPAL_ID AND M\.EXPIRES_AT = S\.EXPIRES_AT AND \(M\.STATUS <> 'FAILED' OR M\.ATTEMPTS >= (\d+)\)\) ORDER BY S\.EXPIRES_AT FETCH FIRST (\d+) ROWS ONLY$/.exec(
+        s,
+      );
+    if (due) {
+      const [, key, nameCol, , , kind, maxAttempts, limit] = due;
+      const [from, until] = params.map(ts);
+      const rows = kind === 'REPORT' ? this.shares : this.folderShares;
+      const targets: Map<string, Row> = kind === 'REPORT' ? this.reports : this.folders;
+      return rows
+        .filter((x) => x.EXPIRES_AT !== null && x.EXPIRES_AT !== undefined)
+        .filter((x) => ts(x.EXPIRES_AT) > from && ts(x.EXPIRES_AT) <= until)
+        .filter((x) => targets.has(String(x[key])))
+        .filter(
+          (x) =>
+            !this.shareReminders.some(
+              (m) =>
+                m.SHARE_KIND === kind &&
+                m.TARGET_ID === x[key] &&
+                m.PRINCIPAL_TYPE === x.PRINCIPAL_TYPE &&
+                m.PRINCIPAL_ID === x.PRINCIPAL_ID &&
+                ts(m.EXPIRES_AT) === ts(x.EXPIRES_AT) &&
+                (m.STATUS !== 'FAILED' || Number(m.ATTEMPTS) >= Number(maxAttempts)),
+            ),
+        )
+        .sort((a, b) => ts(a.EXPIRES_AT) - ts(b.EXPIRES_AT))
+        .slice(0, Number(limit))
+        .map((x) => {
+          const t = targets.get(String(x[key]))!;
+          return {
+            TARGET_ID: x[key],
+            PRINCIPAL_TYPE: x.PRINCIPAL_TYPE,
+            PRINCIPAL_ID: x.PRINCIPAL_ID,
+            SHARE_ROLE: x.SHARE_ROLE,
+            EXPIRES_AT: x.EXPIRES_AT,
+            TARGET_NAME: t[nameCol],
+            OWNER_ID: t.OWNER_ID,
+          };
+        });
+    }
+    return undefined;
+  }
+
+  private notificationUpdate(s: string, params: P): number | undefined {
+    const ts = (v: unknown) => Date.parse(String(v).trim().replace(' ', 'T').slice(0, 23) + 'Z');
+    if (
+      /^UPDATE \w+\.QF_USER_SETTINGS SET SHARE_EMAILS = \?, UPDATED_AT = .* WHERE USER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      const r = this.userSettings.get(String(params[1]));
+      if (!r) return 0;
+      Object.assign(r, { SHARE_EMAILS: params[0], UPDATED_AT: this.now() });
+      return 1;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_USER_SETTINGS \(USER_ID, SHARE_EMAILS, UPDATED_AT\) VALUES \(\?, \?, /.test(
+        s,
+      )
+    ) {
+      const [uid, v] = params;
+      if (this.userSettings.has(String(uid)))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      if (!this.users.has(String(uid))) throw new DbError('Foreign key violation.', '23503', -530);
+      if (v !== 0 && v !== 1) throw new DbError('Check constraint.', '23513', -545);
+      this.userSettings.set(String(uid), { USER_ID: uid, SHARE_EMAILS: v, UPDATED_AT: this.now() });
+      return 1;
+    }
+    const same = (m: Row, k: P) =>
+      m.SHARE_KIND === k[0] &&
+      m.TARGET_ID === k[1] &&
+      m.PRINCIPAL_TYPE === k[2] &&
+      m.PRINCIPAL_ID === k[3] &&
+      ts(m.EXPIRES_AT) === ts(k[4]);
+    if (
+      /^INSERT INTO \w+\.QF_SHARE_REMINDERS \(REMINDER_ID, SHARE_KIND, TARGET_ID, PRINCIPAL_TYPE, PRINCIPAL_ID, EXPIRES_AT, STATUS, ATTEMPTS, RECIPIENT_COUNT, CLAIMED_BY, CREATED_AT, UPDATED_AT\) VALUES \(\?, \?, \?, \?, \?, \?, 'CLAIMED', 1, 0, \?, /.test(
+        s,
+      )
+    ) {
+      const [id, ...rest] = params;
+      const k = rest.slice(0, 5);
+      if (this.shareReminders.some((m) => same(m, k)))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      this.shareReminders.push({
+        REMINDER_ID: id,
+        SHARE_KIND: k[0],
+        TARGET_ID: k[1],
+        PRINCIPAL_TYPE: k[2],
+        PRINCIPAL_ID: k[3],
+        EXPIRES_AT: k[4],
+        STATUS: 'CLAIMED',
+        ATTEMPTS: 1,
+        RECIPIENT_COUNT: 0,
+        CLAIMED_BY: rest[5],
+        LAST_ERROR: null,
+        CREATED_AT: this.now(),
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
+    const retry =
+      /^UPDATE \w+\.QF_SHARE_REMINDERS SET STATUS = 'CLAIMED', ATTEMPTS = ATTEMPTS \+ 1, CLAIMED_BY = \?, UPDATED_AT = .* WHERE SHARE_KIND = \? AND TARGET_ID = \? AND PRINCIPAL_TYPE = \? AND PRINCIPAL_ID = \? AND EXPIRES_AT = \? AND STATUS = 'FAILED' AND ATTEMPTS < (\d+)$/.exec(
+        s,
+      );
+    if (retry) {
+      const [by, ...k] = params;
+      const m = this.shareReminders.find(
+        (x) => same(x, k) && x.STATUS === 'FAILED' && Number(x.ATTEMPTS) < Number(retry[1]),
+      );
+      if (!m) return 0;
+      Object.assign(m, {
+        STATUS: 'CLAIMED',
+        ATTEMPTS: Number(m.ATTEMPTS) + 1,
+        CLAIMED_BY: by,
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
+    if (
+      /^UPDATE \w+\.QF_SHARE_REMINDERS SET STATUS = \?, RECIPIENT_COUNT = \?, LAST_ERROR = \?, UPDATED_AT = .* WHERE SHARE_KIND = \? AND TARGET_ID = \? AND PRINCIPAL_TYPE = \? AND PRINCIPAL_ID = \? AND EXPIRES_AT = \? AND CLAIMED_BY = \?$/.test(
+        s,
+      )
+    ) {
+      const [status, count, err, ...rest] = params;
+      const k = rest.slice(0, 5);
+      const m = this.shareReminders.find((x) => same(x, k) && x.CLAIMED_BY === rest[5]);
+      if (!m) return 0;
+      if (!['CLAIMED', 'SENT', 'SKIPPED', 'FAILED'].includes(String(status)))
+        throw new DbError('Check constraint.', '23513', -545);
+      Object.assign(m, {
+        STATUS: status,
+        RECIPIENT_COUNT: count,
+        LAST_ERROR: err,
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
+    return undefined;
+  }
+
   async query<T>(sql: string, params: P = []): Promise<T[]> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
     if (s.startsWith('SELECT 1 AS OK')) return [{ OK: 1 }] as T[];
+    const notificationRows = this.notificationQuery(s, params);
+    if (notificationRows) return notificationRows as T[];
     const deletionRows = this.folderDeletionQuery(s, params);
     if (deletionRows) return deletionRows as T[];
     const folderRows = this.folderQuery(s, params);
@@ -942,6 +1138,8 @@ export class FakeMetadataDb implements MetadataDb {
   async update(sql: string, params: P = []): Promise<number> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
+    const notificationN = this.notificationUpdate(s, params);
+    if (notificationN !== undefined) return notificationN;
     const deletionN = this.folderDeletionUpdate(s, params);
     if (deletionN !== undefined) return deletionN;
     const folderN = this.folderUpdate(s, params);
@@ -1495,6 +1693,8 @@ export class FakeMetadataDb implements MetadataDb {
       scheduleDeliveries: this.scheduleDeliveries.map((x) => ({ ...x })),
       folderReportSharing: new Map([...this.folderReportSharing].map(([k, v]) => [k, { ...v }])),
       folderDeletions: this.folderDeletions.map((x) => ({ ...x })),
+      shareReminders: this.shareReminders.map((x) => ({ ...x })),
+      userSettings: new Map([...this.userSettings].map(([k, v]) => [k, { ...v }])),
     };
     try {
       return await fn(this);
@@ -1516,6 +1716,8 @@ export class FakeMetadataDb implements MetadataDb {
       this.scheduleDeliveries = snapshot.scheduleDeliveries;
       this.folderReportSharing = snapshot.folderReportSharing;
       this.folderDeletions = snapshot.folderDeletions;
+      this.shareReminders = snapshot.shareReminders;
+      this.userSettings = snapshot.userSettings;
       throw e;
     }
   }

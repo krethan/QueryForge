@@ -279,7 +279,19 @@ export type FolderShareReports = 'VIEWER' | 'EDITOR' | null;
 /** Why a report in a folder is not shared through it. */
 export type FolderReportSkipReason = 'NOT_OWNER' | 'ADDED_BY_OTHER';
 /** GET/PUT /folders/:id/shares (owner; admins may read). */
+/** What the server did about "Notify people" when shares were saved (migration 015). */
+export type NotifyOutcome = 'QUEUED' | 'NONE' | 'OFF' | 'MAIL_NOT_CONFIGURED';
+/** GET / PUT /api/account/settings. */
+export interface AccountSettings {
+  settings: { shareEmails: boolean };
+  /** The account has an e-mail address to send to. */
+  hasEmail: boolean;
+  /** The server can send e-mail (SMTP is set up); never any SMTP setting itself. */
+  mailConfigured: boolean;
+}
 export interface FolderSharing {
+  /** Whether the server can send e-mail, for the "Notify people" option (migration 015). */
+  mailConfigured?: boolean;
   shares: Share[];
   shareReports: FolderShareReports;
   /** The reports in the folder the caller can see: shared (or would be) through it, or skipped. */

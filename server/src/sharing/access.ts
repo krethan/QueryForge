@@ -186,6 +186,11 @@ export const sharesInputSchema = z.object({
       }),
     )
     .max(200),
+  /**
+   * E-mail the people who gain a share or whose role changes (migration 015). The Share dialog
+   * sends true by default ("Notify people"); leaving it out sends nothing.
+   */
+  notify: z.boolean().optional(),
 });
 
 const RANK: Record<AccessRole, number> = { VIEWER: 1, EDITOR: 2, OWNER: 3, ADMIN: 2 };
@@ -300,6 +305,8 @@ export class AccessService {
     by: string,
     shares: z.infer<typeof sharesInputSchema>['shares'],
     userExists: (id: string) => Promise<boolean>,
+    /** Called with the committed changes (for share notifications, migration 015). */
+    onCommitted?: (changes: ShareChange[]) => void,
   ): Promise<Share[]> {
     const seen = new Set<string>();
     for (const s of shares) {
@@ -316,7 +323,7 @@ export class AccessService {
         throw new AppError(400, 'BAD_GROUP', `"${s.id}" is not a valid group name.`);
       }
     }
-    await this.db.transaction(async (tx) => {
+    const committed = await this.db.transaction(async (tx) => {
       const current = shareStates(
         await tx.query<ShareRow>(
           `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM ${this.shares} WHERE REPORT_ID = ?`,
@@ -351,7 +358,9 @@ export class AccessService {
            VALUES (?, ?, ?, ?, ?, ?, ${NOW_UTC})`,
           [report.id, s.type, s.id, s.role, expiryParam(s.expiresAt), by],
         );
+      return events;
     });
+    onCommitted?.(committed);
     return this.listShares(report.id);
   }
 

@@ -118,7 +118,11 @@ describe('Share dialog end dates', () => {
     expect(screen.queryByText(/has expired/)).not.toBeInTheDocument();
     await userEvent.click(save);
     await waitFor(() =>
-      expect(put).toHaveBeenCalledWith('r1', [expect.objectContaining({ expiresAt: future })]),
+      expect(put).toHaveBeenCalledWith(
+        'r1',
+        [expect.objectContaining({ expiresAt: future })],
+        true,
+      ),
     );
     expect(onClose).toHaveBeenCalledWith(true);
   });
@@ -141,7 +145,7 @@ describe('Share dialog end dates', () => {
     expect(date.value).toBe('');
     await userEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
     await waitFor(() =>
-      expect(put).toHaveBeenCalledWith('r1', [expect.objectContaining({ expiresAt: null })]),
+      expect(put).toHaveBeenCalledWith('r1', [expect.objectContaining({ expiresAt: null })], true),
     );
   });
 
@@ -183,6 +187,7 @@ describe('Share dialog end dates', () => {
           }),
         ],
         null,
+        true,
       ),
     );
   });

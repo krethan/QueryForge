@@ -8,6 +8,7 @@ import { dbTimestampToIso } from '../util/time.js';
 import { FOLDER_NOT_FOUND, type Folder, type FolderRepository } from '../reports/folders.js';
 import {
   diffShares,
+  type ShareChange,
   liveShares,
   resolveShareExpiries,
   shareStates,
@@ -543,6 +544,8 @@ export class FolderAccessService {
     userExists: (id: string) => Promise<boolean>,
     /** Also set the owner's "share the reports" option (migration 011); undefined leaves it. */
     shareReports?: ShareRole | null,
+    /** Called with the committed share changes (for share notifications, migration 015). */
+    onCommitted?: (changes: ShareChange[]) => void,
   ): Promise<Share[]> {
     const seen = new Set<string>();
     for (const s of shares) {
@@ -559,7 +562,7 @@ export class FolderAccessService {
         throw new AppError(400, 'BAD_GROUP', `"${s.id}" is not a valid group name.`);
       }
     }
-    await this.db.transaction(async (tx) => {
+    const committed = await this.db.transaction(async (tx) => {
       const current = shareStates(
         await tx.query<ShareRow>(
           `SELECT PRINCIPAL_TYPE, PRINCIPAL_ID, SHARE_ROLE, EXPIRES_AT FROM ${this.shares} WHERE FOLDER_ID = ?`,
@@ -630,7 +633,9 @@ export class FolderAccessService {
             [folder.id, shareReports, by],
           );
       }
+      return events;
     });
+    onCommitted?.(committed);
     return this.listShares(folder.id);
   }
 

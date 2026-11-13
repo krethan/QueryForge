@@ -33,6 +33,9 @@ import { FolderAccessService } from '../../src/sharing/folder-access.js';
 import { GroupRepository } from '../../src/sharing/groups.js';
 import { QueryExecutor } from '../../src/sql/executor.js';
 import { toDbError } from '../../src/util/errors.js';
+import { MemoryMailer } from '../../src/mail/mailer.js';
+import { ShareNotifier } from '../../src/notifications/share-notifier.js';
+import { UserSettingsRepository } from '../../src/notifications/settings.js';
 import {
   confinedFactory,
   PolicyViolation,
@@ -1087,6 +1090,25 @@ async function metadataQueries(job: SqlJobLike, rec: Recorder, schema: string) {
         );
       },
     ],
+    [
+      'Share notifications (migration 015: reminders due, per-user settings)',
+      async () => {
+        const notifier = new ShareNotifier(db, schema, {
+          notifications: {
+            publicBaseUrl: 'https://verify.invalid',
+            reminderDays: 3,
+            reminderToRecipient: false,
+            timezone: 'UTC',
+          },
+          scheduler: { recipientDomains: [] },
+        });
+        // a window in 1970: exercises the SQL (TIMESTAMP casts, NOT EXISTS) and matches no share
+        const t = new Date(0);
+        await notifier.pendingReminders('REPORT', t, new Date(1000));
+        await notifier.pendingReminders('FOLDER', t, new Date(1000));
+        await new UserSettingsRepository(db, schema).get(nobody);
+      },
+    ],
     ['Dashboard tile order', () => new TileOrderRepository(db, schema).positions(nobody)],
     [
       'Schedules, due runs and delivery history',
@@ -1248,6 +1270,47 @@ async function smokeTest(
         r.before === 'VIEWER' && r.atExpiry === null && !r.listedAfter
           ? undefined
           : `Role a second before: ${r.before}; at expiry: ${r.atExpiry}; listed after: ${r.listedAfter}. Expected VIEWER, null, false.`,
+    );
+    // Share notifications (migration 015): the folder share above ends within the hour, so one
+    // reminder is due. Two runs (two "instances") must claim it once: the unique key decides.
+    // Mail goes to an in-memory mailer only; nothing is sent.
+    await step(
+      'Claim a share expiry reminder exactly once (QF_SHARE_REMINDERS unique key, migration 015)',
+      async () => {
+        const make = () =>
+          new ShareNotifier(
+            db,
+            schema,
+            { ...cfg, notifications: { ...cfg.notifications, reminderDays: 1 } },
+            new MemoryMailer(),
+          );
+        const first = await make().runReminders(new Date(), 'ubverify-a');
+        const second = await make().runReminders(new Date(), 'ubverify-b');
+        const rows = await db.query<{ N: number }>(
+          `SELECT COUNT(*) AS N FROM ${schema}.${T.shareReminders} WHERE TARGET_ID = ?`,
+          [folder.id],
+        );
+        return { first, second, rows: Number(rows[0]?.N ?? 0) };
+      },
+      (r) =>
+        r.first.sent + r.first.skipped === 1 &&
+        r.second.sent + r.second.skipped + r.second.failed === 0 &&
+        r.rows === 1
+          ? undefined
+          : `First run ${JSON.stringify(r.first)}, second run ${JSON.stringify(r.second)}, rows ${r.rows}; expected one reminder claimed once.`,
+    );
+    await step(
+      'Save and change a per-user setting (QF_USER_SETTINGS, migration 015)',
+      async () => {
+        const settings = new UserSettingsRepository(db, schema);
+        const off = await settings.set(owner.b.id, { shareEmails: false });
+        const on = await settings.set(owner.b.id, { shareEmails: true });
+        return { off: off.shareEmails, on: on.shareEmails };
+      },
+      (r) =>
+        r.off === false && r.on === true
+          ? undefined
+          : `Read back ${JSON.stringify(r)}; expected off then on.`,
     );
     await step(
       'Check constraint rejects an unknown audit principal type',

@@ -11,7 +11,7 @@ const metadataDb = new MapepireMetadataDb(cfg);
 const staticDir =
   process.env.STATIC_DIR ??
   join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
-const { app, scheduler, executor } = createApp({ cfg, metadataDb, staticDir });
+const { app, scheduler, executor, notifier } = createApp({ cfg, metadataDb, staticDir });
 
 const server = app.listen(cfg.port, cfg.host, () => {
   console.log(
@@ -34,6 +34,7 @@ if (cfg.scheduler.enabled) {
 const shutdown = async () => {
   server.close();
   await scheduler.stop();
+  await notifier.idle();
   await executor.shutdown();
   await metadataDb.close();
   process.exit(0);

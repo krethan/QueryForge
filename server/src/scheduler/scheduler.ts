@@ -9,6 +9,7 @@ import { sanitizeErrorMessage } from '../util/errors.js';
 import { nextRun } from './cron.js';
 import type { RecipientService } from './recipients.js';
 import type { DeliveryTrigger, Schedule, ScheduleRepository } from './schedules.js';
+import type { ShareNotifier } from '../notifications/share-notifier.js';
 
 export const SCHEDULER_LOCK = 'SCHEDULER';
 const CHART_CID = 'chart@uncle-bob';
@@ -65,6 +66,8 @@ export class Scheduler {
     private readonly execution: ExecutionService,
     private readonly mailer: Mailer | undefined,
     private readonly recipients: RecipientService,
+    /** Share expiry reminders (migration 015), sent by the leader after the due schedules. */
+    private readonly notifier?: ShareNotifier,
   ) {}
 
   start() {
@@ -107,6 +110,7 @@ export class Scheduler {
         ran.push(s.id);
         await this.run(s, { trigger: 'SCHEDULE', ranAt: now });
       }
+      if (this.notifier) await this.notifier.runReminders(now, this.instanceId);
     } catch (e) {
       console.error('scheduler tick failed:', sanitizeErrorMessage(e));
     } finally {

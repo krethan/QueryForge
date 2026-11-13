@@ -42,7 +42,9 @@ import {
   describeCadence,
 } from '../scheduler/cadence.js';
 import type { RecipientService } from '../scheduler/recipients.js';
-import { sharesInputSchema, type AccessService } from '../sharing/access.js';
+import { sharesInputSchema, type AccessService, type ShareChange } from '../sharing/access.js';
+import type { ShareNotifier } from '../notifications/share-notifier.js';
+import type { UserSettingsRepository } from '../notifications/settings.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
 import type { AccessibleReport, Report } from '../reports/reports.js';
 import {
@@ -147,6 +149,8 @@ export interface ApiDeps {
   scheduler: Scheduler;
   recipients: RecipientService;
   mailer?: Mailer;
+  notifier: ShareNotifier;
+  userSettings: UserSettingsRepository;
   oidc?: OidcProvider;
   ldap?: LdapAuthenticator;
 }
@@ -1317,6 +1321,8 @@ export function apiRouter(d: ApiDeps): Router {
       shares,
       shareReports: setting.get(folder.id) ?? null,
       reports: { included, skipped },
+      // Only whether e-mail is set up, for the "Notify people" option; never any SMTP setting.
+      mailConfigured: d.notifier.mailConfigured,
     };
   };
   /** The report must exist and be visible to the caller, else 404 (never 403: no leak). */
@@ -1380,16 +1386,25 @@ export function apiRouter(d: ApiDeps): Router {
   r.put(
     '/folders/:folderId/shares',
     h(async (req, res) => {
-      const { shares, shareReports } = folderSharesInputSchema.parse(req.body);
+      const { shares, shareReports, notify } = folderSharesInputSchema.parse(req.body);
       const { folder } = await d.folderAccess.require(user(req), folderId(req), 'OWNER');
+      let changes: ShareChange[] = [];
       await d.folderAccess.replaceShares(
         folder,
         user(req).id,
         shares,
         async (id) => Boolean(await d.users.findById(id)),
         shareReports,
+        (c) => (changes = c),
       );
-      res.json(await folderSharing(user(req), folder));
+      // E-mails go out after the commit, in the background; the outcome only says what happened.
+      const notification = d.notifier.notifyChanges(
+        { kind: 'FOLDER', id: folder.id, name: folder.name, ownerId: folder.ownerId },
+        user(req),
+        changes,
+        notify === true,
+      );
+      res.json({ ...(await folderSharing(user(req), folder)), notification });
     }),
   );
   /**
@@ -1959,18 +1974,30 @@ export function apiRouter(d: ApiDeps): Router {
         d.folderGrants.grantsForReport(report),
       ]);
       // folderGrants: read-only here; they change with the folder, not the report's shares
-      res.json({ shares, folderGrants });
+      res.json({ shares, folderGrants, mailConfigured: d.notifier.mailConfigured });
     }),
   );
   r.put(
     '/reports/:id/shares',
     h(async (req, res) => {
-      const { shares } = sharesInputSchema.parse(req.body);
+      const { shares, notify } = sharesInputSchema.parse(req.body);
       const { report } = await d.access.require(user(req), reportId(req), 'OWNER');
-      const out = await d.access.replaceShares(report, user(req).id, shares, async (id) =>
-        Boolean(await d.users.findById(id)),
+      let changes: ShareChange[] = [];
+      const out = await d.access.replaceShares(
+        report,
+        user(req).id,
+        shares,
+        async (id) => Boolean(await d.users.findById(id)),
+        (c) => (changes = c),
       );
-      res.json({ shares: out });
+      // E-mails go out after the commit, in the background; the outcome only says what happened.
+      const notification = d.notifier.notifyChanges(
+        { kind: 'REPORT', id: report.id, name: report.name, ownerId: report.ownerId },
+        user(req),
+        changes,
+        notify === true,
+      );
+      res.json({ shares: out, notification });
     }),
   );
   r.get(
@@ -2005,6 +2032,25 @@ export function apiRouter(d: ApiDeps): Router {
       const term = typeof req.query.search === 'string' ? req.query.search.slice(0, 64) : '';
       if (term.trim().length < 1) return res.json({ users: [] });
       res.json({ users: (await d.users.search(term)).filter((u) => u.id !== user(req).id) });
+    }),
+  );
+  // ---- account settings (migration 015) ----
+  const accountSettings = async (u: Pick<AppUser, 'id'>) => {
+    const [settings, me] = await Promise.all([d.userSettings.get(u.id), d.users.findById(u.id)]);
+    return { settings, hasEmail: Boolean(me?.email), mailConfigured: d.notifier.mailConfigured };
+  };
+  r.get(
+    '/account/settings',
+    h(async (req, res) => {
+      res.json(await accountSettings(user(req)));
+    }),
+  );
+  r.put(
+    '/account/settings',
+    h(async (req, res) => {
+      const body = z.object({ shareEmails: z.boolean() }).strict().parse(req.body);
+      await d.userSettings.set(user(req).id, body);
+      res.json(await accountSettings(user(req)));
     }),
   );
   r.get(

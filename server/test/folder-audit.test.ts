@@ -92,7 +92,7 @@ describe('migration 012: folder audit report-sharing rows', () => {
   const m = migs.find((x) => x.version === 12)!;
   const sql = m.statements.join('\n');
   it('comes after 011 and only replaces the PRINCIPAL_TYPE check on the folder audit table', () => {
-    expect(migs.map((x) => x.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(migs.map((x) => x.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     expect(m.file).toBe('012_folder_audit_report_sharing.sql');
     expect(m.statements).toHaveLength(2);
     expect(m.statements[0]).toBe(

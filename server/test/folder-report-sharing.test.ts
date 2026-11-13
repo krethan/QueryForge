@@ -113,7 +113,7 @@ describe('migration 011: folder report sharing', () => {
   const m = migs.find((x) => x.version === 11)!;
   const sql = m.statements.join('\n');
   it('comes after 010 and only adds one QF_ table', () => {
-    expect(migs.map((x) => x.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(migs.map((x) => x.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     expect(m.statements.filter((x) => /^CREATE TABLE/.test(x))).toHaveLength(1);
     expect(sql).toContain('CREATE TABLE QFMETA.QF_FOLDER_REPORT_SHARING');
     for (const st of m.statements) expect(st).toMatch(/^(CREATE TABLE|LABEL ON)/);

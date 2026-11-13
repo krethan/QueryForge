@@ -76,6 +76,7 @@ describe('Folder share dialog: sharing the reports in the folder', () => {
         FIN,
         [expect.objectContaining({ type: 'USER', id: 'u-bob', role: 'EDITOR' })],
         null,
+        true,
       ),
     );
     expect(onClose).toHaveBeenCalledWith(true);
@@ -108,7 +109,7 @@ describe('Folder share dialog: sharing the reports in the folder', () => {
     ).toBeInTheDocument();
     await userEvent.click(screen.getByLabelText(/Match their folder access/));
     await userEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
-    await waitFor(() => expect(put).toHaveBeenCalledWith(FIN, expect.any(Array), 'EDITOR'));
+    await waitFor(() => expect(put).toHaveBeenCalledWith(FIN, expect.any(Array), 'EDITOR', true));
   });
 
   it('shows the saved option and can turn it off', async () => {
@@ -125,7 +126,7 @@ describe('Folder share dialog: sharing the reports in the folder', () => {
     await userEvent.click(toggle());
     expect(screen.queryByRole('radiogroup')).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
-    await waitFor(() => expect(put).toHaveBeenCalledWith(FIN, expect.any(Array), null));
+    await waitFor(() => expect(put).toHaveBeenCalledWith(FIN, expect.any(Array), null, true));
   });
 
   it('shows the server’s refusal and stays open', async () => {
@@ -171,7 +172,7 @@ describe('Report sharing: access through folders', () => {
     // folder access has no role pickers or remove buttons
     expect(screen.queryByRole('button', { name: 'Remove access' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
-    expect(save).toHaveBeenCalledWith('r1', []);
+    expect(save).toHaveBeenCalledWith('r1', [], true);
   });
 
   it('shows folder access in the access and audit panel', async () => {

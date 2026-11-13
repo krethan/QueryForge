@@ -136,6 +136,9 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 | `SCHEDULE_DEFAULT_TIMEZONE`                 | UTC             | IANA zone pre-selected in the editor                                                                                                                                                            |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE`   | — / 587 / false | `SMTP_SECURE=false` means STARTTLS is **required** (no plaintext fallback)                                                                                                                      |
 | `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | —               | Credentials and sender                                                                                                                                                                          |
+| `QF_PUBLIC_BASE_URL`                        | `APP_ORIGIN`    | Public address used for links in e-mails (http/https only); never taken from the request                                                                                                        |
+| `QF_SHARE_REMINDER_DAYS`                    | 3               | Days before a share ends that its owner gets a reminder; `0` turns reminders off                                                                                                                |
+| `QF_SHARE_REMINDER_TO_RECIPIENT`            | false           | Also remind the people whose access is ending                                                                                                                                                   |
 | `SMTP_REJECT_UNAUTHORIZED` / `SMTP_CA_FILE` | true / —        | TLS verification                                                                                                                                                                                |
 
 ## Exact numbers
@@ -687,7 +690,8 @@ as an **End date** (`EXPIRY`) event with the old and new date, in the report's a
 audit panels and in the folder audit CSV (**Expiry before (UTC)** / **Expiry after (UTC)** columns).
 Scheduled delivery skips a recipient whose access has expired and records it in the run's history
 ("Not sent to …: their access has expired."); saving a schedule to such a recipient is refused until the
-share is renewed. Nobody is notified when a share expires. The demo seeds one expired and one expiring
+share is renewed. The owner gets a reminder e-mail a few days before a share ends (see
+[Share notifications](#share-notifications)). The demo seeds one expired and one expiring
 share on "Customer Credit Limits".
 
 Storage is migration `014_share_expiry.sql`: nullable `EXPIRES_AT` columns on `QF_REPORT_SHARES` and
@@ -697,6 +701,51 @@ end date), so nothing changes until an owner sets one. Adding columns rebuilds t
 exclusive lock, so apply it in a quiet window. No index is added: share lists are small and per report or
 folder. **Not tested on a real IBM i:** migration 014 and the end-date checks have only run against the
 in-memory fake metadata database; `npm run verify:ibmi` covers them for a non-production partition.
+
+## Share notifications
+
+**Notify people.** The report and folder **Share** dialogs have a **Notify people by e-mail** checkbox,
+on by default. When you save with it on, everyone who gains a share or whose role changes gets one
+e-mail: who shared what (report or folder name), the access (Viewer or Editor) and what it allows, the
+end date if there is one, and a link to Uncle Bob. Group shares are sent to each member with an e-mail
+address. You (the sharer) and the owner are never e-mailed, a person reached by both a direct and a
+group share gets one e-mail, removals and end-date-only changes send nothing, and a share that is
+already expired is not announced. The e-mail never contains report data, SQL or results. The e-mails
+go out after the shares are saved, in the background, one message per person (so recipients don't see
+each other's addresses); a failing mail server is logged and never fails or undoes the share. The
+API only sends when the request says `"notify": true` (`PUT /api/reports/:id/shares` and
+`PUT /api/folders/:id/shares`); the response's `notification` is `QUEUED`, `NONE` (nothing to announce),
+`OFF` or `MAIL_NOT_CONFIGURED`.
+
+**End-date reminders.** On each scheduler poll (`SCHEDULER_ENABLED=true`, leader only) a share ending
+within `QF_SHARE_REMINDER_DAYS` (default 3) gets one reminder e-mail to the report or folder owner, and
+with `QF_SHARE_REMINDER_TO_RECIPIENT=true` also to the people whose access is ending (groups expanded).
+Each reminder is recorded in `QF_SHARE_REMINDERS` **before** it is sent; the row's unique key (kind,
+report or folder, user or group, end date) is the claim, so a restart or a second app instance never
+sends it twice. Changing the end date allows one new reminder for the new date. A send that fails is
+retried on later polls, up to three attempts. A share that has already ended, or has no end date, is
+never reminded about.
+
+**Opting out.** **Account → Notifications → E-mail me about shares** turns off all of these e-mails for
+you (being given access, role changes and reminders). It is stored in `QF_USER_SETTINGS`; no row means
+on. Addresses outside `SCHEDULE_RECIPIENT_DOMAINS` are skipped when that allow-list is set.
+
+**Without SMTP** sharing works exactly as before: the dialog says e-mail isn't set up and disables the
+checkbox, the server skips the e-mail and logs one line, and reminders are not claimed (so they still go
+out once mail is configured, if the share hasn't ended). Links use `QF_PUBLIC_BASE_URL`, or
+`APP_ORIGIN` when it is not set, and never the request's `Host` header. Names, report and folder names
+are HTML-escaped in the HTML part, and control characters (including line breaks) are removed from the
+subject and text, so a name cannot inject markup or mail headers.
+
+Storage is migration `015_share_notifications.sql`, additive only: new tables `QF_SHARE_REMINDERS`
+(unique `QF_SREM_UQ_SHARE`, index `QF_SREM_IX_TIME`, no foreign keys so a row outlives the share) and
+`QF_USER_SETTINGS` (foreign key to `QF_USERS`, `ON DELETE CASCADE`). Nothing existing is altered.
+**Not tested on a real IBM i or a real mail server:** the notifications, the reminder claims and
+migration 015 have only run against the in-memory fake metadata database, the in-memory mailer and the
+demo. Limitations: e-mail only (no in-app notification list), no digest (one e-mail per save per person,
+one per reminder), at most 500 group members per save, reminder rows are kept with no retention limit,
+and a reminder that was claimed but whose app instance stopped before sending is not sent (at most
+once, never twice).
 
 ## Rearranging dashboard tiles
 
@@ -796,8 +845,8 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Folders and favorites: there is no bulk move (one report at a time) and no dragging a tile into a
   folder, and no nested folders. Migration 006 has not been applied to a real Db2 for i.
 - Shared folders: unless the owner shares the folder's reports too, people may see an emptier folder
-  than the owner. There is no folder access/audit panel in the UI yet (the API has one), no notification
-  when a folder is shared with you, and no share expiry.
+  than the owner. Notifications about folder shares are e-mail only (see
+  [Share notifications](#share-notifications)).
 - Folder audit export and deletion audit: deleted-folder records are admin-only, are kept forever (no retention or purge), and only cover deletions made through Uncle Bob after
   migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+); the Deleted folders
   screen has no search, filter or sort and does not show a total count (the API returns only `hasMore`). The CSV export's
