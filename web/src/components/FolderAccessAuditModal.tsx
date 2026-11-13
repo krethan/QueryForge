@@ -5,6 +5,8 @@ import { api } from '../api/client';
 import type { Folder, FolderAccess, FolderShareAuditEvent } from '../api/types';
 import { formatDateTime } from '../utils/format';
 import { ErrorNotice } from './ErrorNotice';
+import { ShareUntil } from './AccessAuditModal';
+import { describeExpiryChange, formatLastDay } from '../utils/expiry';
 
 type Role = 'VIEWER' | 'EDITOR' | null;
 
@@ -22,6 +24,11 @@ export function folderEventTarget(e: FolderShareAuditEvent): string {
 
 /** Before / after, in the words of the row's kind. */
 export function folderEventRoles(e: FolderShareAuditEvent): { before: string; after: string } {
+  if (e.action === 'EXPIRY')
+    return {
+      before: e.oldExpiresAt ? `until ${formatLastDay(e.oldExpiresAt)}` : 'No end date',
+      after: e.newExpiresAt ? `until ${formatLastDay(e.newExpiresAt)}` : 'No end date',
+    };
   if (e.principalType === 'REPORTS')
     return { before: reportSharingLabel(e.oldRole), after: reportSharingLabel(e.newRole) };
   return {
@@ -39,9 +46,13 @@ export function describeFolderEvent(e: FolderShareAuditEvent): string {
     return `${actor} changed report sharing from ${reportSharingLabel(e.oldRole).toLowerCase()} to ${reportSharingLabel(e.newRole).toLowerCase()}`;
   }
   const who = e.principalType === 'GROUP' ? `group ${e.principalId}` : folderEventTarget(e);
-  if (e.action === 'GRANT') return `${actor} granted ${roleLabel(e.newRole)} access to ${who}`;
+  if (e.action === 'EXPIRY')
+    return describeExpiryChange(who, actor, e.oldExpiresAt, e.newExpiresAt);
+  const until = e.newExpiresAt ? ` until ${formatLastDay(e.newExpiresAt)}` : '';
+  if (e.action === 'GRANT')
+    return `${actor} granted ${roleLabel(e.newRole)} access to ${who}${until}`;
   if (e.action === 'REVOKE') return `${actor} revoked ${roleLabel(e.oldRole)} access from ${who}`;
-  return `${actor} changed ${who} from ${roleLabel(e.oldRole)} to ${roleLabel(e.newRole)}`;
+  return `${actor} changed ${who} from ${roleLabel(e.oldRole)} to ${roleLabel(e.newRole)}${until}`;
 }
 
 const actionTag = (e: FolderShareAuditEvent) => {
@@ -50,6 +61,7 @@ const actionTag = (e: FolderShareAuditEvent) => {
     return { type: 'green' as const, text: reports ? 'Turned on' : 'Granted' };
   if (e.action === 'REVOKE')
     return { type: 'red' as const, text: reports ? 'Turned off' : 'Revoked' };
+  if (e.action === 'EXPIRY') return { type: 'magenta' as const, text: 'End date' };
   return { type: 'cyan' as const, text: 'Changed' };
 };
 
@@ -178,6 +190,7 @@ export function FolderAccessAuditModal({
                 <Tag size="sm" type={s.role === 'EDITOR' ? 'purple' : 'gray'}>
                   {roleLabel(s.role)}
                 </Tag>
+                <ShareUntil expiresAt={s.expiresAt} />
               </li>
             ))}
             {data.shares.length === 0 && <li>Not shared with anyone.</li>}

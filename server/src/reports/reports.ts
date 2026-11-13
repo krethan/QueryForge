@@ -4,6 +4,7 @@ import type { MetadataDb } from '../db/types.js';
 import { NOW_UTC, T, q } from '../db/schema.js';
 import { AppError, DbError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
+import { shareActive, systemClock, type Clock } from '../sharing/expiry.js';
 import type { ChartDef } from '../charts/chart-def.js';
 import { parsePresentation, presentationJson, type DrillDef } from './drill.js';
 import { parametersUseDatePresets } from './parameters.js';
@@ -174,6 +175,7 @@ export class ReportRepository {
   constructor(
     private readonly db: MetadataDb,
     private readonly schema: string,
+    private readonly clock: Clock = systemClock,
   ) {
     this.table = q(schema, T.reports);
   }
@@ -217,7 +219,10 @@ export class ReportRepository {
     return rows[0] ? toReport(rows[0]) : null;
   }
 
-  /** Reports shared with the user directly or through one of their groups (never their own). */
+  /**
+   * Reports shared with the user directly or through one of their groups (never their own).
+   * Shares past their expiry (migration 014) are left out, checked on every call.
+   */
   async listShared(userId: string, groups: string[]): Promise<AccessibleReport[]> {
     const shares = q(this.schema, T.shares);
     const users = q(this.schema, T.users);
@@ -230,7 +235,7 @@ export class ReportRepository {
     const rows = await this.db.query<Row>(
       `SELECT ${COLS.split(',')
         .map((c) => `R.${c.trim()}`)
-        .join(', ')}, S.SHARE_ROLE, U.DISPLAY_NAME AS OWNER_NAME
+        .join(', ')}, S.SHARE_ROLE, S.EXPIRES_AT, U.DISPLAY_NAME AS OWNER_NAME
          FROM ${this.table} R
          JOIN ${shares} S ON S.REPORT_ID = R.REPORT_ID
          JOIN ${users} U ON U.USER_ID = R.OWNER_ID
@@ -239,7 +244,9 @@ export class ReportRepository {
       params,
     );
     const byId = new Map<string, AccessibleReport>();
+    const now = this.clock();
     for (const r of rows) {
+      if (!shareActive(r.EXPIRES_AT, now)) continue;
       const rep = toReport(r);
       const access: AccessRole = r.SHARE_ROLE === 'EDITOR' ? 'EDITOR' : 'VIEWER';
       const prev = byId.get(rep.id);

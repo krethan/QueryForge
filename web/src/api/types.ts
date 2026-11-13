@@ -266,6 +266,13 @@ export interface Share {
   id: string;
   role: 'VIEWER' | 'EDITOR';
   displayName?: string;
+  /**
+   * When the share stops giving access (ISO-8601 UTC, migration 014), or null: never. The dialog
+   * sets it to the end of the chosen day in the sharer's time zone.
+   */
+  expiresAt?: string | null;
+  /** Set by the server: the expiry has passed, so the share gives no access until renewed. */
+  expired?: boolean;
 }
 /** A folder's "also share the reports" option: the most a recipient gets, or null (off). */
 export type FolderShareReports = 'VIEWER' | 'EDITOR' | null;
@@ -389,15 +396,20 @@ export interface PageResponse {
   formatStyles?: (FormatStyle | null)[][];
 }
 
+/** EXPIRY (migration 014): only a share's expiry was set, changed, renewed or cleared. */
+export type ShareAuditAction = 'GRANT' | 'CHANGE' | 'REVOKE' | 'EXPIRY';
 export interface ShareAuditEvent {
   id: string;
   reportId: string;
-  action: 'GRANT' | 'CHANGE' | 'REVOKE';
+  action: ShareAuditAction;
   principalType: 'USER' | 'GROUP';
   principalId: string;
   principalName?: string;
   oldRole: 'VIEWER' | 'EDITOR' | null;
   newRole: 'VIEWER' | 'EDITOR' | null;
+  /** Expiry before / after the change (ISO-8601 UTC), null meaning none (migration 014). */
+  oldExpiresAt?: string | null;
+  newExpiresAt?: string | null;
   actorId: string;
   actorName?: string;
   occurredAt: string;
@@ -418,12 +430,15 @@ export interface ReportAccess {
 export interface FolderShareAuditEvent {
   id: string;
   folderId: string;
-  action: 'GRANT' | 'CHANGE' | 'REVOKE';
+  action: ShareAuditAction;
   principalType: 'USER' | 'GROUP' | 'REPORTS';
   principalId: string;
   principalName?: string;
   oldRole: 'VIEWER' | 'EDITOR' | null;
   newRole: 'VIEWER' | 'EDITOR' | null;
+  /** Expiry before / after the change (ISO-8601 UTC), null meaning none (migration 014). */
+  oldExpiresAt?: string | null;
+  newExpiresAt?: string | null;
   actorId: string;
   actorName?: string;
   occurredAt: string;

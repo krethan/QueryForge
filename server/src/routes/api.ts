@@ -504,6 +504,8 @@ export const FOLDER_AUDIT_CSV_HEADER = [
   'Principal name',
   'Role before',
   'Role after',
+  'Expiry before (UTC)',
+  'Expiry after (UTC)',
   'Changed by (user ID)',
   'Changed by',
   'Folder ID',
@@ -518,6 +520,8 @@ const folderAuditCsvCells = (folderName: string) => (e: FolderShareAuditEvent) =
   e.principalName ?? '',
   e.oldRole ?? '',
   e.newRole ?? '',
+  e.oldExpiresAt ?? '',
+  e.newExpiresAt ?? '',
   e.actorId,
   e.actorName ?? '',
   e.folderId,
@@ -2033,13 +2037,17 @@ export function apiRouter(d: ApiDeps): Router {
   };
   /** Every recipient must be someone who can already open the report. */
   const requireRecipientAccess = async (report: Report, recipients: string[]) => {
-    const { blocked } = await d.recipients.check(report, recipients);
+    const { blocked, expired } = await d.recipients.check(report, recipients);
     if (blocked.length)
       throw new AppError(
         400,
         'RECIPIENT_NO_ACCESS',
-        `${blocked.join(', ')} ${blocked.length === 1 ? 'is not an Uncle Bob user who can' : 'are not Uncle Bob users who can'} open this report. Share the report with them first, or remove them.`,
-        { blocked },
+        `${blocked.join(', ')} ${blocked.length === 1 ? 'is not an Uncle Bob user who can' : 'are not Uncle Bob users who can'} open this report. Share the report with them first, or remove them.${
+          expired.length
+            ? ` Access has expired for ${expired.join(', ')}: renew the share first.`
+            : ''
+        }`,
+        { blocked, expired },
       );
   };
   const prepareSchedule = async (report: Report, input: ScheduleInput) => {

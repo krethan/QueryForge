@@ -187,10 +187,12 @@ describe('verify-ibmi: statement policy', () => {
 });
 
 describe('verify-ibmi: expected objects', () => {
-  it('understands every statement in migrations 001-013', () => {
+  it('understands every statement in migrations 001-014', () => {
     const e = expectedSchema();
     expect(e.unparsed).toEqual([]);
-    expect(e.migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(e.migrations.map((m) => m.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    ]);
     expect(e.tables.map((t) => t.name)).toContain('QF_FOLDER_REPORT_SHARING');
     expect(e.indexes.find((i) => i.name === 'QF_USERS_UX_EXTERNAL')?.unique).toBe('V');
     expect(e.constraints.find((c) => c.name === 'QF_EXEC_FK_REPORT')?.deleteRule).toBe('SET NULL');
@@ -312,7 +314,7 @@ describe('verify-ibmi: read-only run (default)', () => {
 });
 
 describe('verify-ibmi: disposable library round trip', () => {
-  it('creates the library, applies 001-013, verifies every object and drops it', async () => {
+  it('creates the library, applies 001-014, verifies every object and drops it', async () => {
     const ibmi = new FakeIbmi();
     const r = await runVerification(
       opts({ applyMigrations: true, smoke: false, cleanup: 'UBVERIFY' }),

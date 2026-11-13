@@ -155,6 +155,17 @@ function chartHeader(v: string | null): { included: boolean; note?: string } {
   }
 }
 
+/**
+ * A share as sent to the server: its expiry included (null clears it, migration 014), display
+ * fields left out.
+ */
+const shareBody = ({ type, id, role, expiresAt }: Share) => ({
+  type,
+  id,
+  role,
+  expiresAt: expiresAt ?? null,
+});
+
 export const api = {
   login: (username: string, password: string, method: 'local' | 'ldap' = 'local') =>
     json<{ user: User; expiresAt: string }>('POST', '/auth/login', { username, password, method }),
@@ -193,7 +204,7 @@ export const api = {
   /** Replace a folder's shares (owner only); leaves the "share the reports" option alone. */
   putFolderShares: (id: string, shares: Share[]) =>
     json<{ shares: Share[] }>('PUT', `/folders/${id}/shares`, {
-      shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
+      shares: shares.map(shareBody),
     }).then((r) => r.shares),
   /** Who can reach a folder now and the first page of its sharing history (owner or admin). */
   getFolderAccess: (id: string, limit = FOLDER_AUDIT_PAGE) =>
@@ -232,7 +243,7 @@ export const api = {
    */
   putFolderSharing: (id: string, shares: Share[], shareReports: FolderShareReports) =>
     json<FolderSharing>('PUT', `/folders/${id}/shares`, {
-      shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
+      shares: shares.map(shareBody),
       shareReports,
     }),
   /** Put a report you can see into a folder you can edit. */
@@ -343,7 +354,7 @@ export const api = {
     ).then((r) => ({ shares: r.shares, folderGrants: r.folderGrants ?? [] })),
   putShares: (id: string, shares: Share[]) =>
     json<{ shares: Share[] }>('PUT', `/reports/${id}/shares`, {
-      shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
+      shares: shares.map(shareBody),
     }).then((r) => r.shares),
   searchUsers: (search: string) =>
     json<{ users: UserSummary[] }>('GET', `/users?search=${encodeURIComponent(search)}`).then(

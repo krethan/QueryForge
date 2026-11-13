@@ -5,6 +5,7 @@ import { NOW_UTC, T, q, toDbTimestamp } from '../db/schema.js';
 import { parameterValuesSchema } from '../reports/parameters.js';
 import { AppError } from '../util/errors.js';
 import { dbTimestampToIso } from '../util/time.js';
+import { ACTIVE_SHARE, activeParam, systemClock, type Clock } from '../sharing/expiry.js';
 import {
   cadenceSchema,
   cadenceToCron,
@@ -169,6 +170,7 @@ export class ScheduleRepository {
   constructor(
     private readonly db: MetadataDb,
     schema: string,
+    private readonly clock: Clock = systemClock,
   ) {
     this.table = q(schema, T.schedules);
     this.reports = q(schema, T.reports);
@@ -201,7 +203,8 @@ export class ScheduleRepository {
   /**
    * Only schedules whose report remains accessible through the shared access model.
    * `viaFolders` are the report IDs the caller reaches through folders shared with their
-   * reports (migration 011), already worked out by FolderReportGrants.
+   * reports (migration 011), already worked out by FolderReportGrants. A report share past its
+   * expiry (migration 014) does not count.
    */
   async listForUser(
     userId: string,
@@ -214,14 +217,14 @@ export class ScheduleRepository {
     const auth = admin
       ? ''
       : ` WHERE R.OWNER_ID = ? OR (S.CREATED_BY = ? AND R.OWNER_ID = ?) OR EXISTS (
-          SELECT 1 FROM ${shares} X WHERE X.REPORT_ID = R.REPORT_ID AND
+          SELECT 1 FROM ${shares} X WHERE X.REPORT_ID = R.REPORT_ID AND ${ACTIVE_SHARE('X')} AND
           ((X.PRINCIPAL_TYPE = 'USER' AND X.PRINCIPAL_ID = ?) OR
            (X.PRINCIPAL_TYPE = 'GROUP' AND X.PRINCIPAL_ID IN (${groups.length ? groups.map(() => '?').join(', ') : "''"}))))${
              ids.length ? ` OR R.REPORT_ID IN (${ids.map(() => '?').join(', ')})` : ''
            }`;
     const rows = await this.db.query<Row>(
       `SELECT ${COLS} FROM ${this.from()}${auth} ORDER BY R.REPORT_NAME_KEY, S.CREATED_AT`,
-      admin ? [] : [userId, userId, userId, userId, ...groups, ...ids],
+      admin ? [] : [userId, userId, userId, activeParam(this.clock()), userId, ...groups, ...ids],
     );
     return rows.map(toSchedule);
   }
