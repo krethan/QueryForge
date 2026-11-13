@@ -32,6 +32,9 @@ const SavedReportsPage = lazy(() =>
 const ReportBuilderPage = lazy(() =>
   import('./pages/ReportBuilderPage').then((m) => ({ default: m.ReportBuilderPage })),
 );
+const DeletedFoldersPage = lazy(() =>
+  import('./pages/DeletedFoldersPage').then((m) => ({ default: m.DeletedFoldersPage })),
+);
 const SchedulesPage = lazy(() =>
   import('./pages/SchedulesPage').then((m) => ({ default: m.SchedulesPage })),
 );
@@ -72,6 +75,8 @@ export const routes: RouteObject[] = [
       { path: '/schedules', element: <SchedulesPage /> },
       { path: '/datasource', element: <DataSourcePage /> },
       { path: '/account', element: <AccountPage /> },
+      // Admin only: the page itself shows "Admins only" to anyone else, and the API returns 403.
+      { path: '/admin/deleted-folders', element: <DeletedFoldersPage /> },
       { path: '*', element: <NotFound /> },
     ],
   },
