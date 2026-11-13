@@ -165,7 +165,8 @@ function ReportTile({
       )}
       {r.access && r.access !== 'OWNER' && (
         <div className="qf-tile__owner">
-          Shared by {r.ownerName ?? 'another user'} ·{' '}
+          Shared by {r.ownerName ?? 'another user'}
+          {r.viaFolder ? ' through a folder' : ''} ·{' '}
           <Tag size="sm" type="purple">
             {r.access === 'ADMIN' ? 'Admin' : r.access === 'EDITOR' ? 'Editor' : 'Viewer'}
           </Tag>

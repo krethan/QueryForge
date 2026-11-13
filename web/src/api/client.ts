@@ -17,6 +17,9 @@ import type {
   ScheduleRecipientOption,
   ScheduleRunResult,
   ScheduleSettings,
+  FolderReportGrant,
+  FolderShareReports,
+  FolderSharing,
   Share,
   UserSummary,
   ExecutionRecord,
@@ -180,11 +183,22 @@ export const api = {
   /** Who a folder is shared with (owner, or admin read-only). */
   getFolderShares: (id: string) =>
     json<{ shares: Share[] }>('GET', `/folders/${id}/shares`).then((r) => r.shares),
-  /** Replace a folder's shares (owner only). Sharing a folder never shares its reports. */
+  /** Replace a folder's shares (owner only); leaves the "share the reports" option alone. */
   putFolderShares: (id: string, shares: Share[]) =>
     json<{ shares: Share[] }>('PUT', `/folders/${id}/shares`, {
       shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
     }).then((r) => r.shares),
+  /** A folder's shares, its "share the reports" option and which reports that covers. */
+  getFolderSharing: (id: string) => json<FolderSharing>('GET', `/folders/${id}/shares`),
+  /**
+   * Replace a folder's shares and set whether its reports are shared too (owner only). The
+   * server decides which reports that covers: only your own, placed there by you.
+   */
+  putFolderSharing: (id: string, shares: Share[], shareReports: FolderShareReports) =>
+    json<FolderSharing>('PUT', `/folders/${id}/shares`, {
+      shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
+      shareReports,
+    }),
   /** Put a report you can see into a folder you can edit. */
   addToFolder: (folderId: string, reportId: string) =>
     json<{ folder: Folder }>('POST', `/folders/${folderId}/reports`, { reportId }).then(
@@ -285,6 +299,12 @@ export const api = {
 
   getShares: (id: string) =>
     json<{ shares: Share[] }>('GET', `/reports/${id}/shares`).then((r) => r.shares),
+  /** A report's own shares plus the read-only access it gets through its owner's folders. */
+  getReportSharing: (id: string) =>
+    json<{ shares: Share[]; folderGrants?: FolderReportGrant[] }>(
+      'GET',
+      `/reports/${id}/shares`,
+    ).then((r) => ({ shares: r.shares, folderGrants: r.folderGrants ?? [] })),
   putShares: (id: string, shares: Share[]) =>
     json<{ shares: Share[] }>('PUT', `/reports/${id}/shares`, {
       shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),

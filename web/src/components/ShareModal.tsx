@@ -3,7 +3,10 @@ import {
   Button,
   ComboBox,
   InlineLoading,
+  InlineNotification,
   Modal,
+  RadioButton,
+  RadioButtonGroup,
   Select,
   SelectItem,
   Stack,
@@ -12,32 +15,95 @@ import {
   StructuredListHead,
   StructuredListRow,
   StructuredListWrapper,
+  Toggle,
 } from '@carbon/react';
-import { Close, Group, User as UserIcon } from '@carbon/icons-react';
-import { useEffect, useState } from 'react';
+import { Close, Folder as FolderIcon, Group, User as UserIcon } from '@carbon/icons-react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { api } from '../api/client';
-import type { Folder, Report, Share, UserSummary } from '../api/types';
+import type {
+  Folder,
+  FolderReportGrant,
+  FolderShareReports,
+  FolderSharing,
+  Report,
+  Share,
+  UserSummary,
+} from '../api/types';
 import { ErrorNotice } from './ErrorNotice';
 
 type Option = { key: string; type: 'USER' | 'GROUP'; id: string; label: string };
 
 /** Owner-only dialog: share a report with users or groups as VIEWER or EDITOR (enforced by the server). */
 export function ShareModal({ report, onClose }: { report: Report | null; onClose(): void }) {
+  const [grants, setGrants] = useState<FolderReportGrant[]>([]);
+  useEffect(() => setGrants([]), [report?.id]);
   return (
     <ShareDialog
       target={report ? { id: report.id, name: report.name } : null}
-      load={api.getShares}
+      load={async (id) => {
+        const r = await api.getReportSharing(id);
+        setGrants(r.folderGrants);
+        return r.shares;
+      }}
       save={api.putShares}
       note="Viewers can run and export the report. Editors can also change its SQL, parameters and schedules. Only you (the owner) can share or delete it."
       onClose={onClose}
-    />
+    >
+      <FolderGrantList grants={grants} />
+    </ShareDialog>
+  );
+}
+
+const roleText = (r: 'VIEWER' | 'EDITOR') => (r === 'EDITOR' ? 'Editor' : 'Viewer');
+
+/** Read-only: who reaches a report through one of your folders shared with its reports. */
+export function FolderGrantList({ grants }: { grants: FolderReportGrant[] }) {
+  if (!grants.length) return null;
+  return (
+    <div className="qf-share-folders">
+      <h3 className="cds--label">Also shared through your folders</h3>
+      <StructuredListWrapper aria-label="Access through folders" isCondensed>
+        <StructuredListHead>
+          <StructuredListRow head>
+            <StructuredListCell head>Shared with</StructuredListCell>
+            <StructuredListCell head>Access</StructuredListCell>
+            <StructuredListCell head>Through folder</StructuredListCell>
+          </StructuredListRow>
+        </StructuredListHead>
+        <StructuredListBody>
+          {grants.map((g) => (
+            <StructuredListRow key={`${g.folderId}:${g.type}:${g.id}`}>
+              <StructuredListCell>
+                <span className="qf-share-who">
+                  {g.type === 'GROUP' ? <Group /> : <UserIcon />}
+                  {g.type === 'GROUP' ? `Group: ${g.id}` : (g.displayName ?? g.id)}
+                </span>
+              </StructuredListCell>
+              <StructuredListCell>{roleText(g.role)}</StructuredListCell>
+              <StructuredListCell>
+                <span className="qf-share-who">
+                  <FolderIcon />
+                  {g.folderName}
+                </span>
+              </StructuredListCell>
+            </StructuredListRow>
+          ))}
+        </StructuredListBody>
+      </StructuredListWrapper>
+      <p className="qf-muted">
+        Change these from the folder&apos;s sharing, or by taking the report out of the folder. They
+        never change the shares above.
+      </p>
+    </div>
   );
 }
 
 /**
  * Owner-only dialog: share a folder with users or groups (migration 009). Viewers see the
- * folder; editors can also add, remove and reorder its reports. Nobody gains access to a
- * report this way: each person sees only the reports in the folder already shared with them.
+ * folder; editors can also add, remove and reorder its reports. By default nobody gains
+ * access to a report this way; the owner can opt in to also sharing their own reports in the
+ * folder (migration 011), capped at view-only or at each person's folder role. The server
+ * decides which reports that covers and enforces it.
  */
 export function FolderShareModal({
   folder,
@@ -46,15 +112,117 @@ export function FolderShareModal({
   folder: Folder | null;
   onClose(saved?: boolean): void;
 }) {
+  const [info, setInfo] = useState<FolderSharing | null>(null);
+  const [shareReports, setShareReports] = useState<FolderShareReports>(null);
+  useEffect(() => {
+    setInfo(null);
+    setShareReports(null);
+  }, [folder?.id]);
   return (
     <ShareDialog
       target={folder ? { id: folder.id, name: folder.name } : null}
-      load={api.getFolderShares}
-      save={api.putFolderShares}
+      load={async (id) => {
+        const r = await api.getFolderSharing(id);
+        setInfo(r);
+        setShareReports(r.shareReports);
+        return r.shares;
+      }}
+      save={(id, shares) => api.putFolderSharing(id, shares, shareReports)}
       heading="Share folder"
-      note="Viewers can see the folder. Editors can also add, remove and reorder its reports. Sharing a folder does not share the reports in it: each person sees only the reports they already have access to. Only you (the owner) can share, rename or delete it."
+      note={`Viewers can see the folder. Editors can also add, remove and reorder its reports. ${
+        shareReports
+          ? 'The reports listed below are shared with them too.'
+          : 'Sharing a folder does not share the reports in it: each person sees only the reports they already have access to.'
+      } Only you (the owner) can share, rename or delete it.`}
       onClose={onClose}
-    />
+    >
+      <FolderReportSharing info={info} value={shareReports} onChange={setShareReports} />
+    </ShareDialog>
+  );
+}
+
+const skipText: Record<FolderSharing['reports']['skipped'][number]['reason'], string> = {
+  NOT_OWNER: 'only its owner can share it',
+  ADDED_BY_OTHER: 'added by someone else; add it to the folder yourself to share it',
+};
+
+/** The folder owner's "also share the reports in this folder" option and what it covers. */
+export function FolderReportSharing({
+  info,
+  value,
+  onChange,
+}: {
+  info: FolderSharing | null;
+  value: FolderShareReports;
+  onChange(v: FolderShareReports): void;
+}) {
+  if (!info) return null;
+  const { included, skipped } = info.reports;
+  const n = included.length;
+  return (
+    <fieldset className="qf-share-reports">
+      <legend className="cds--label">Reports in this folder</legend>
+      <Toggle
+        id="share-folder-reports"
+        labelText="Also share the reports in this folder"
+        labelA="Off"
+        labelB="On"
+        toggled={value !== null}
+        onToggle={(on: boolean) => onChange(on ? 'VIEWER' : null)}
+      />
+      {value !== null && (
+        <>
+          <RadioButtonGroup
+            legendText="Access to the reports"
+            name="share-folder-reports-role"
+            orientation="vertical"
+            valueSelected={value}
+            onChange={(v: string | number | undefined) =>
+              onChange(v === 'EDITOR' ? 'EDITOR' : 'VIEWER')
+            }
+          >
+            <RadioButton
+              id="share-reports-viewer"
+              value="VIEWER"
+              labelText="View only, for everyone"
+            />
+            <RadioButton
+              id="share-reports-editor"
+              value="EDITOR"
+              labelText="Match their folder access (folder editors can also edit the reports)"
+            />
+          </RadioButtonGroup>
+          <p className="qf-muted">
+            {n === 0
+              ? 'None of your reports are in this folder yet.'
+              : `${n} of your report${n === 1 ? '' : 's'} in this folder will be shared with the people above.`}{' '}
+            Reports you add later are shared too; taking a report out of the folder, removing a
+            person or turning this off ends only the access that came through the folder. Shares you
+            made on a report itself are never changed, and stronger ones are kept.
+          </p>
+          {skipped.length > 0 && (
+            <InlineNotification
+              kind="warning"
+              lowContrast
+              hideCloseButton
+              title={`${skipped.length} report${skipped.length === 1 ? '' : 's'} won't be shared`}
+              subtitle="Everything else in the folder is shared as described above."
+            >
+              <ul aria-label="Reports not shared through this folder">
+                {skipped.map((x) => (
+                  <li key={x.id}>
+                    {x.name}
+                    {x.reason === 'NOT_OWNER' && x.ownerName
+                      ? ` (owned by ${x.ownerName})`
+                      : ''}: {skipText[x.reason]}
+                  </li>
+                ))}
+              </ul>
+            </InlineNotification>
+          )}
+        </>
+      )}
+    </fieldset>
   );
 }
 
@@ -65,13 +233,16 @@ function ShareDialog({
   heading,
   note,
   onClose,
+  children,
 }: {
   target: { id: string; name: string } | null;
   load(id: string): Promise<Share[]>;
-  save(id: string, shares: Share[]): Promise<Share[]>;
+  save(id: string, shares: Share[]): Promise<unknown>;
   heading?: string;
   note: string;
   onClose(saved?: boolean): void;
+  /** Extra sections under the list (folder report sharing, access through folders). */
+  children?: ReactNode;
 }) {
   const report = target;
   const [shares, setShares] = useState<Share[] | null>(null);
@@ -241,6 +412,7 @@ function ShareDialog({
             </StructuredListBody>
           </StructuredListWrapper>
         )}
+        {children}
         <p className="qf-muted">Changes take effect when you save.</p>
       </Stack>
     </Modal>

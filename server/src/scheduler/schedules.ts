@@ -198,18 +198,30 @@ export class ScheduleRepository {
     return rows.map(toSchedule);
   }
 
-  /** Only schedules whose report remains accessible through the shared access model. */
-  async listForUser(userId: string, groups: string[] = [], admin = false): Promise<Schedule[]> {
+  /**
+   * Only schedules whose report remains accessible through the shared access model.
+   * `viaFolders` are the report IDs the caller reaches through folders shared with their
+   * reports (migration 011), already worked out by FolderReportGrants.
+   */
+  async listForUser(
+    userId: string,
+    groups: string[] = [],
+    admin = false,
+    viaFolders: string[] = [],
+  ): Promise<Schedule[]> {
     const shares = sharesTable(this.reports);
+    const ids = viaFolders.slice(0, 1000);
     const auth = admin
       ? ''
       : ` WHERE R.OWNER_ID = ? OR (S.CREATED_BY = ? AND R.OWNER_ID = ?) OR EXISTS (
           SELECT 1 FROM ${shares} X WHERE X.REPORT_ID = R.REPORT_ID AND
           ((X.PRINCIPAL_TYPE = 'USER' AND X.PRINCIPAL_ID = ?) OR
-           (X.PRINCIPAL_TYPE = 'GROUP' AND X.PRINCIPAL_ID IN (${groups.length ? groups.map(() => '?').join(', ') : "''"}))))`;
+           (X.PRINCIPAL_TYPE = 'GROUP' AND X.PRINCIPAL_ID IN (${groups.length ? groups.map(() => '?').join(', ') : "''"}))))${
+             ids.length ? ` OR R.REPORT_ID IN (${ids.map(() => '?').join(', ')})` : ''
+           }`;
     const rows = await this.db.query<Row>(
       `SELECT ${COLS} FROM ${this.from()}${auth} ORDER BY R.REPORT_NAME_KEY, S.CREATED_AT`,
-      admin ? [] : [userId, userId, userId, userId, ...groups],
+      admin ? [] : [userId, userId, userId, userId, ...groups, ...ids],
     );
     return rows.map(toSchedule);
   }

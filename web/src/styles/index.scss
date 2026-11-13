@@ -329,6 +329,20 @@ body {
   gap: 0.5rem;
   align-items: center;
 }
+.qf-share-reports {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--cds-border-subtle);
+}
+.qf-share-reports ul {
+  margin: 0.25rem 0 0 1rem;
+  list-style: disc;
+}
+.qf-share-folders {
+  display: grid;
+  gap: 0.5rem;
+}
 .qf-muted {
   color: var(--cds-text-secondary);
   font-size: 0.875rem;

@@ -114,6 +114,8 @@ export interface Report {
   ownerName?: string;
   /** The caller's access to this report. */
   access?: AccessRole;
+  /** True when that access comes from a folder its owner shared together with its reports. */
+  viaFolder?: boolean;
   /** Saved Report Builder definition ({version, spec}); null for SQL-only reports. */
   builderDef?: BuilderDef | null;
   /** Server re-validation of `builderDef` against the current catalog. */
@@ -156,6 +158,11 @@ export interface Folder {
   access?: AccessRole;
   /** True when the folder is shared with anyone (always true for folders shared with you). */
   shared?: boolean;
+  /**
+   * Migration 011: when set, the owner also shares their own reports in the folder with the
+   * people it is shared with, at most at this role. Null or missing: reports are not shared.
+   */
+  shareReports?: FolderShareReports;
   /** Reports in the folder that the caller can see, in the folder's order. */
   reportIds?: string[];
 }
@@ -255,6 +262,29 @@ export interface AuthProviders {
 }
 
 export interface Share {
+  type: 'USER' | 'GROUP';
+  id: string;
+  role: 'VIEWER' | 'EDITOR';
+  displayName?: string;
+}
+/** A folder's "also share the reports" option: the most a recipient gets, or null (off). */
+export type FolderShareReports = 'VIEWER' | 'EDITOR' | null;
+/** Why a report in a folder is not shared through it. */
+export type FolderReportSkipReason = 'NOT_OWNER' | 'ADDED_BY_OTHER';
+/** GET/PUT /folders/:id/shares (owner; admins may read). */
+export interface FolderSharing {
+  shares: Share[];
+  shareReports: FolderShareReports;
+  /** The reports in the folder the caller can see: shared (or would be) through it, or skipped. */
+  reports: {
+    included: { id: string; name: string }[];
+    skipped: { id: string; name: string; ownerName: string; reason: FolderReportSkipReason }[];
+  };
+}
+/** Access to a report that comes from one of its owner's folders (read-only on the report). */
+export interface FolderReportGrant {
+  folderId: string;
+  folderName: string;
   type: 'USER' | 'GROUP';
   id: string;
   role: 'VIEWER' | 'EDITOR';
@@ -375,6 +405,8 @@ export interface ShareAuditEvent {
 export interface ReportAccess {
   owner: { id: string; displayName: string };
   shares: Share[];
+  /** Access through folders shared with their reports (migration 011). */
+  folderGrants?: FolderReportGrant[];
   events: ShareAuditEvent[];
 }
 

@@ -4,6 +4,7 @@ import type { MetadataDb } from '../db/types.js';
 import { T, q } from '../db/schema.js';
 import type { Report } from '../reports/reports.js';
 import type { AccessService } from '../sharing/access.js';
+import type { FolderReportGrants } from '../sharing/folder-report-grants.js';
 
 export interface RecipientOption {
   userId: string;
@@ -19,7 +20,8 @@ const domainOf = (email: string) => email.slice(email.lastIndexOf('@') + 1).toLo
 
 /**
  * Who a scheduled report may be e-mailed to. A recipient address must belong to an active
- * Uncle Bob user who can already open the report (owner, a user or group share, or an admin),
+ * Uncle Bob user who can already open the report (owner, a user or group share, a folder the
+ * owner shared together with its reports, or an admin),
  * so scheduling never becomes a way to send a report to someone who could not see it.
  * The check runs when a schedule is saved and again at every delivery.
  */
@@ -33,6 +35,7 @@ export class RecipientService {
     private readonly userRepo: UserRepository,
     private readonly access: AccessService,
     private readonly cfg: Pick<AppConfig['scheduler'], 'recipientDomains'>,
+    private readonly folderGrants?: FolderReportGrants,
   ) {
     this.users = q(schema, T.users);
     this.shares = q(schema, T.shares);
@@ -50,6 +53,11 @@ export class RecipientService {
         ORDER BY U.DISPLAY_NAME FETCH FIRST 500 ROWS ONLY`,
       [report.ownerId, report.id, report.id],
     );
+    const viaFolders = await this.viaFolders(report);
+    if (viaFolders.length) {
+      rows.push(...viaFolders);
+      rows.sort((a, b) => String(a.DISPLAY_NAME).localeCompare(String(b.DISPLAY_NAME)));
+    }
     const seen = new Set<string>();
     const out: RecipientOption[] = [];
     for (const r of rows) {
@@ -67,6 +75,28 @@ export class RecipientService {
       });
     }
     return out;
+  }
+
+  /** People who can open the report only because its owner shared a folder with its reports. */
+  private async viaFolders(report: Report): Promise<Record<string, unknown>[]> {
+    if (!this.folderGrants) return [];
+    const grants = await this.folderGrants.grantsForReport(report);
+    const userIds = [...new Set(grants.filter((g) => g.type === 'USER').map((g) => g.id))];
+    const groups = [...new Set(grants.filter((g) => g.type === 'GROUP').map((g) => g.id))];
+    if (!userIds.length && !groups.length) return [];
+    const ph = (n: number) => Array.from({ length: n }, () => '?').join(', ');
+    const who: string[] = [];
+    if (userIds.length) who.push(`U.USER_ID IN (${ph(userIds.length)})`);
+    if (groups.length)
+      who.push(
+        `U.USER_ID IN (SELECT G.USER_ID FROM ${this.groups} G WHERE G.GROUP_NAME IN (${ph(groups.length)}))`,
+      );
+    return this.db.query<Record<string, unknown>>(
+      `SELECT U.USER_ID, U.DISPLAY_NAME, U.EMAIL FROM ${this.users} U
+        WHERE U.IS_ACTIVE = 1 AND U.EMAIL IS NOT NULL AND (${who.join(' OR ')})
+        ORDER BY U.DISPLAY_NAME FETCH FIRST 500 ROWS ONLY`,
+      [...userIds, ...groups],
+    );
   }
 
   /** Split addresses into those that belong to someone who can open the report and those that don't. */

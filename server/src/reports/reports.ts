@@ -52,6 +52,8 @@ export type AccessRole = 'OWNER' | 'EDITOR' | 'VIEWER' | 'ADMIN';
 export interface AccessibleReport extends Report {
   access: AccessRole;
   ownerName?: string;
+  /** True when the access shown comes from a folder the owner shared with its reports (011). */
+  viaFolder?: boolean;
 }
 
 const optText = (max: number) =>
@@ -245,6 +247,35 @@ export class ReportRepository {
         byId.set(rep.id, { ...rep, access, ownerName: String(r.OWNER_NAME ?? '') });
     }
     return [...byId.values()];
+  }
+
+  /**
+   * Reports by ID with their owner's name, in name order. Unscoped: callers MUST have
+   * authorised every ID (FolderReportGrants.reportRolesFor) before returning anything.
+   */
+  async listByIds(ids: string[]): Promise<(Report & { ownerName: string })[]> {
+    const users = q(this.schema, T.users);
+    const out: (Report & { ownerName: string; key: string })[] = [];
+    for (let i = 0; i < ids.length; i += 500) {
+      const chunk = ids.slice(i, i + 500);
+      const rows = await this.db.query<Row>(
+        `SELECT ${COLS.split(',')
+          .map((c) => `R.${c.trim()}`)
+          .join(', ')}, R.REPORT_NAME_KEY, U.DISPLAY_NAME AS OWNER_NAME
+           FROM ${this.table} R JOIN ${users} U ON U.USER_ID = R.OWNER_ID
+          WHERE R.REPORT_ID IN (${chunk.map(() => '?').join(', ')})`,
+        chunk,
+      );
+      for (const r of rows)
+        out.push({
+          ...toReport(r),
+          ownerName: String(r.OWNER_NAME ?? ''),
+          key: String(r.REPORT_NAME_KEY ?? ''),
+        });
+    }
+    return out
+      .sort((a, b) => a.key.localeCompare(b.key) || a.id.localeCompare(b.id))
+      .map(({ key: _key, ...r }) => r);
   }
 
   /** Global read access for AppUser role ADMIN; returned through the same access-aware list. */

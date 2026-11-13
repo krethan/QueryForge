@@ -24,6 +24,7 @@ import { RecipientService } from './scheduler/recipients.js';
 import { AccessService } from './sharing/access.js';
 import { GroupRepository } from './sharing/groups.js';
 import { FolderAccessService } from './sharing/folder-access.js';
+import { FolderReportGrants } from './sharing/folder-report-grants.js';
 
 export interface AppOptions {
   cfg: AppConfig;
@@ -44,12 +45,13 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
   const executor = new QueryExecutor(cfg, jobFactory);
   const catalog = new CatalogService(cfg, executor);
   const groups = new GroupRepository(metadataDb, cfg.metadata.schema);
-  const access = new AccessService(metadataDb, cfg.metadata.schema, reports, groups);
+  const folders = new FolderRepository(metadataDb, cfg.metadata.schema);
+  const folderAccess = new FolderAccessService(metadataDb, cfg.metadata.schema, folders, groups);
+  const folderGrants = new FolderReportGrants(metadataDb, cfg.metadata.schema, folderAccess);
+  const access = new AccessService(metadataDb, cfg.metadata.schema, reports, groups, folderGrants);
   const execution = new ExecutionService(cfg, executor, access, history);
   const schedules = new ScheduleRepository(metadataDb, cfg.metadata.schema);
-  const folders = new FolderRepository(metadataDb, cfg.metadata.schema);
   const tileOrder = new TileOrderRepository(metadataDb, cfg.metadata.schema);
-  const folderAccess = new FolderAccessService(metadataDb, cfg.metadata.schema, folders, groups);
   const pick = <T>(v: T | null | undefined, make: () => T | undefined) =>
     v === null ? undefined : (v ?? make());
   const oidc = pick(o.oidc, () =>
@@ -65,6 +67,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     users,
     access,
     cfg.scheduler,
+    folderGrants,
   );
   const scheduler = new Scheduler(cfg, schedules, users, access, execution, mailer, recipients);
 
@@ -109,6 +112,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
       schedules,
       folders,
       folderAccess,
+      folderGrants,
       tileOrder,
       scheduler,
       recipients,
@@ -140,6 +144,7 @@ export function createApp({ cfg, metadataDb, jobFactory, staticDir, ...o }: AppO
     schedules,
     folders,
     folderAccess,
+    folderGrants,
     tileOrder,
     scheduler,
     recipients,

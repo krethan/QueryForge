@@ -170,10 +170,15 @@ describe('Dashboard shared folders', { timeout: 20000 }, () => {
     const { owned, shared, folders } = standard();
     setup(owned, shared, folders);
     vi.spyOn(api, 'groups').mockResolvedValue(['finance']);
-    const get = vi
-      .spyOn(api, 'getFolderShares')
-      .mockResolvedValue([{ type: 'GROUP', id: 'finance', role: 'VIEWER' }]);
-    const put = vi.spyOn(api, 'putFolderShares').mockImplementation(async (_id, s) => s);
+    const sharing = {
+      shares: [{ type: 'GROUP' as const, id: 'finance', role: 'VIEWER' as const }],
+      shareReports: null,
+      reports: { included: [], skipped: [] },
+    };
+    const get = vi.spyOn(api, 'getFolderSharing').mockResolvedValue(sharing);
+    const put = vi
+      .spyOn(api, 'putFolderSharing')
+      .mockImplementation(async (_id, s) => ({ ...sharing, shares: s }));
     fireEvent.click(await screen.findByRole('button', { name: 'Manage folders' }));
     const dialog = await screen.findByRole('dialog', { name: 'Manage folders' });
     const others = within(dialog).getByRole('list', { name: 'Folders shared with you' });
@@ -197,9 +202,11 @@ describe('Dashboard shared folders', { timeout: 20000 }, () => {
     fireEvent.change(document.getElementById('role-0')!, { target: { value: 'EDITOR' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save sharing' }));
     await waitFor(() =>
-      expect(put).toHaveBeenCalledWith(FIN, [
-        expect.objectContaining({ type: 'GROUP', id: 'finance', role: 'EDITOR' }),
-      ]),
+      expect(put).toHaveBeenCalledWith(
+        FIN,
+        [expect.objectContaining({ type: 'GROUP', id: 'finance', role: 'EDITOR' })],
+        null,
+      ),
     );
   });
 

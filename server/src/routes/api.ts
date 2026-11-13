@@ -44,7 +44,7 @@ import {
 import type { RecipientService } from '../scheduler/recipients.js';
 import { sharesInputSchema, type AccessService } from '../sharing/access.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
-import type { Report } from '../reports/reports.js';
+import type { AccessibleReport, Report } from '../reports/reports.js';
 import {
   formattingSchema,
   matchFormatting,
@@ -59,6 +59,12 @@ import {
   type FolderAccessService,
   type FolderMember,
 } from '../sharing/folder-access.js';
+import {
+  folderSharesInputSchema,
+  folderSkipReason,
+  type FolderReportGrants,
+  type FolderReportSkipReason,
+} from '../sharing/folder-report-grants.js';
 import {
   applyTileOrder,
   tileOrderInputSchema,
@@ -129,6 +135,7 @@ export interface ApiDeps {
   schedules: ScheduleRepository;
   folders: FolderRepository;
   folderAccess: FolderAccessService;
+  folderGrants: FolderReportGrants;
   tileOrder: TileOrderRepository;
   scheduler: Scheduler;
   recipients: RecipientService;
@@ -1065,9 +1072,35 @@ export function apiRouter(d: ApiDeps): Router {
 
   /**
    * Every report the user can see on the dashboard: their own, plus reports shared with them
-   * (directly or through a group), or every other report for a global ADMIN. This is the
-   * same owner/share filtering AccessService applies to a single report.
+   * (directly, through a group, or through a folder its owner shared with its reports), or
+   * every other report for a global ADMIN. This is the same owner/share filtering
+   * AccessService applies to a single report.
    */
+  /** Reports shared with a (non-admin) user: direct and group shares, plus folder grants (011). */
+  const sharedWith = async (userId: string): Promise<AccessibleReport[]> => {
+    const groups = await d.groups.forUser(userId);
+    const [direct, viaFolders] = await Promise.all([
+      d.reports.listShared(userId, groups),
+      d.folderGrants.reportRolesFor(userId, groups),
+    ]);
+    if (!viaFolders.size) return direct;
+    const out = direct.map((x) => {
+      const f = viaFolders.get(x.id);
+      viaFolders.delete(x.id);
+      // the stronger access wins; a direct share is never weakened by a folder
+      return f === 'EDITOR' && x.access === 'VIEWER'
+        ? { ...x, access: 'EDITOR' as const, viaFolder: true }
+        : x;
+    });
+    const extra = (await d.reports.listByIds([...viaFolders.keys()]))
+      .filter((x) => x.ownerId !== userId)
+      .map((x) => ({ ...x, access: viaFolders.get(x.id)!, viaFolder: true }));
+    if (!extra.length) return out;
+    return [...out, ...extra].sort(
+      (a, b) =>
+        a.name.toUpperCase().localeCompare(b.name.toUpperCase()) || a.id.localeCompare(b.id),
+    );
+  };
   const visibleReports = async (
     u: { id: string; role: string },
     opts: { search?: string; category?: string; sort?: SortKey } = {},
@@ -1078,7 +1111,7 @@ export function apiRouter(d: ApiDeps): Router {
     const shared = (
       u.role === 'ADMIN'
         ? (await d.reports.listAdmin()).filter((report) => report.ownerId !== u.id)
-        : await d.reports.listShared(u.id, await d.groups.forUser(u.id))
+        : await sharedWith(u.id)
     ).filter(
       (x) =>
         (!needle || x.name.toUpperCase().includes(needle)) &&
@@ -1198,6 +1231,45 @@ export function apiRouter(d: ApiDeps): Router {
     if (!f) throw new AppError(404, 'FOLDER_NOT_FOUND', 'Folder not found.');
     return f;
   };
+  /**
+   * A folder's shares and its "also share the reports" option (migration 011), with which of
+   * the reports in it are (or would be) shared through it and which are skipped and why. Only
+   * reports the caller (the owner, or an admin reading) can see are listed.
+   */
+  const folderSharing = async (
+    u: Pick<AppUser, 'id' | 'role'>,
+    folder: { id: string; ownerId: string },
+  ) => {
+    const [shares, setting, members, visible] = await Promise.all([
+      d.folderAccess.listShares(folder.id),
+      d.folderAccess.reportSharingFor([folder.id]),
+      d.folderAccess.members([folder]),
+      visibleIdSet(u),
+    ]);
+    const mine = (members.get(folder.id) ?? []).filter((m) => visible.has(m.reportId));
+    const byId = new Map(
+      (await d.reports.listByIds(mine.map((m) => m.reportId))).map((x) => [x.id, x]),
+    );
+    const included: { id: string; name: string }[] = [];
+    const skipped: {
+      id: string;
+      name: string;
+      ownerName: string;
+      reason: FolderReportSkipReason;
+    }[] = [];
+    for (const m of mine) {
+      const rep = byId.get(m.reportId);
+      if (!rep) continue;
+      const reason = folderSkipReason(folder.ownerId, m);
+      if (reason) skipped.push({ id: rep.id, name: rep.name, ownerName: rep.ownerName, reason });
+      else included.push({ id: rep.id, name: rep.name });
+    }
+    return {
+      shares,
+      shareReports: setting.get(folder.id) ?? null,
+      reports: { included, skipped },
+    };
+  };
   /** The report must exist and be visible to the caller, else 404 (never 403: no leak). */
   const requireVisibleReport = async (u: Pick<AppUser, 'id' | 'role'>, id: string) => {
     await d.access.require(u, id, 'VIEW');
@@ -1253,18 +1325,22 @@ export function apiRouter(d: ApiDeps): Router {
           'FORBIDDEN',
           'Only the folder owner can see who it is shared with.',
         );
-      res.json({ shares: await d.folderAccess.listShares(folder.id) });
+      res.json(await folderSharing(user(req), folder));
     }),
   );
   r.put(
     '/folders/:folderId/shares',
     h(async (req, res) => {
-      const { shares } = sharesInputSchema.parse(req.body);
+      const { shares, shareReports } = folderSharesInputSchema.parse(req.body);
       const { folder } = await d.folderAccess.require(user(req), folderId(req), 'OWNER');
-      const out = await d.folderAccess.replaceShares(folder, user(req).id, shares, async (id) =>
-        Boolean(await d.users.findById(id)),
+      await d.folderAccess.replaceShares(
+        folder,
+        user(req).id,
+        shares,
+        async (id) => Boolean(await d.users.findById(id)),
+        shareReports,
       );
-      res.json({ shares: out });
+      res.json(await folderSharing(user(req), folder));
     }),
   );
   r.get(
@@ -1296,7 +1372,7 @@ export function apiRouter(d: ApiDeps): Router {
       const { folder } = await d.folderAccess.require(user(req), folderId(req), 'EDIT');
       // An editor can only place reports they can see themselves.
       await requireVisibleReport(user(req), rid);
-      await d.folderAccess.addReport(folder.id, rid, user(req).id);
+      await d.folderAccess.addReport(folder, rid, user(req).id);
       res.json({ folder: await oneFolder(user(req), folder.id) });
     }),
   );
@@ -1738,7 +1814,12 @@ export function apiRouter(d: ApiDeps): Router {
     '/reports/:id/shares',
     h(async (req, res) => {
       const { report } = await d.access.require(user(req), reportId(req), 'OWNER');
-      res.json({ shares: await d.access.listShares(report.id) });
+      const [shares, folderGrants] = await Promise.all([
+        d.access.listShares(report.id),
+        d.folderGrants.grantsForReport(report),
+      ]);
+      // folderGrants: read-only here; they change with the folder, not the report's shares
+      res.json({ shares, folderGrants });
     }),
   );
   r.put(
@@ -1765,13 +1846,15 @@ export function apiRouter(d: ApiDeps): Router {
         );
       const limit = Number(req.query.limit) || 100;
       const owner = await d.users.findById(report.ownerId);
-      const [shares, events] = await Promise.all([
+      const [shares, events, folderGrants] = await Promise.all([
         d.access.listShares(report.id),
         d.access.listAudit(report.id, limit),
+        d.folderGrants.grantsForReport(report),
       ]);
       res.json({
         owner: { id: report.ownerId, displayName: owner?.displayName ?? report.ownerId },
         shares,
+        folderGrants,
         events,
       });
     }),
@@ -1889,15 +1972,17 @@ export function apiRouter(d: ApiDeps): Router {
       });
     }),
   );
+  const schedulesFor = async (u: Pick<AppUser, 'id' | 'role'>) => {
+    const admin = u.role === 'ADMIN';
+    const groups = await d.groups.forUser(u.id);
+    const viaFolders = admin ? [] : [...(await d.folderGrants.reportRolesFor(u.id, groups)).keys()];
+    return d.schedules.listForUser(u.id, groups, admin, viaFolders);
+  };
   r.get(
     '/schedules',
     h(async (req, res) => {
       res.json({
-        schedules: await d.schedules.listForUser(
-          user(req).id,
-          await d.groups.forUser(user(req).id),
-          user(req).role === 'ADMIN',
-        ),
+        schedules: await schedulesFor(user(req)),
         settings: scheduleSettings(),
       });
     }),

@@ -1146,7 +1146,22 @@ async function main() {
     ],
     exists,
   );
-  await folderAccess.addReport(team.id, created[0].id, 'u-demo');
+  await folderAccess.addReport({ id: team.id, ownerId: 'u-pat' }, created[0].id, 'u-demo');
+
+  // Sharing a folder's reports too (migration 011). The demo user opted in on "Ops Review"
+  // (view only), so Sam can open the demo user's reports in it. Pat's report, filed there by
+  // the demo user, is skipped: only its owner can share it.
+  const ops = await folders.create('u-demo', 'Ops Review');
+  await folders.setPref('u-demo', created[2].id, { folderId: ops.id });
+  await folders.setPref('u-demo', created[4].id, { folderId: ops.id });
+  if (patOwned[0]) await folders.setPref('u-demo', patOwned[0].id, { folderId: ops.id });
+  await folderAccess.replaceShares(
+    { id: ops.id, ownerId: 'u-demo' },
+    'u-demo',
+    [{ type: 'USER', id: 'u-sam', role: 'EDITOR' }],
+    exists,
+    'VIEWER',
+  );
 
   app.listen(PORT, '127.0.0.1', () => {
     console.log(
