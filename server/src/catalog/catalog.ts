@@ -108,7 +108,8 @@ export interface ResolvedTable {
 
 export class CatalogService {
   private readonly ttlMs: number;
-  private readonly tables = new Map<string, CacheEntry<CatalogTableEntry[]>>();
+  /** `more`: the catalog held more than MAX_TABLES matches when this entry was read. */
+  private readonly tables = new Map<string, CacheEntry<CatalogTableEntry[]> & { more: boolean }>();
   private readonly oneTable = new Map<string, CacheEntry<CatalogTableEntry | null>>();
   private readonly columnsByTable = new Map<string, CacheEntry<CatalogColumn[]>>();
   private readonly foreignKeys = new Map<string, CacheEntry<ForeignKeyColumn[]>>();
@@ -205,7 +206,7 @@ export class CatalogService {
 FROM QSYS2.SYSTABLES
 WHERE ${where.join('\n  AND ')}
 ORDER BY TABLE_SCHEMA, TABLE_NAME
-FETCH FIRST ${MAX_TABLES} ROWS ONLY`;
+FETCH FIRST ${MAX_TABLES + 1} ROWS ONLY`; // one extra row so truncation at MAX_TABLES is detected
     return { sql, params: bound };
   }
 
@@ -253,7 +254,7 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
       return {
         tables: cached.value.slice(0, limit),
         cachedAt: new Date(cached.at).toISOString(),
-        truncated: cached.value.length > limit,
+        truncated: cached.more || cached.value.length > limit,
       };
     }
     return this.once(key, async () => {
@@ -272,13 +273,14 @@ FETCH FIRST ${MAX_COLUMNS} ROWS ONLY`;
           };
         })
         .filter((t) => t.schema && t.name);
-      this.tables.set(key, { at: Date.now(), value: list });
+      // run.truncated: the extra (MAX_TABLES + 1)th row came back, so the list is incomplete
+      this.tables.set(key, { at: Date.now(), value: list, more: run.truncated });
       CatalogService.trim(this.tables);
       const entry = this.tables.get(key)!;
       return {
         tables: entry.value.slice(0, limit),
         cachedAt: new Date(entry.at).toISOString(),
-        truncated: entry.value.length > limit,
+        truncated: entry.more || entry.value.length > limit,
       };
     });
   }

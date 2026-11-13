@@ -9,6 +9,7 @@ import {
   MapepireMetadataDb,
   metadataJdbcOptions,
   openJob,
+  readAllRows,
   reportingJdbcOptions,
 } from '../../src/db/mapepire.js';
 import {
@@ -83,24 +84,12 @@ export function describeError(e: unknown): string {
 }
 
 /** Read every row of a statement (SQLJob.execute alone returns only the first 100). */
-export async function readAll<T = Row>(
+export function readAll<T = Row>(
   job: SqlJobLike,
   sql: string,
   params: (string | number | null)[] = [],
 ): Promise<T[]> {
-  const q = job.query<T>(sql, params.length ? { parameters: params } : undefined);
-  try {
-    let r = await q.execute(1000);
-    if (r.success === false) throw new Error((r as { error?: string }).error ?? 'query failed');
-    const rows: T[] = [...((r.data ?? []) as T[])];
-    while (!r.is_done) {
-      r = await q.fetchMore(1000);
-      rows.push(...((r.data ?? []) as T[]));
-    }
-    return rows;
-  } finally {
-    await q.close().catch(() => undefined);
-  }
+  return readAllRows<T>(job, sql, params);
 }
 
 const str = (v: unknown) => (v === null || v === undefined ? '' : String(v).trim());

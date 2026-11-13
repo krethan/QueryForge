@@ -168,6 +168,8 @@ export class QueryExecutor {
         query: QueryLike,
         columns: ResultColumn[],
         rowCount: number,
+        /** Raw look-ahead rows read past the first page, delivered by the next fetchPage. */
+        pending: unknown[],
       ) => Promise<boolean>;
     },
   ): Promise<Omit<ExecutionOutcome, 'columns' | 'rows'> & { hasMore?: boolean; kept?: boolean }> {
@@ -221,20 +223,25 @@ export class QueryExecutor {
         sql,
         parameters?.length ? { isTerseResults: true, parameters } : { isTerseResults: true },
       );
+      // Every read asks Mapepire for an explicit row count; its own default (100) is never used.
       const batch = paging ? paging.pageSize : this.cfg.limits.fetchBatchSize;
       const want = () => Math.max(1, Math.min(batch, maxRows + 1 - rowCount));
-      let res: QueryResult<unknown> = await guarded(query.execute(want()));
+      // Paging reads one row past the first page so hasMore / truncated are exact.
+      const firstPage = paging ? Math.max(1, Math.min(paging.pageSize, maxRows)) : 0;
+      let res: QueryResult<unknown> = await guarded(query.execute(paging ? firstPage + 1 : want()));
       if (!res.success) throw res;
       const columns = toColumns(res.metadata?.columns);
       await handlers.onColumns(columns);
       if (paging) {
         dbMs += res.execution_time ?? 0;
-        const data = (res.data ?? []).slice(0, maxRows).map((r) => normalizeRow(r, columns));
+        const raw = res.data ?? [];
+        const data = raw.slice(0, firstPage).map((r) => normalizeRow(r, columns));
+        const pending = raw.slice(firstPage, firstPage + 1);
         rowCount = data.length;
         if (data.length) await handlers.onRows(data);
-        const more = !res.is_done && !!res.has_results;
+        const more = pending.length > 0 || (!res.is_done && res.has_results !== false);
         if (more && rowCount < maxRows && !entry.cancelled && !timedOut) {
-          kept = await paging.keep(job, query, columns, rowCount);
+          kept = await paging.keep(job, query, columns, rowCount, pending);
           hasMore = kept;
         }
         truncated = more && !kept;
@@ -328,7 +335,7 @@ export class QueryExecutor {
       opts.parameters,
       {
         pageSize,
-        keep: async (job, query, cols, rowCount) => {
+        keep: async (job, query, cols, rowCount, pending) => {
           wanted = true;
           entry = await this.cursors.add({
             ownerId,
@@ -338,6 +345,7 @@ export class QueryExecutor {
             columns: cols,
             rowCount,
             maxRows,
+            pending,
             formatPage: opts.formatPage,
             onClose: opts.onClose
               ? (e, reason) =>
@@ -389,12 +397,26 @@ export class QueryExecutor {
           this.cfg.limits.queryTimeoutMs,
         );
       });
-      const res = await Promise.race([e.query.fetchMore(n), timeout]);
-      if (!res.success) throw res;
-      const rows = (res.data ?? []).slice(0, n).map((r) => normalizeRow(r, e.columns));
+      // Read one row past this page (less any look-ahead row already held) so hasMore and the
+      // row cap are exact: Mapepire only reports is_done once a block comes back short.
+      const pending = e.pending ?? [];
+      const need = e.serverDone ? 0 : n + 1 - pending.length;
+      let fetched: unknown[] = [];
+      let serverDone = !!e.serverDone;
+      if (need > 0) {
+        const res = await Promise.race([e.query.fetchMore(need), timeout]);
+        if (!res.success) throw res;
+        fetched = res.data ?? [];
+        serverDone = !!res.is_done || res.has_results === false || fetched.length < need;
+      }
+      const raw = pending.length ? [...pending, ...fetched] : fetched;
+      const rows = raw.slice(0, n).map((r) => normalizeRow(r, e.columns));
+      const rest = raw.slice(n);
       e.rowCount += rows.length;
-      const done = !!res.is_done || !res.has_results || rows.length === 0;
+      const done = rest.length === 0 && (serverDone || rows.length < n);
       const limit = !done && e.rowCount >= e.maxRows;
+      e.pending = rest;
+      e.serverDone = serverDone;
       if (done || limit) {
         await this.cursors.close(e.id, done ? 'COMPLETE' : 'LIMIT');
         return {

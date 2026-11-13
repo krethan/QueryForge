@@ -156,7 +156,8 @@ as text.
 
 A run returns the first `RESULT_PAGE_SIZE` rows. If more exist, the server keeps that Mapepire job open as a
 short-lived **result cursor** owned by the signed-in user, and the grid shows **"More rows are available —
-Load next N rows"**, which calls `POST /api/results/:id/next` (`Query.fetchMore`). Cursors:
+Load next N rows"**, which calls `POST /api/results/:id/next` (`Query.fetchMore`). The server reads one row
+ahead, so the prompt appears only when another row really exists. Cursors:
 
 - are visible only to their owner (others get 404); an unknown or expired one returns `410 CURSOR_EXPIRED`
   and the UI asks you to re-run;
@@ -719,6 +720,11 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
   `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).
 - Mapepire 1.0.2 has no statement cancel API; cancel/timeout close the job.
+- mapepire-js 1.0.2's `SQLJob.execute()` returns only the first 100 rows. Every read that needs more pages
+  explicitly: metadata reads page 1,000 rows at a time until the end (and fail past 100,000 rows rather than
+  returning a partial list); runs, exports and the catalog fetch explicit batch sizes up to their own limits and
+  read one row past the limit so truncation is reported exactly. Tested with fakes that emulate Mapepire's
+  paging, not on a real IBM i.
 - On Node.js 20, DECIMAL > 15 digits and BIGINT are rounded inside mapepire-js before reaching the server
   (flagged in the UI); use Node.js 22+. The exact-value path has been tested with fakes only.
 - Paged results are capped at `MAX_RESULT_ROWS`; each open cursor holds one Mapepire job until it completes,

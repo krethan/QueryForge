@@ -17,6 +17,13 @@ export interface CursorEntry {
   columns: ResultColumn[];
   rowCount: number;
   maxRows: number;
+  /**
+   * Raw rows already read from Mapepire but not yet delivered (the one-row look-ahead that makes
+   * hasMore / truncated exact; Mapepire only reports is_done after a block comes back short).
+   */
+  pending?: unknown[];
+  /** The server reported is_done on the last fetch: never call fetchMore again. */
+  serverDone?: boolean;
   /** Bound at run creation so later pages use that run's validated report rules. */
   formatPage?: PageFormatter;
   createdAt: number;
