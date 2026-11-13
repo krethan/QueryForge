@@ -17,7 +17,13 @@ import {
   StructuredListWrapper,
   Toggle,
 } from '@carbon/react';
-import { Close, Folder as FolderIcon, Group, User as UserIcon } from '@carbon/icons-react';
+import {
+  Close,
+  Folder as FolderIcon,
+  Group,
+  RecentlyViewed,
+  User as UserIcon,
+} from '@carbon/icons-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { api } from '../api/client';
 import type {
@@ -108,9 +114,12 @@ export function FolderGrantList({ grants }: { grants: FolderReportGrant[] }) {
 export function FolderShareModal({
   folder,
   onClose,
+  onAudit,
 }: {
   folder: Folder | null;
   onClose(saved?: boolean): void;
+  /** Open the folder's Access and audit panel instead (unsaved changes are discarded). */
+  onAudit?(f: Folder): void;
 }) {
   const [info, setInfo] = useState<FolderSharing | null>(null);
   const [shareReports, setShareReports] = useState<FolderShareReports>(null);
@@ -129,6 +138,19 @@ export function FolderShareModal({
       }}
       save={(id, shares) => api.putFolderSharing(id, shares, shareReports)}
       heading="Share folder"
+      headerAction={
+        onAudit && folder ? (
+          <Button
+            kind="ghost"
+            size="sm"
+            renderIcon={RecentlyViewed}
+            className="qf-share-audit-link"
+            onClick={() => onAudit(folder)}
+          >
+            View access and audit history
+          </Button>
+        ) : undefined
+      }
       note={`Viewers can see the folder. Editors can also add, remove and reorder its reports. ${
         shareReports
           ? 'The reports listed below are shared with them too.'
@@ -232,6 +254,7 @@ function ShareDialog({
   save: saveShares,
   heading,
   note,
+  headerAction,
   onClose,
   children,
 }: {
@@ -240,6 +263,8 @@ function ShareDialog({
   save(id: string, shares: Share[]): Promise<unknown>;
   heading?: string;
   note: string;
+  /** Shown under the note, e.g. a link to the folder's access and audit panel. */
+  headerAction?: ReactNode;
   onClose(saved?: boolean): void;
   /** Extra sections under the list (folder report sharing, access through folders). */
   children?: ReactNode;
@@ -329,6 +354,7 @@ function ShareDialog({
     >
       <Stack gap={5}>
         <p className="qf-muted">{note}</p>
+        {headerAction && <div>{headerAction}</div>}
         <ErrorNotice error={error} />
         <div className="qf-share-add">
           <ComboBox

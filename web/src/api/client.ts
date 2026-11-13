@@ -37,9 +37,14 @@ import type {
   SchemaTablesResponse,
   User,
   Folder,
+  FolderAccess,
+  FolderAuditPage,
   Formatting,
   ReportPrefs,
 } from './types';
+
+/** Folder sharing history events loaded per page (the server allows up to 100). */
+export const FOLDER_AUDIT_PAGE = 25;
 
 export class ApiError extends Error {
   constructor(
@@ -188,6 +193,12 @@ export const api = {
     json<{ shares: Share[] }>('PUT', `/folders/${id}/shares`, {
       shares: shares.map(({ type, id: sid, role }) => ({ type, id: sid, role })),
     }).then((r) => r.shares),
+  /** Who can reach a folder now and the first page of its sharing history (owner or admin). */
+  getFolderAccess: (id: string, limit = FOLDER_AUDIT_PAGE) =>
+    json<FolderAccess>('GET', `/folders/${id}/access?limit=${limit}`),
+  /** A later page of a folder's sharing history, newest first (owner or admin). */
+  getFolderAudit: (id: string, offset: number, limit = FOLDER_AUDIT_PAGE) =>
+    json<FolderAuditPage>('GET', `/folders/${id}/audit?limit=${limit}&offset=${offset}`),
   /** A folder's shares, its "share the reports" option and which reports that covers. */
   getFolderSharing: (id: string) => json<FolderSharing>('GET', `/folders/${id}/shares`),
   /**

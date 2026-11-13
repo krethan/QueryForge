@@ -54,6 +54,7 @@ import {
 import { folderInputSchema, type FolderRepository } from '../reports/folders.js';
 import {
   folderAddInputSchema,
+  folderAuditQuerySchema,
   folderOrderInputSchema,
   mergeVisibleOrder,
   type FolderAccessService,
@@ -1343,26 +1344,47 @@ export function apiRouter(d: ApiDeps): Router {
       res.json(await folderSharing(user(req), folder));
     }),
   );
+  /**
+   * Folder access and audit follow the report rule (AccessService.canViewAudit): only the owner,
+   * or a global admin, may read them. Viewers and editors get 403; anyone who cannot see the
+   * folder at all, including an admin looking at someone's personal (never shared) folder, 404.
+   */
+  const requireFolderAuditor = async (req: Request) => {
+    const { folder, access } = await d.folderAccess.require(user(req), folderId(req), 'VIEW');
+    if (access !== 'OWNER' && access !== 'ADMIN')
+      throw new AppError(
+        403,
+        'FORBIDDEN',
+        'Only the folder owner or an admin can view access audit.',
+      );
+    return folder;
+  };
   r.get(
     '/folders/:folderId/access',
     h(async (req, res) => {
-      const { folder, access } = await d.folderAccess.require(user(req), folderId(req), 'VIEW');
-      if (access !== 'OWNER' && access !== 'ADMIN')
-        throw new AppError(
-          403,
-          'FORBIDDEN',
-          'Only the folder owner or an admin can view access audit.',
-        );
+      const folder = await requireFolderAuditor(req);
       const owner = await d.users.findById(folder.ownerId);
-      const [shares, events] = await Promise.all([
+      const [shares, page, sharing] = await Promise.all([
         d.folderAccess.listShares(folder.id),
-        d.folderAccess.listAudit(folder.id, Number(req.query.limit) || 100),
+        d.folderAccess.auditPage(folder.id, Number(req.query.limit) || 100, 0),
+        d.folderAccess.reportSharingFor([folder.id]),
       ]);
       res.json({
         owner: { id: folder.ownerId, displayName: owner?.displayName ?? folder.ownerId },
         shares,
-        events,
+        shareReports: sharing.get(folder.id) ?? null,
+        events: page.events,
+        hasMore: page.hasMore,
       });
+    }),
+  );
+  r.get(
+    '/folders/:folderId/audit',
+    h(async (req, res) => {
+      const folder = await requireFolderAuditor(req);
+      const { limit, offset } = folderAuditQuerySchema.parse(req.query);
+      const page = await d.folderAccess.auditPage(folder.id, limit, offset);
+      res.json({ ...page, limit, offset });
     }),
   );
   r.post(

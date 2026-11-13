@@ -499,8 +499,9 @@ is 403):
   `access` (OWNER, EDITOR, VIEWER or ADMIN), `shared`, and `reportIds` (the reports in it you can see, in
   folder order). `GET /api/folders/:folderId` returns one.
 - `GET/PUT /api/folders/:folderId/shares` (`{ shares: [{ type: 'USER' | 'GROUP', id, role }] }`, owner only
-  for PUT; owner or admin for GET) and `GET /api/folders/:folderId/access` (owner and admin: shares and the
-  audit trail).
+  for PUT; owner or admin for GET), `GET /api/folders/:folderId/access` (owner and admin: shares and the
+  audit trail) and `GET /api/folders/:folderId/audit` (paged history; see
+  [Folder access and audit](#folder-access-and-audit)).
 - `POST /api/folders/:folderId/reports` (`{ reportId }`), `DELETE /api/folders/:folderId/reports/:id` and
   `PUT /api/folders/:folderId/order` (`{ reportIds: uuid[] }`, at most 2000) need Editor on the folder and
   view access to each report. Unknown or hidden IDs in an order are dropped without saying whether they
@@ -560,9 +561,45 @@ shares and the option are saved in one transaction, owner only. `GET /api/folder
 Storage is migration `011_folder_report_sharing.sql`, which is additive (one new table):
 `QF_FOLDER_REPORT_SHARING` (FOLDER_ID primary key, MAX_ROLE `VIEWER`/`EDITOR`, UPDATED_BY, UPDATED_AT), ON
 DELETE CASCADE from `QF_FOLDERS`, and on the protected-objects list. A folder with no row shares no
-reports. The option's last change (who and when) is kept on the row; there is no separate history of it.
+reports. The option's last change (who and when) is kept on the row, and every change is also written to
+the folder's audit history (see [Folder access and audit](#folder-access-and-audit)).
 **This feature has not been tested on a real IBM i.** The tests run against the in-memory fake metadata
 database and in-process API; migration 011 has never been applied to Db2 for i.
+
+## Folder access and audit
+
+Each folder has an **Access and audit** panel, like the one for reports. Open it from **Manage folders**
+(the clock icon next to a folder) or from the folder's Share dialog (**View access and audit history**). It
+shows who can reach the folder now (the owner and each user or group with their role), whether the
+folder's reports are shared and at which level, and the sharing history, newest first: who made each
+change, what changed (a user, a group, or the reports in the folder), the role or level before and after,
+and when. **Show older changes** loads the next page.
+
+- **Who can see it:** the same rule as the report panel. The folder owner, and admins for folders that are
+  shared with anyone. Folder viewers and editors get 403; anyone who cannot see the folder at all,
+  including an admin looking at a personal (never shared) folder, gets 404.
+- **What is recorded:** every grant, role change and revoke of a folder share (since migration 009), and
+  now every change to **Also share the reports in this folder**: turning it on (Granted, Off → level),
+  changing its level (Changed) and turning it off (Revoked, level → Off). Each row is written in the same
+  transaction as the change, so a failed save leaves no audit row. Saving without changing the option
+  writes nothing for it.
+
+API: `GET /api/folders/:folderId/audit?limit=25&offset=0` returns `{ events, hasMore, limit, offset }`
+(newest first; `limit` 1–100, default 25; `offset` up to 100000). Each event is `{ id, folderId, action:
+'GRANT' | 'CHANGE' | 'REVOKE', principalType: 'USER' | 'GROUP' | 'REPORTS', principalId, principalName?,
+oldRole, newRole, actorId, actorName?, occurredAt }`; for `REPORTS` rows `principalId` is `*REPORTS` and the
+roles are the option's level (`null` = off). `GET /api/folders/:folderId/access` also returns
+`shareReports` and `hasMore`.
+
+Storage is migration `012_folder_audit_report_sharing.sql`. `QF_FOLDER_SHARE_AUDIT` (009) only allowed
+`USER` and `GROUP` principals, so the migration replaces its `QF_FSAU_CK_TYPE` check constraint with one
+that also allows `REPORTS` (`ALTER TABLE … DROP CONSTRAINT`, then `ADD CONSTRAINT`). No table, column or
+row is added or changed, and every existing row satisfies the new constraint. If the second statement
+fails, the table is left without the principal-type check until the migration is re-run; run it from
+`npm run migrate -- --print` with a DBA if in doubt. Reading the history uses `OFFSET … ROWS FETCH FIRST …
+ROWS ONLY`, which needs IBM i 7.2 or later (7.1 with a recent TR). **This feature has not been tested on a
+real IBM i.** The tests run against the in-memory fake metadata database and in-process API; migration 012
+has never been applied to Db2 for i.
 
 ## Rearranging dashboard tiles
 
