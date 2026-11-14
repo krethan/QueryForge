@@ -187,11 +187,11 @@ describe('verify-ibmi: statement policy', () => {
 });
 
 describe('verify-ibmi: expected objects', () => {
-  it('understands every statement in migrations 001-015', () => {
+  it('understands every statement in migrations 001-016', () => {
     const e = expectedSchema();
     expect(e.unparsed).toEqual([]);
     expect(e.migrations.map((m) => m.version)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     ]);
     expect(e.tables.map((t) => t.name)).toContain('QF_FOLDER_REPORT_SHARING');
     expect(e.indexes.find((i) => i.name === 'QF_USERS_UX_EXTERNAL')?.unique).toBe('V');
@@ -314,14 +314,14 @@ describe('verify-ibmi: read-only run (default)', () => {
 });
 
 describe('verify-ibmi: disposable library round trip', () => {
-  it('creates the library, applies 001-015, verifies every object and drops it', async () => {
+  it('creates the library, applies 001-016, verifies every object and drops it', async () => {
     const ibmi = new FakeIbmi();
     const r = await runVerification(
       opts({ applyMigrations: true, smoke: false, cleanup: 'UBVERIFY' }),
       { factory: ibmi.factory },
     );
     expect(r.mode).toBe('writes-to-disposable-library');
-    for (let v = 1; v <= 13; v++) {
+    for (let v = 1; v <= 16; v++) {
       expect(status(r, `apply.${v}`), `apply ${v}`).toEqual(['PASS']);
       expect(status(r, `objects.${v}`), `objects ${v}`).toEqual(['PASS']);
     }

@@ -27,6 +27,7 @@ import {
 import { useEffect, type ComponentType, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { NotificationBell } from './NotificationBell';
 
 const NAV: { to: string; label: string; icon: ComponentType; adminOnly?: boolean }[] = [
   { to: '/', label: 'Dashboard', icon: Dashboard },
@@ -112,6 +113,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </HeaderName>
             <span className="qf-brand-tagline">Bob's your uncle</span>
             <HeaderGlobalBar>
+              <NotificationBell />
               <HeaderGlobalAction
                 aria-label={`Account: ${user?.displayName ?? ''}`}
                 tooltipAlignment="end"

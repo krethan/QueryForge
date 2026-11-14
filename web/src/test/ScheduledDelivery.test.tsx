@@ -231,7 +231,11 @@ describe('schedule editor', () => {
 });
 
 describe('schedule list', () => {
-  const renderList = (list: Schedule[], over: Partial<ScheduleSettings> = {}) => {
+  const renderList = (
+    list: Schedule[],
+    over: Partial<ScheduleSettings> = {},
+    openHistoryFor: string | null = null,
+  ) => {
     const onChanged = vi.fn();
     render(
       <MemoryRouter>
@@ -242,6 +246,7 @@ describe('schedule list', () => {
           showReport
           emptyText="Nothing here."
           onChanged={onChanged}
+          openHistoryFor={openHistoryFor}
         />
       </MemoryRouter>,
     );
@@ -352,6 +357,19 @@ describe('schedule list', () => {
     expect(within(d).getByText('On schedule')).toBeInTheDocument();
     expect(within(d).getByText('Failed')).toBeInTheDocument();
     expect(within(d).getByText('SMTP 554 rejected')).toBeInTheDocument();
+  });
+
+  it('opens a schedule’s delivery history from a notification link', async () => {
+    const list = vi.spyOn(api, 'scheduleDeliveries').mockResolvedValue([]);
+    renderList([schedule()], {}, 's1');
+    expect(await screen.findByRole('heading', { name: 'Delivery history' })).toBeInTheDocument();
+    expect(list).toHaveBeenCalledWith('s1');
+  });
+
+  it('ignores a history link for a schedule it does not list', () => {
+    const list = vi.spyOn(api, 'scheduleDeliveries').mockResolvedValue([]);
+    renderList([schedule()], {}, 'other');
+    expect(list).not.toHaveBeenCalled();
   });
 
   it('deletes after confirmation', async () => {

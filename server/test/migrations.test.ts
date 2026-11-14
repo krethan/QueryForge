@@ -18,8 +18,10 @@ describe('Db2 for i migrations', () => {
     expect(sql).toContain('ON DELETE SET NULL');
     expect(sql).toContain('CLOB');
   });
-  it('applies migrations 1-15 in order (012 widens the folder audit principal check, 013 adds folder deletions, 014 share expiry, 015 share notifications)', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  it('applies migrations 1-16 in order (012 widens the folder audit principal check, 013 adds folder deletions, 014 share expiry, 015 share notifications, 016 notification read state)', () => {
+    expect(migs.map((m) => m.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
     expect(migs[3].statements[0]).toMatch(/ADD COLUMN BUILDER_DEF CLOB\(1M\) CCSID 1208$/);
   });
   it('splits statements without breaking on semicolons in strings or comments', () => {

@@ -36,7 +36,7 @@ import {
 import { FolderShareModal, ShareModal } from '../components/ShareModal';
 import { FolderAccessAuditModal } from '../components/FolderAccessAuditModal';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Folder, Report } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
@@ -381,7 +381,13 @@ export function DashboardPage() {
   const [manage, setManage] = useState(false);
   const [folderToShare, setFolderToShare] = useState<Folder | null>(null);
   const [folderToAudit, setFolderToAudit] = useState<Folder | null>(null);
-  const [folderFilter, setFolderFilter] = useState(ALL);
+  // "/?folder=<id>" (a link from a notification) opens the dashboard on that folder.
+  const [params] = useSearchParams();
+  const folderParam = params.get('folder');
+  const [folderFilter, setFolderFilter] = useState(folderParam ?? ALL);
+  useEffect(() => {
+    if (folderParam) setFolderFilter(folderParam);
+  }, [folderParam]);
   const [grouped, setGrouped] = useState(false);
   /** Optimistic local changes to stars / folders until the next reload. */
   const [local, setLocal] = useState<Record<string, Partial<Report>>>({});

@@ -34,11 +34,12 @@ function setup(
   owned: Report[],
   shared: Report[] = [],
   folders = [folder(FIN, 'Finance'), folder(OPS, 'Operations')],
+  url = '/',
 ) {
   vi.spyOn(api, 'listAllReports').mockResolvedValue({ owned, shared });
   vi.spyOn(api, 'listFolders').mockResolvedValue(folders);
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[url]}>
       <DashboardPage />
     </MemoryRouter>,
   );
@@ -62,6 +63,22 @@ describe('Dashboard folders and favorites', { timeout: 20000 }, () => {
     // Favorites comes before everything else
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
     expect(headings[0]).toMatch(/^Favorites/);
+  });
+
+  it('opens on the folder named in the link from a notification (/?folder=<id>)', async () => {
+    setup(
+      [rep('1', 'Revenue', { folderId: FIN }), rep('2', 'Costs')],
+      [],
+      undefined,
+      `/?folder=${OPS}`,
+    );
+    await waitFor(() => expect(screen.getByLabelText('Folder')).toHaveValue(OPS));
+  });
+
+  it('ignores a folder link it cannot show', async () => {
+    setup([rep('1', 'Revenue')], [], undefined, '/?folder=not-mine');
+    await screen.findAllByText('Revenue');
+    expect(screen.getByLabelText('Folder')).toHaveValue('__all__');
   });
 
   it('stars and unstars a report through the API', async () => {

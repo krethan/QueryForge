@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { api } from '../api/client';
 import { AppShell, pageTitle } from '../components/AppShell';
 
 vi.mock('../auth/AuthContext', () => ({
@@ -21,8 +22,17 @@ function renderAt(url: string) {
 }
 
 describe('AppShell', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'notificationCount').mockResolvedValue({ unread: 2, capped: false });
+  });
   afterEach(() => {
     document.title = '';
+    vi.restoreAllMocks();
+  });
+
+  it('has a notifications bell with the unread count in the header', async () => {
+    renderAt('/');
+    expect(await screen.findByRole('button', { name: 'Notifications, 2 unread' })).toBeVisible();
   });
 
   it('shows the product name and the tagline in the header', () => {

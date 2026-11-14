@@ -41,8 +41,23 @@ export class FakeMetadataDb implements MetadataDb {
   private clock = 0;
   failNext?: Error;
 
+  /**
+   * Where the fake's own CURRENT TIMESTAMP comes from. Unset (the default), it is a fixed day in
+   * October 2026 that ticks once per row; tests of time-ordered features (in-app notifications)
+   * can point it at their movable clock instead. Every value is still distinct (a microsecond
+   * counter is added).
+   */
+  dbClock?: () => Date;
+  /** False simulates a database where migration 016 (QF_USER_SETTINGS.NOTICES_READ_AT) is missing. */
+  noticesReadColumn = true;
+
   private now() {
     this.clock++;
+    if (this.dbClock)
+      return (
+        this.dbClock().toISOString().replace('T', ' ').slice(0, 23) +
+        String(this.clock % 1000).padStart(3, '0')
+      );
     return `2026-10-23 12:00:${String(this.clock % 60).padStart(2, '0')}.${String(this.clock).padStart(6, '0')}`;
   }
 
@@ -682,6 +697,205 @@ export class FakeMetadataDb implements MetadataDb {
     };
   }
 
+  /** In-app notifications (no migration for the list; 016 for the read state). */
+  private inboxQuery(s: string, params: P): Row[] | undefined {
+    const ts = (v: unknown) => Date.parse(String(v).trim().replace(' ', 'T').slice(0, 23) + 'Z');
+    const missing016 = () => {
+      if (!this.noticesReadColumn)
+        throw new DbError('Column NOTICES_READ_AT not in specified tables.', '42703', -206);
+    };
+    if (/^SELECT NOTICES_READ_AT FROM \w+\.QF_USER_SETTINGS WHERE USER_ID = \?$/.test(s)) {
+      missing016();
+      const r = this.userSettings.get(String(params[0]));
+      return r ? [{ NOTICES_READ_AT: r.NOTICES_READ_AT ?? null }] : [];
+    }
+    /** Principal values after `skip` leading ones: the user ID then any group names. */
+    const principals = (sql: string, from: number) => {
+      const g = /PRINCIPAL_TYPE = 'GROUP' AND \w\.PRINCIPAL_ID IN \(([?, ]+)\)/.exec(sql);
+      const n = g ? (g[1].match(/\?/g) ?? []).length : 0;
+      return {
+        uid: params[from],
+        groups: params.slice(from + 1, from + 1 + n),
+        next: from + 1 + n,
+      };
+    };
+    const audit =
+      /^SELECT A\.AUDIT_ID, A\.(REPORT_ID|FOLDER_ID) AS TARGET_ID, .* FROM \w+\.(QF_SHARE_AUDIT|QF_FOLDER_SHARE_AUDIT) A JOIN \w+\.(QF_REPORTS|QF_FOLDERS) O ON .* WHERE A\.ACTION IN \('GRANT', 'CHANGE'\) AND A\.ACTOR_ID <> \? AND O\.OWNER_ID <> \? AND A\.OCCURRED_AT > CAST\(\? AS TIMESTAMP\)( AND A\.OCCURRED_AT < CAST\(\? AS TIMESTAMP\))? AND \(\(A\.PRINCIPAL_TYPE = 'USER' AND A\.PRINCIPAL_ID = \?\)( OR \(A\.PRINCIPAL_TYPE = 'GROUP' AND A\.PRINCIPAL_ID IN \([?, ]+\)\))?\) AND EXISTS \(SELECT 1 FROM \w+\.(QF_REPORT_SHARES|QF_FOLDER_SHARES) S WHERE .* AND \(S\.EXPIRES_AT IS NULL OR S\.EXPIRES_AT > CAST\(\? AS TIMESTAMP\)\)\) ORDER BY A\.OCCURRED_AT DESC, A\.AUDIT_ID DESC FETCH FIRST (\d+) ROWS ONLY$/.exec(
+        s,
+      );
+    if (audit) {
+      const report = audit[1] === 'REPORT_ID';
+      const [actor, notOwner, from] = params;
+      let i = 3;
+      const to = audit[4] ? params[i++] : null;
+      const pr = principals(s, i);
+      const now = params[pr.next];
+      const rows = report ? this.shareAudit : this.folderShareAudit;
+      const shares = report ? this.shares : this.folderShares;
+      const key = report ? 'REPORT_ID' : 'FOLDER_ID';
+      return rows
+        .filter((a) => {
+          const o = (report ? this.reports : this.folders).get(String(a[key]));
+          return (
+            o &&
+            (a.ACTION === 'GRANT' || a.ACTION === 'CHANGE') &&
+            a.ACTOR_ID !== actor &&
+            o.OWNER_ID !== notOwner &&
+            ts(a.OCCURRED_AT) > ts(from) &&
+            (to === null || ts(a.OCCURRED_AT) < ts(to)) &&
+            this.matchesPrincipal(a, pr.uid, pr.groups) &&
+            shares.some(
+              (x) =>
+                x[key] === a[key] &&
+                x.PRINCIPAL_TYPE === a.PRINCIPAL_TYPE &&
+                x.PRINCIPAL_ID === a.PRINCIPAL_ID &&
+                FakeMetadataDb.activeAt(x, now),
+            )
+          );
+        })
+        .sort(
+          (a, b) =>
+            ts(b.OCCURRED_AT) - ts(a.OCCURRED_AT) ||
+            String(b.AUDIT_ID).localeCompare(String(a.AUDIT_ID)),
+        )
+        .slice(0, Number(audit[7]))
+        .map((a) => {
+          const o = (report ? this.reports : this.folders).get(String(a[key]))!;
+          return {
+            AUDIT_ID: a.AUDIT_ID,
+            TARGET_ID: a[key],
+            ACTION: a.ACTION,
+            PRINCIPAL_TYPE: a.PRINCIPAL_TYPE,
+            PRINCIPAL_ID: a.PRINCIPAL_ID,
+            OLD_ROLE: a.OLD_ROLE ?? null,
+            NEW_ROLE: a.NEW_ROLE ?? null,
+            NEW_EXPIRES_AT: a.NEW_EXPIRES_AT ?? null,
+            OCCURRED_AT: a.OCCURRED_AT,
+            TARGET_NAME: report ? o.REPORT_NAME : o.FOLDER_NAME,
+            ACTOR_NAME: this.users.get(String(a.ACTOR_ID))?.DISPLAY_NAME ?? null,
+          };
+        });
+    }
+    const exp =
+      /^SELECT S\.(REPORT_ID|FOLDER_ID) AS TARGET_ID, S\.PRINCIPAL_TYPE, S\.PRINCIPAL_ID, S\.SHARE_ROLE, S\.EXPIRES_AT, S\.CREATED_AT, O\.(?:REPORT_NAME|FOLDER_NAME) AS TARGET_NAME, O\.OWNER_ID, U\.DISPLAY_NAME AS PRINCIPAL_NAME FROM \w+\.(?:QF_REPORT_SHARES|QF_FOLDER_SHARES) S JOIN .* WHERE S\.EXPIRES_AT IS NOT NULL AND S\.EXPIRES_AT > CAST\(\? AS TIMESTAMP\) AND S\.EXPIRES_AT <= CAST\(\? AS TIMESTAMP\) AND \(O\.OWNER_ID = \? OR \(\(S\.PRINCIPAL_TYPE = 'USER' AND S\.PRINCIPAL_ID = \?\)( OR \(S\.PRINCIPAL_TYPE = 'GROUP' AND S\.PRINCIPAL_ID IN \([?, ]+\)\))?\)\) ORDER BY S\.EXPIRES_AT DESC FETCH FIRST (\d+) ROWS ONLY$/.exec(
+        s,
+      );
+    if (exp) {
+      const report = exp[1] === 'REPORT_ID';
+      const [lo, hi, owner] = params;
+      const pr = principals(s, 3);
+      const key = report ? 'REPORT_ID' : 'FOLDER_ID';
+      return (report ? this.shares : this.folderShares)
+        .filter((x) => {
+          const o = (report ? this.reports : this.folders).get(String(x[key]));
+          return (
+            o &&
+            x.EXPIRES_AT !== null &&
+            x.EXPIRES_AT !== undefined &&
+            ts(x.EXPIRES_AT) > ts(lo) &&
+            ts(x.EXPIRES_AT) <= ts(hi) &&
+            (o.OWNER_ID === owner || this.matchesPrincipal(x, pr.uid, pr.groups))
+          );
+        })
+        .sort((a, b) => ts(b.EXPIRES_AT) - ts(a.EXPIRES_AT))
+        .slice(0, Number(exp[3]))
+        .map((x) => {
+          const o = (report ? this.reports : this.folders).get(String(x[key]))!;
+          return {
+            TARGET_ID: x[key],
+            PRINCIPAL_TYPE: x.PRINCIPAL_TYPE,
+            PRINCIPAL_ID: x.PRINCIPAL_ID,
+            SHARE_ROLE: x.SHARE_ROLE,
+            EXPIRES_AT: x.EXPIRES_AT,
+            CREATED_AT: x.CREATED_AT ?? null,
+            TARGET_NAME: report ? o.REPORT_NAME : o.FOLDER_NAME,
+            OWNER_ID: o.OWNER_ID,
+            PRINCIPAL_NAME:
+              x.PRINCIPAL_TYPE === 'USER'
+                ? (this.users.get(String(x.PRINCIPAL_ID))?.DISPLAY_NAME ?? null)
+                : null,
+          };
+        });
+    }
+    const dlv =
+      /^SELECT D\.DELIVERY_ID, D\.SCHEDULE_ID, D\.REPORT_ID, D\.FINISHED_AT, D\.RUN_TRIGGER, D\.ERROR_MESSAGE, R\.REPORT_NAME, R\.OWNER_ID FROM \w+\.QF_SCHEDULE_DELIVERIES D JOIN \w+\.QF_SCHEDULES S ON S\.SCHEDULE_ID = D\.SCHEDULE_ID JOIN \w+\.QF_REPORTS R ON R\.REPORT_ID = D\.REPORT_ID WHERE S\.CREATED_BY = \? AND D\.STATUS = 'FAILED' AND D\.FINISHED_AT > CAST\(\? AS TIMESTAMP\)( AND D\.FINISHED_AT < CAST\(\? AS TIMESTAMP\))? ORDER BY D\.FINISHED_AT DESC, D\.DELIVERY_ID DESC FETCH FIRST (\d+) ROWS ONLY$/.exec(
+        s,
+      );
+    if (dlv) {
+      const [by, from] = params;
+      const to = dlv[1] ? params[2] : null;
+      return this.scheduleDeliveries
+        .filter((d) => {
+          const sch = this.schedules.get(String(d.SCHEDULE_ID));
+          return (
+            sch &&
+            this.reports.has(String(d.REPORT_ID)) &&
+            sch.CREATED_BY === by &&
+            d.STATUS === 'FAILED' &&
+            ts(d.FINISHED_AT) > ts(from) &&
+            (to === null || ts(d.FINISHED_AT) < ts(to))
+          );
+        })
+        .sort(
+          (a, b) =>
+            ts(b.FINISHED_AT) - ts(a.FINISHED_AT) ||
+            String(b.DELIVERY_ID).localeCompare(String(a.DELIVERY_ID)),
+        )
+        .slice(0, Number(dlv[2]))
+        .map((d) => {
+          const r = this.reports.get(String(d.REPORT_ID))!;
+          return {
+            DELIVERY_ID: d.DELIVERY_ID,
+            SCHEDULE_ID: d.SCHEDULE_ID,
+            REPORT_ID: d.REPORT_ID,
+            FINISHED_AT: d.FINISHED_AT,
+            RUN_TRIGGER: d.RUN_TRIGGER,
+            ERROR_MESSAGE: d.ERROR_MESSAGE ?? null,
+            REPORT_NAME: r.REPORT_NAME,
+            OWNER_ID: r.OWNER_ID,
+          };
+        });
+    }
+    return undefined;
+  }
+
+  private inboxUpdate(s: string, params: P): number | undefined {
+    const missing016 = () => {
+      if (!this.noticesReadColumn)
+        throw new DbError('Column NOTICES_READ_AT not in specified tables.', '42703', -206);
+    };
+    if (
+      /^UPDATE \w+\.QF_USER_SETTINGS SET NOTICES_READ_AT = CAST\(\? AS TIMESTAMP\), UPDATED_AT = .* WHERE USER_ID = \?$/.test(
+        s,
+      )
+    ) {
+      missing016();
+      const r = this.userSettings.get(String(params[1]));
+      if (!r) return 0;
+      Object.assign(r, { NOTICES_READ_AT: params[0], UPDATED_AT: this.now() });
+      return 1;
+    }
+    if (
+      /^INSERT INTO \w+\.QF_USER_SETTINGS \(USER_ID, SHARE_EMAILS, NOTICES_READ_AT, UPDATED_AT\) VALUES \(\?, 1, CAST\(\? AS TIMESTAMP\), /.test(
+        s,
+      )
+    ) {
+      missing016();
+      const [uid, at] = params;
+      if (this.userSettings.has(String(uid)))
+        throw new DbError('Duplicate key value specified.', '23505', -803);
+      if (!this.users.has(String(uid))) throw new DbError('Foreign key violation.', '23503', -530);
+      this.userSettings.set(String(uid), {
+        USER_ID: uid,
+        SHARE_EMAILS: 1,
+        NOTICES_READ_AT: at,
+        UPDATED_AT: this.now(),
+      });
+      return 1;
+    }
+    return undefined;
+  }
+
   /** Share notifications and per-user settings (migration 015). */
   private notificationQuery(s: string, params: P): Row[] | undefined {
     const ts = (v: unknown) => Date.parse(String(v).trim().replace(' ', 'T').slice(0, 23) + 'Z');
@@ -952,6 +1166,8 @@ export class FakeMetadataDb implements MetadataDb {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
     if (s.startsWith('SELECT 1 AS OK')) return [{ OK: 1 }] as T[];
+    const inboxRows = this.inboxQuery(s, params);
+    if (inboxRows) return inboxRows as T[];
     const retentionRows = this.retentionQuery(s, params);
     if (retentionRows) return retentionRows as T[];
     const notificationRows = this.notificationQuery(s, params);
@@ -1216,6 +1432,8 @@ export class FakeMetadataDb implements MetadataDb {
   async update(sql: string, params: P = []): Promise<number> {
     this.record(sql, params);
     const s = sql.replace(/\s+/g, ' ');
+    const inboxN = this.inboxUpdate(s, params);
+    if (inboxN !== undefined) return inboxN;
     const retentionN = this.retentionUpdate(s, params);
     if (retentionN !== undefined) return retentionN;
     const notificationN = this.notificationUpdate(s, params);

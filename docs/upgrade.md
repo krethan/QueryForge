@@ -1,11 +1,11 @@
 # Upgrading an existing install
 
 This runbook upgrades an existing Uncle Bob install to the current `main`, which includes metadata
-migrations up to **015** and the settings added through PR #34. For what changed, see
+migrations up to **016** and the settings added through PR #34. For what changed, see
 [`CHANGELOG.md`](../CHANGELOG.md).
 
 > **Not verified on IBM i.** Nothing in Uncle Bob has run against a real IBM i or Mapepire server yet,
-> and migrations 001–015 have never been applied to Db2 for i. The steps and SQL below come from the
+> and migrations 001–016 have never been applied to Db2 for i. The steps and SQL below come from the
 > code in this repository. They have not been rehearsed on a real system. Run the
 > [verification kit](ibmi-verification.md) on a **non-production** partition first, and rehearse this
 > runbook there before using it anywhere that matters. Never run the kit against production.
@@ -205,7 +205,7 @@ Retention (PR #34) needs no migration, but **it is on by default for two tables*
    redoes the revoke and grant.
 
 7. **Check the version table** ([section 1.1](#11-find-out-where-you-are)). You should see one row for
-   each of versions 1 to 15.
+   each of versions 1 to 16.
 8. **Start the app** and work through the [post-upgrade checklist](#7-post-upgrade-checklist).
 
 ## 5. Migration reference
@@ -231,6 +231,11 @@ been tested, so restoring the save stays the supported rollback.
 | 013 | `QF_FOLDER_DELETIONS`                                                                                                                                                                                                         | Yes                                                                   | New table                                                                                                                                                                               | Restore the save                                                                                                                                                            |
 | 014 | `EXPIRES_AT` on `QF_REPORT_SHARES` and `QF_FOLDER_SHARES`, `OLD_EXPIRES_AT` and `NEW_EXPIRES_AT` on `QF_SHARE_AUDIT` and `QF_FOLDER_SHARE_AUDIT`, `EXPIRY` audit action, column labels                                        | Columns are additive (nullable, no default); constraints are replaced | **Highest risk.** Six `ADD COLUMN`s rebuild four tables under exclusive locks, and two check constraints are replaced (each re-validated). Run with the app stopped, in a quiet window. | Restore the save. **Do not** run the previous app against this schema after people have set end dates: it ignores `EXPIRES_AT`, so expired shares would grant access again. |
 | 015 | `QF_SHARE_REMINDERS`, `QF_USER_SETTINGS`                                                                                                                                                                                      | Yes                                                                   | New tables                                                                                                                                                                              | Restore the save                                                                                                                                                            |
+| 016 | `NOTICES_READ_AT` on `QF_USER_SETTINGS` (when each user last chose "Mark all read" in the notifications panel), column label                                                                                                  | Yes (nullable, no default)                                            | One `ADD COLUMN` rebuilds `QF_USER_SETTINGS` (one row per user who changed a setting) under an exclusive lock. Run with the app stopped. The app also runs without it (see below).      | Restore the save. The previous app ignores the column.                                                                                                                      |
+
+Migration 016 is the only one the app tolerates being absent: without it the notifications list still
+works (everything in its 30-day window counts as unread) and **Mark all read** answers
+`503 MIGRATION_REQUIRED`. Every other feature needs its migration applied first.
 
 ## 6. Rollback
 
@@ -264,7 +269,7 @@ Deleted rows come back only from the save.
 
 ## 7. Post-upgrade checklist
 
-- [ ] `QF_SCHEMA_VERSION` lists versions 1–15 ([section 1.1](#11-find-out-where-you-are)).
+- [ ] `QF_SCHEMA_VERSION` lists versions 1–16 ([section 1.1](#11-find-out-where-you-are)).
 - [ ] The server starts with no configuration error, and its log shows no SQL errors.
 - [ ] Sign in, open the dashboard, run a saved report, and export it to Excel.
 - [ ] Report Builder: the table list loads and a table's columns load. A table with more than 1,000
@@ -273,6 +278,8 @@ Deleted rows come back only from the save.
       appear. Without SMTP, the dialog says e-mail isn't set up.
 - [ ] A test share with an end date stops working after that date (try it on test data, not real users).
 - [ ] **Account → Notifications** shows the share e-mail opt-out.
+- [ ] The bell in the header shows a count, its panel lists recent notifications, and **Mark all read**
+      clears the count (this needs 016; without it the panel says the migration is missing).
 - [ ] As an admin: **Deleted folders** and **Data retention** open. Data retention shows the retention
       periods you intended. If you set both to `0`, nothing is pruned.
 - [ ] With `SCHEDULER_ENABLED=true` and any retention period above `0`, check the log after the first

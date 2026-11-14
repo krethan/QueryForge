@@ -872,3 +872,38 @@ export interface RetentionState {
   nextAutomaticAfter: string | null;
   lastRun: RetentionRun | null;
 }
+
+/** In-app notifications (the bell). Worked out by the server for the signed-in user only. */
+export type NoticeKind =
+  'SHARED' | 'ROLE_CHANGED' | 'SHARE_ENDING' | 'SHARE_ENDED' | 'DELIVERY_FAILED';
+export interface Notice {
+  id: string;
+  kind: NoticeKind;
+  at: string;
+  unread: boolean;
+  targetType: 'REPORT' | 'FOLDER' | 'SCHEDULE';
+  /** Null when the user may no longer see it (a share of theirs that ended). */
+  target: { id: string; name: string } | null;
+  side?: 'OWNER' | 'RECIPIENT';
+  actorName?: string;
+  role?: 'VIEWER' | 'EDITOR';
+  oldRole?: 'VIEWER' | 'EDITOR';
+  principal?: { type: 'USER' | 'GROUP'; name: string };
+  expiresAt?: string | null;
+  report?: { id: string; name: string };
+  error?: string | null;
+}
+/** GET /api/notifications */
+export interface NoticePage {
+  items: Notice[];
+  nextCursor: string | null;
+  lastReadAt: string | null;
+  /** False until metadata migration 016 is applied ("Mark all read" unavailable). */
+  readStateAvailable: boolean;
+}
+/** GET /api/notifications/count */
+export interface NoticeCount {
+  unread: number;
+  /** More than `unread` (shown as "99+"). */
+  capped: boolean;
+}

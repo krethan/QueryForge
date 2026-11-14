@@ -25,6 +25,8 @@ import { ScheduleHistoryModal } from './ScheduleHistoryModal';
 const NO_REPORTS: Report[] = [];
 
 interface Props {
+  /** Open this schedule's delivery history once it is listed (a link from a notification). */
+  openHistoryFor?: string | null;
   schedules: Schedule[];
   settings: ScheduleSettings | null;
   /** Fixed report (report editor); otherwise schedules may belong to any of `reports`. */
@@ -51,6 +53,7 @@ export function ScheduleList({
   emptyText,
   onChanged,
   onDialogChange,
+  openHistoryFor = null,
 }: Props) {
   const [editing, setEditing] = useState<Schedule | null | undefined>(undefined);
   const [history, setHistory] = useState<Schedule | null>(null);
@@ -66,6 +69,15 @@ export function ScheduleList({
       setEditing(null);
     }
   }, [newRequest]);
+
+  const opened = useRef<string | null>(null);
+  useEffect(() => {
+    if (!openHistoryFor || opened.current === openHistoryFor) return;
+    const s = schedules.find((x) => x.id === openHistoryFor);
+    if (!s) return;
+    opened.current = openHistoryFor;
+    setHistory(s);
+  }, [openHistoryFor, schedules]);
 
   const dialogOpen = editing !== undefined || Boolean(history) || Boolean(toDelete);
   useEffect(() => onDialogChange?.(dialogOpen), [dialogOpen, onDialogChange]);
