@@ -116,6 +116,11 @@ scheduler runs. See the Changed section below.
   orders by constraint schema as well as name so that each constraint's rows stay together.
 - Migration 009's `QF_FOLDER_SHARES` table label was 52 bytes, which Db2 for i (50-byte limit) would
   have rejected. It was shortened before the file was ever applied (#28).
+- README corrections (docs only, this branch). Known limitations and Report sharing and roles no longer
+  say shares have no expiry (share end dates shipped in #32) or that folders cannot be shared (#24). The
+  scheduled delivery limitations no longer say delivery history is kept for ever (#34). The sharing
+  audit now lists end-date (`EXPIRY`) changes, schedule recipients include folder access, and the
+  settings table lists `MIGRATE_DB_USER` and the 0–60 range of `QF_SHARE_REMINDER_DAYS`.
 
 ### Security
 
