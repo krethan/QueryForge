@@ -45,6 +45,7 @@ import type { RecipientService } from '../scheduler/recipients.js';
 import { sharesInputSchema, type AccessService, type ShareChange } from '../sharing/access.js';
 import type { ShareNotifier } from '../notifications/share-notifier.js';
 import type { UserSettingsRepository } from '../notifications/settings.js';
+import { noticeQuerySchema, type NotificationInbox } from '../notifications/inbox.js';
 import { RetentionRunningError, type RetentionService } from '../retention/retention.js';
 import { mapExternalGroups, type GroupRepository } from '../sharing/groups.js';
 import type { AccessibleReport, Report } from '../reports/reports.js';
@@ -158,6 +159,7 @@ export interface ApiDeps {
   mailer?: Mailer;
   notifier: ShareNotifier;
   userSettings: UserSettingsRepository;
+  inbox: NotificationInbox;
   retention: RetentionService;
   oidc?: OidcProvider;
   ldap?: LdapAuthenticator;
@@ -2104,6 +2106,27 @@ export function apiRouter(d: ApiDeps): Router {
       const body = z.object({ shareEmails: z.boolean() }).strict().parse(req.body);
       await d.userSettings.set(user(req).id, body);
       res.json(await accountSettings(user(req)));
+    }),
+  );
+  // ---- in-app notifications (the bell). Only the signed-in user's own, access-checked. ----
+  r.get(
+    '/notifications/count',
+    h(async (req, res) => {
+      res.json(await d.inbox.count(user(req)));
+    }),
+  );
+  r.get(
+    '/notifications',
+    h(async (req, res) => {
+      const qy = noticeQuerySchema.parse(req.query);
+      res.json(await d.inbox.page(user(req), qy));
+    }),
+  );
+  r.post(
+    '/notifications/read',
+    h(async (req, res) => {
+      const { lastReadAt } = await d.inbox.markAllRead(user(req));
+      res.json({ unread: 0, capped: false, lastReadAt });
     }),
   );
   r.get(

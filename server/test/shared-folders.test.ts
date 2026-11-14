@@ -86,7 +86,9 @@ describe('migration 009: shared folders', () => {
   const m9 = migs.find((m) => m.version === 9)!;
   const sql = m9.statements.join('\n');
   it('comes after 008 and creates three new QF_ tables in the metadata schema', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migs.map((m) => m.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
     for (const t of ['QF_FOLDER_SHARES', 'QF_FOLDER_REPORTS', 'QF_FOLDER_SHARE_AUDIT'])
       expect(sql).toContain(`CREATE TABLE QFMETA.${t}`);
     expect(sql).not.toContain('{{SCHEMA}}');

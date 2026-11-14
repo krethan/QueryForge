@@ -58,7 +58,9 @@ describe('migration 008: dashboard tile order', () => {
   const m8 = migs.find((m) => m.version === 8)!;
   const sql = m8.statements.join('\n');
   it('is additive: one new QF_ table and nothing altered or dropped', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migs.map((m) => m.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
     expect(sql).toContain('CREATE TABLE QFMETA.QF_TILE_ORDER');
     for (const st of m8.statements)
       expect(st).toMatch(/^(CREATE TABLE|LABEL ON TABLE) QFMETA\.QF_TILE_ORDER\b/);

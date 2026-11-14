@@ -36,6 +36,7 @@ import { toDbError } from '../../src/util/errors.js';
 import { MemoryMailer } from '../../src/mail/mailer.js';
 import { ShareNotifier } from '../../src/notifications/share-notifier.js';
 import { UserSettingsRepository } from '../../src/notifications/settings.js';
+import { NotificationInbox } from '../../src/notifications/inbox.js';
 import { RetentionService } from '../../src/retention/retention.js';
 import {
   confinedFactory,
@@ -1110,6 +1111,25 @@ async function metadataQueries(job: SqlJobLike, rec: Recorder, schema: string) {
         await new UserSettingsRepository(db, schema).get(nobody);
       },
     ],
+    [
+      'In-app notifications (share audit, share end dates, failed deliveries; keyset paging)',
+      async () => {
+        // Works on 001-015 too: without migration 016 the read state is reported as unavailable.
+        const inbox = new NotificationInbox(
+          db,
+          schema,
+          { reports, access, folderAccess, groups },
+          { soonDays: 3 },
+        );
+        const someone = { id: nobody, role: 'USER' as const };
+        await inbox.count(someone);
+        const page = await inbox.page(someone, { limit: 5 });
+        await inbox.page(someone, {
+          limit: 5,
+          cursor: page.nextCursor ?? 'eyJ0IjoxNzAwMDAwMDAwMDAwLCJpIjoicnM6eCJ9',
+        });
+      },
+    ],
     ['Dashboard tile order', () => new TileOrderRepository(db, schema).positions(nobody)],
     [
       'Schedules, due runs and delivery history',
@@ -1237,6 +1257,36 @@ async function smokeTest(
         f.some((x) => x.id === folder.id)
           ? undefined
           : 'The shared folder was not listed for the viewer.',
+    );
+    await step(
+      'In-app notifications: the viewer is told, then marks all read (QF_USER_SETTINGS.NOTICES_READ_AT, migration 016)',
+      async () => {
+        await groups.sync(owner.b.id, 'LOCAL', ['ubverify-group']); // exercises the group IN list
+        const inbox = new NotificationInbox(
+          db,
+          schema,
+          {
+            reports,
+            access: new AccessService(db, schema, reports, groups),
+            folderAccess,
+            groups,
+          },
+          { soonDays: 3 },
+        );
+        const viewer = { id: owner.b.id, role: 'USER' as const };
+        const before = await inbox.page(viewer, { limit: 10 });
+        const told = before.items.some(
+          (x) => x.kind === 'SHARED' && x.targetType === 'FOLDER' && x.target?.id === folder.id,
+        );
+        await inbox.markAllRead(viewer);
+        const after = await inbox.count(viewer);
+        const state = await inbox.readState(viewer.id);
+        return { told, unread: after.unread, available: state.available, readAt: state.readAt };
+      },
+      (r) =>
+        r.told && r.unread === 0 && r.available && r.readAt !== null
+          ? undefined
+          : `Listed the share: ${r.told}; unread after "Mark all read": ${r.unread}; read state stored: ${r.available && r.readAt !== null}.`,
     );
     // Share expiry (migration 014): set one an hour ahead, read the EXPIRY audit row back, and
     // check the share stops working at that instant (a later clock), without waiting for it.

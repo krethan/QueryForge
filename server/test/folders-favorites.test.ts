@@ -55,7 +55,9 @@ describe('migration 006: folders and favorites', () => {
   const m6 = migs.find((m) => m.version === 6)!;
   const sql = m6.statements.join('\n');
   it('comes after 005 and creates the QF_ tables in the metadata schema', () => {
-    expect(migs.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migs.map((m) => m.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
     expect(sql).toContain('CREATE TABLE QFMETA.QF_FOLDERS');
     expect(sql).toContain('CREATE TABLE QFMETA.QF_REPORT_PREFS');
     expect(sql).not.toContain('{{SCHEMA}}');

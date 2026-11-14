@@ -1042,6 +1042,9 @@ async function main() {
     ldap: new FakeLdap('Corporate directory (demo fake)'),
     mailer,
   });
+  // The fake's CURRENT TIMESTAMP (audit rows, share creation) follows the same clock, so the
+  // in-app notifications list shows sensible times.
+  metadataDb.dbClock = () => new Date(Date.now() + seedOffsetMs);
   const exists = async (id: string) => metadataDb.users.has(id);
   await access.replaceShares(
     created[1],
@@ -1090,7 +1093,8 @@ async function main() {
     ],
     exists,
   );
-  seedOffsetMs = 0;
+  // Pat shared two reports with the demo user two days ago (in-app notifications: "shared with you").
+  seedOffsetMs = -2 * DAY_MS;
   await access.replaceShares(
     patOwned[0],
     'u-pat',
@@ -1103,6 +1107,7 @@ async function main() {
     [{ type: 'USER', id: 'u-demo', role: 'VIEWER' }],
     exists,
   );
+  seedOffsetMs = 0;
   const weekly = {
     cron: '0 7 * * 1', // Every Monday at 07:00
     timezone: 'America/Edmonton',
@@ -1160,6 +1165,7 @@ async function main() {
   // Pat's team folder, shared with the sales group as Editor; the demo user has added a report.
   const team = await folders.create('u-pat', 'Sales Team');
   for (const r of patOwned) await folders.setPref('u-pat', r.id, { folderId: team.id });
+  seedOffsetMs = -26 * 60 * 60 * 1000; // yesterday
   await folderAccess.replaceShares(
     { id: team.id, ownerId: 'u-pat' },
     'u-pat',
@@ -1169,6 +1175,7 @@ async function main() {
     ],
     exists,
   );
+  seedOffsetMs = 0;
   await folderAccess.addReport({ id: team.id, ownerId: 'u-pat' }, created[0].id, 'u-demo');
 
   // Sharing a folder's reports too (migration 011). The demo user opted in on "Ops Review"
@@ -1275,6 +1282,37 @@ async function main() {
       CREATED_AT: new Date(Date.now() - 210 * DAY_MS).toISOString().replace('T', ' '),
       UPDATED_AT: new Date(Date.now() - 210 * DAY_MS).toISOString().replace('T', ' '),
     });
+
+  // In-app notifications (the bell). The demo user read everything up to 12 hours ago
+  // (QF_USER_SETTINGS.NOTICES_READ_AT, migration 016); since then a scheduled e-mail failed and
+  // Pat put an end date two days out on the Inventory Watchlist share.
+  metadataDb.userSettings.set('u-demo', {
+    USER_ID: 'u-demo',
+    SHARE_EMAILS: 1,
+    NOTICES_READ_AT: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString().replace('T', ' '),
+    UPDATED_AT: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString().replace('T', ' '),
+  });
+  await schedules.recordDelivery({
+    scheduleId: weeklySchedule.id,
+    reportId: parameterized.id,
+    trigger: 'SCHEDULE',
+    requestedBy: null,
+    startedAt: new Date(Date.now() - 2 * 60 * 60 * 1000 - 4000),
+    finishedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    status: 'FAILED',
+    rowCount: null,
+    deliveredTo: [],
+    skipped: [],
+    error: 'SMTP 451 4.3.0 mail server temporarily unavailable (demo fake)',
+  });
+  seedOffsetMs = -40 * 60 * 1000;
+  await access.replaceShares(
+    patOwned[1],
+    'u-pat',
+    [{ type: 'USER', id: 'u-demo', role: 'VIEWER', expiresAt: endOfDay(2) }],
+    exists,
+  );
+  seedOffsetMs = 0;
 
   app.listen(PORT, '127.0.0.1', () => {
     console.log(
