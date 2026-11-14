@@ -22,6 +22,8 @@ import type {
   FolderSharing,
   NotifyOutcome,
   AccountSettings,
+  NoticeCount,
+  NoticePage,
   Share,
   UserSummary,
   ExecutionRecord,
@@ -381,6 +383,14 @@ export const api = {
     }).then((r) => r.shares),
   /** Your own settings (migration 015): whether you get e-mails about shares. */
   getAccountSettings: () => json<AccountSettings>('GET', '/account/settings'),
+  notificationCount: () => json<NoticeCount>('GET', '/notifications/count'),
+  listNotifications: (cursor?: string | null, limit = 20) =>
+    json<NoticePage>(
+      'GET',
+      `/notifications?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+    ),
+  markNotificationsRead: () =>
+    json<NoticeCount & { lastReadAt: string }>('POST', '/notifications/read'),
   putAccountSettings: (settings: AccountSettings['settings']) =>
     json<AccountSettings>('PUT', '/account/settings', settings),
   searchUsers: (search: string) =>

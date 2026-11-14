@@ -1,6 +1,7 @@
 import { Button, DataTableSkeleton } from '@carbon/react';
 import { Add } from '@carbon/icons-react';
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Report, Schedule, ScheduleSettings } from '../api/types';
 import { ErrorNotice } from '../components/ErrorNotice';
@@ -12,6 +13,8 @@ export function SchedulesPage() {
   const [reports, setReports] = useState<Report[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [newRequest, setNewRequest] = useState(0);
+  // "/schedules?history=<id>" (a failed-delivery notification) opens that delivery history.
+  const [params] = useSearchParams();
 
   const load = useCallback(async () => {
     try {
@@ -56,6 +59,7 @@ export function SchedulesPage() {
           newRequest={newRequest}
           emptyText="Open a report you own or can edit and choose “Schedule”, or create one here."
           onChanged={load}
+          openHistoryFor={params.get('history')}
         />
       )}
     </>
