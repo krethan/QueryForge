@@ -174,7 +174,10 @@ describe('describeSelection', () => {
   });
 });
 
-describe('ReportBuilderPage', () => {
+// Full ReportBuilderPage renders take 1–3 s each on an idle WSL machine and went past the
+// default 5 s under load, so this page's tests get the same 20 s budget as the pivot and
+// calculated-field tests. The rest of the suite keeps the default.
+describe('ReportBuilderPage', { timeout: 20000 }, () => {
   it('lists catalogued tables and flags views', async () => {
     const { schemaTables } = mockApi();
     renderPage();

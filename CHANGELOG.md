@@ -108,6 +108,15 @@ scheduler runs. See the Changed section below.
   tab stop) with keyboard help for screen readers.
 - **Resizable result columns**: drag a column header's edge or use the arrow keys on it; double-click
   or Escape resets. Not saved with the report.
+- **Format SQL** in the report editor (no migration): a toolbar button and **Shift+Alt+F** format the
+  selected SQL, or all of it when nothing is selected, as one change that Ctrl/⌘+Z undoes. Line
+  breaks and indentation come from [`sql-formatter`](https://github.com/sql-formatter-org/sql-formatter)
+  15.9 (MIT, `db2i` dialect), but the text is rebuilt from the original tokens, so only whitespace
+  between tokens can change: `?` markers and their order, 'strings', "delimited identifiers",
+  comments and keyword case stay exactly as typed, and `LIB/FILE`, `LIB.FILE`, `X'…'` literals and
+  `:host` variables stay together. SQL the formatter cannot read (or would change in any other way)
+  is left untouched with a short message. The formatter is a new browser dependency, loaded only
+  with the report editor (about 19 kB gzipped).
 
 ### Changed
 
@@ -134,6 +143,10 @@ scheduler runs. See the Changed section below.
 
 ### Fixed
 
+- Report Builder page tests could pass the 5 s per-test limit on a busy WSL machine
+  (`ReportBuilderJoins` took 5.4 s). The `ReportBuilderPage` tests in `ReportBuilder`,
+  `ReportBuilderFilters` and `ReportBuilderJoins` now get the same 20 s budget as the pivot and
+  calculated-field tests; the global timeout is unchanged (this branch).
 - Metadata reads no longer stop at Mapepire's default of 100 rows (#29). Before this, report lists,
   shares, folder items, audit pages and schedules could have been cut short. They now page until the
   end and fail with a clear error past 100,000 rows. A page that is exactly full no longer shows
