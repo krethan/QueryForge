@@ -1,5 +1,6 @@
 import { Button, InlineLoading, InlineNotification, Loading, Modal, Tag } from '@carbon/react';
 import {
+  Code,
   DataTable as DataTableIcon,
   Erase,
   Play,
@@ -31,7 +32,13 @@ import { FormattingEditor } from '../components/FormattingEditor';
 import { ChartPanel } from '../components/charts/ChartPanel';
 import type { ChartDef, ChartView } from '../utils/chartData';
 import { SaveReportModal, type SaveValues } from '../components/SaveReportModal';
-import { SqlEditor } from '../components/SqlEditor';
+import type { ReactCodeMirrorRef } from '@uiw/react-codemirror';
+import {
+  FORMAT_SQL_KEY_LABEL,
+  SqlEditor,
+  formatSqlInView,
+  type FormatOutcome,
+} from '../components/SqlEditor';
 import { newExecutionId } from '../utils/format';
 import { DrillPanel } from '../components/DrillPanel';
 import { DrillSettings } from '../components/DrillSettings';
@@ -62,6 +69,12 @@ export function ReportEditorPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const editorRef = useRef<ReactCodeMirrorRef>(null);
+  const [formatMsg, setFormatMsg] = useState<{
+    kind: 'success' | 'info';
+    title: string;
+    subtitle?: string;
+  } | null>(null);
   const [defs, setDefs] = useState<ParameterDef[]>([]);
   const [askParams, setAskParams] = useState(false);
   const [paramErrors, setParamErrors] = useState<Record<string, string> | null>(null);
@@ -136,6 +149,7 @@ export function ReportEditorPage() {
       setRunning(execId);
       setError(null);
       setNotice(null);
+      setFormatMsg(null);
       try {
         if (part) {
           // part of the editor text: always an ad-hoc run of exactly that text
@@ -294,6 +308,30 @@ export function ReportEditorPage() {
   // the export draws the chart the user is looking at (unsaved edits included)
   const chartSource = view !== 'table' && chart ? { chart: { ...chart, view } } : {};
 
+  const onFormatted = (o: FormatOutcome) => {
+    if (o.scope === 'none') return;
+    const what = o.scope === 'selection' ? 'selected SQL' : 'SQL';
+    if (!o.ok)
+      setFormatMsg({
+        kind: 'info',
+        title: `The ${what} was not formatted`,
+        subtitle: `${o.reason} Nothing was changed.`,
+      });
+    else if (!o.changed) setFormatMsg({ kind: 'info', title: `The ${what} is already formatted.` });
+    else
+      setFormatMsg({
+        kind: 'success',
+        title: `Formatted the ${what}.`,
+        subtitle: 'Press Ctrl/⌘ + Z to undo.',
+      });
+  };
+  const formatNow = () => {
+    const view = editorRef.current?.view;
+    if (!view) return;
+    onFormatted(formatSqlInView(view));
+    view.focus();
+  };
+
   if (loading) return <Loading description="Loading report" withOverlay={false} />;
   if (id && !report && error) return <ErrorNotice error={error} />;
 
@@ -341,10 +379,12 @@ export function ReportEditorPage() {
         )}
       </div>
       <SqlEditor
+        ref={editorRef}
         labelId="editor-title"
         value={sql}
         onChange={setSql}
         onRun={run}
+        onFormat={onFormatted}
         onSelectionChange={setSelection}
         highlightStatement={canEdit}
         readOnly={Boolean(running) || !canEdit}
@@ -423,6 +463,17 @@ export function ReportEditorPage() {
             Schedule
           </Button>
         )}
+        {canEdit && (
+          <Button
+            kind="ghost"
+            renderIcon={Code}
+            disabled={Boolean(running) || !sql.trim()}
+            onClick={formatNow}
+            title={`Format the selected SQL, or all of it when nothing is selected (${FORMAT_SQL_KEY_LABEL})`}
+          >
+            Format SQL
+          </Button>
+        )}
         <Button
           kind="ghost"
           renderIcon={Erase}
@@ -436,9 +487,20 @@ export function ReportEditorPage() {
           Clear
         </Button>
         <span style={{ fontSize: '0.75rem', color: 'var(--cds-text-helper)' }}>
-          Ctrl/⌘ + Enter to run · select text to run only that part
+          Ctrl/⌘ + Enter to run · {FORMAT_SQL_KEY_LABEL} to format · select text to run or format
+          only that part
         </span>
       </div>
+      {formatMsg && (
+        <InlineNotification
+          kind={formatMsg.kind}
+          lowContrast
+          role="status"
+          title={formatMsg.title}
+          subtitle={formatMsg.subtitle}
+          onClose={() => setFormatMsg(null)}
+        />
+      )}
       {notice && (
         <InlineNotification
           kind="success"

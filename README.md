@@ -174,6 +174,27 @@ says why. The results show a **Selection** or **Statement** tag with the line nu
 exports that part, and drill-down and the report's last-run status are not used for it. Viewers of a shared
 report always run the saved definition.
 
+## Formatting SQL
+
+**Format SQL** in the editor toolbar, or **Shift+Alt+F**, reformats the selected SQL, or all of it when
+nothing is selected (leading and trailing blank lines stay where they are). It is a single editor change,
+so **Ctrl/⌘ + Z** puts the text back. Viewers of a shared report do not get the button.
+
+- Line breaks and indentation come from [`sql-formatter`](https://github.com/sql-formatter-org/sql-formatter)
+  (MIT) with its `db2i` dialect. Its output is then rebuilt from the **original tokens**, so formatting can
+  only change the whitespace between tokens: `?` parameter markers and their order, 'strings',
+  "delimited identifiers", comments and the case of keywords and names are kept exactly as typed.
+- Pairs that must not be split stay together as you wrote them: `LIB/FILE` (system naming, when written
+  without spaces), `LIB.FILE` and `T1.COL`, `X'0A'`-style literals and `:host` variables. Because of that
+  `A/B` written without spaces is also kept as it is; `A / B` is spaced like any other operator.
+- A selection that starts on an indented line keeps that indentation on its new lines.
+- When the formatter cannot read the SQL (for example an unclosed string or comment, or a syntax it does
+  not know), or its output would differ in anything but whitespace, nothing is changed and the editor says
+  why.
+
+The formatter runs only in the browser and nothing is sent to the server. It is loaded with the report
+editor, not on the first page.
+
 ## Exact numbers
 
 DECIMAL/NUMERIC and BIGINT values are kept as **strings** from the Mapepire job through the API and the
@@ -1022,6 +1043,9 @@ Administrators inherit read/Editor-equivalent access to every report without an 
   fire, so touch-only devices cannot rearrange tiles yet (the handle's arrow-key controls need a keyboard). Rearranging is off while searching.
   Migration 008 has not been applied to a real Db2 for i.
 - Conditional formatting has not been tested on a real IBM i.
+- Format SQL: layout comes from `sql-formatter`'s `db2i` dialect, which does not know every Db2 for i
+  statement form; it may refuse some valid SQL (nothing is changed then) or lay out unusual syntax
+  oddly. Keyword case is never changed (no upper-casing option yet).
 - Running part of the SQL: the statement split is a small browser-side scanner, not a Db2 parser. It does
   not understand a `;` inside an SQL routine body (not allowed in a reporting query anyway). Results of a partial run do not use the saved report's conditional formatting.
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and

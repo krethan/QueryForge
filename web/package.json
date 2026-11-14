@@ -36,6 +36,7 @@
     "d3": "^7.9.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-router-dom": "^6.30.6"
+    "react-router-dom": "^6.30.6",
+    "sql-formatter": "^15.9.0"
   }
 }

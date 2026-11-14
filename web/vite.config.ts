@@ -33,6 +33,8 @@ export default defineConfig({
             )
           )
             return 'charts';
+          // the SQL formatter (Format SQL in the report editor) and its parser runtime
+          if (/[\\/](sql-formatter|nearley|moo)[\\/]/.test(id)) return 'sql-format';
           if (/[\\/]@carbon[\\/]icons-react[\\/]/.test(id)) return 'carbon-icons';
           if (/[\\/](@carbon|@floating-ui|@ibm|downshift|tabbable|focus-trap)[\\/]/.test(id))
             return 'carbon';
