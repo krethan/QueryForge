@@ -117,9 +117,22 @@ scheduler runs. See the Changed section below.
   `:host` variables stay together. SQL the formatter cannot read (or would change in any other way)
   is left untouched with a short message. The formatter is a new browser dependency, loaded only
   with the report editor (about 19 kB gzipped).
+- **Deleted folders search** (no migration): the admin **Deleted folders** screen can search by
+  folder name or owner (name, username or user ID; any case; `%`, `_` and `\` matched literally),
+  filter by who deleted the folder and by a range of days, shows how many deletions match, and exports
+  the filtered list as CSV (**Export list**). All filtering is done in SQL on the server.
+  `GET /api/admin/folder-deletions` takes `q`, `actorId`, `from`, `to` and `cursor` and now also returns
+  `total` and `next` (a keyset cursor tied to the filters; a cursor used with other filters is
+  `400 BAD_CURSOR`). New: `GET /api/admin/folder-deletions/actors` and
+  `GET /api/admin/folder-deletions/export`. Admin only, like the rest of the screen. No index was added,
+  so search, the "deleted by" filter and the count read the whole `QF_FOLDER_DELETIONS` table. The
+  verification kit's read-only checks now run these queries too.
 
 ### Changed
 
+- The admin **Deleted folders** screen pages with the API's keyset cursor instead of `offset`, so
+  Previous / Next step one page at a time and the footer shows the total
+  ("1–25 of 57 deleted folders"). `offset` still works in the API.
 - The results table is exposed as an ARIA `grid` named "Query results" instead of a `table`, so
   selectors such as Playwright's `getByRole('table', { name: 'Query results' })` need `'grid'`
   (the screenshot scripts are updated).

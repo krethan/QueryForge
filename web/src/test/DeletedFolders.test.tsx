@@ -5,7 +5,7 @@ import { afterEach, beforeEach } from 'vitest';
 import { ApiError, api } from '../api/client';
 import type { FolderDeletion, FolderDeletionPage, FolderShareAuditEvent } from '../api/types';
 import { AppShell, navFor, pageTitle } from '../components/AppShell';
-import { DeletedFoldersPage } from '../pages/DeletedFoldersPage';
+import { DeletedFoldersPage, deletedRange, startOfDayIso } from '../pages/DeletedFoldersPage';
 import { formatDateTime } from '../utils/format';
 
 const auth = vi.hoisted(() => ({ role: 'ADMIN' as 'ADMIN' | 'USER' }));
@@ -44,7 +44,15 @@ const deletion = (extra: Partial<FolderDeletion> = {}): FolderDeletion => {
 const pageOf = (
   deletions: FolderDeletion[],
   extra: Partial<FolderDeletionPage> = {},
-): FolderDeletionPage => ({ deletions, hasMore: false, limit: 25, offset: 0, ...extra });
+): FolderDeletionPage => ({
+  deletions,
+  hasMore: false,
+  total: deletions.length,
+  next: null,
+  limit: 25,
+  offset: 0,
+  ...extra,
+});
 const ev = (extra: Partial<FolderShareAuditEvent> = {}): FolderShareAuditEvent => ({
   id: `e${++n}`,
   folderId: 'f1',
@@ -98,6 +106,10 @@ describe('Deleted folders navigation', () => {
 });
 
 describe('DeletedFoldersPage', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'listFolderDeletionActors').mockResolvedValue([]);
+  });
+
   it('tells a non-admin it is admin only and never calls the API', () => {
     auth.role = 'USER';
     const list = vi.spyOn(api, 'listFolderDeletions');
@@ -113,7 +125,7 @@ describe('DeletedFoldersPage', () => {
       .mockReturnValue(new Promise((r) => (resolve = r)));
     renderPage();
     expect(screen.getByLabelText('Loading deleted folders')).toBeInTheDocument();
-    expect(list).toHaveBeenCalledWith(0, 25);
+    expect(list).toHaveBeenCalledWith({ limit: 25, cursor: null });
     const a = deletion({ folderName: 'Q3 Close', actorId: 'u-ada', actorName: 'Ada' });
     const b = deletion({
       folderName: 'Scratch',
@@ -194,27 +206,41 @@ describe('DeletedFoldersPage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('pages with limit / offset and disables Next on the last page', async () => {
+  it('pages with keyset cursors, shows the total and disables Next on the last page', async () => {
     const page1 = Array.from({ length: 25 }, (_, i) => deletion({ folderName: `P1-${i}` }));
     const list = vi
       .spyOn(api, 'listFolderDeletions')
-      .mockResolvedValueOnce(pageOf(page1, { hasMore: true }))
-      .mockResolvedValueOnce(pageOf([deletion({ folderName: 'Oldest' })], { offset: 25 }))
-      .mockResolvedValueOnce(pageOf(page1, { hasMore: true }));
+      .mockResolvedValueOnce(pageOf(page1, { hasMore: true, total: 26, next: 'c-2' }))
+      .mockResolvedValueOnce(pageOf([deletion({ folderName: 'Oldest' })], { total: 26 }))
+      .mockResolvedValueOnce(pageOf(page1, { hasMore: true, total: 26, next: 'c-2' }));
     renderPage();
     await screen.findByText('P1-0');
-    expect(screen.getByText('1–25 deleted folders')).toBeInTheDocument();
+    expect(screen.getByText('1–25 of 26 deleted folders')).toBeInTheDocument();
     const next = screen.getByRole('button', { name: 'Next page' });
     expect(next).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     await userEvent.click(next);
     expect(await screen.findByText('Oldest')).toBeInTheDocument();
-    expect(list).toHaveBeenLastCalledWith(25, 25);
-    expect(screen.getByText('26–26 deleted folders')).toBeInTheDocument();
+    expect(list).toHaveBeenLastCalledWith({ limit: 25, cursor: 'c-2' });
+    expect(screen.getByText('26–26 of 26 deleted folders')).toBeInTheDocument();
+    expect(screen.getByText('Page 2')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
     await userEvent.click(screen.getByRole('button', { name: 'Previous page' }));
     expect(await screen.findByText('P1-0')).toBeInTheDocument();
-    expect(list).toHaveBeenLastCalledWith(0, 25);
+    expect(list).toHaveBeenLastCalledWith({ limit: 25, cursor: null });
+  });
+
+  it('changes the page size and starts again from the first page', async () => {
+    const list = vi
+      .spyOn(api, 'listFolderDeletions')
+      .mockResolvedValue(pageOf([deletion({ folderName: 'Only' })], { hasMore: true, next: 'c' }));
+    renderPage();
+    await screen.findByText('Only');
+    await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith({ limit: 25, cursor: 'c' }));
+    await screen.findByText('Only');
+    await userEvent.selectOptions(screen.getByLabelText('Deleted folders per page:'), '50');
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith({ limit: 50, cursor: null }));
   });
 
   it('opens a deleted folder’s sharing history and loads older changes', async () => {
@@ -293,5 +319,148 @@ describe('DeletedFoldersPage', () => {
       'No deletion is recorded for this folder.',
     );
     expect(screen.getByRole('table', { name: 'Deleted folders' })).toBeInTheDocument();
+  });
+});
+
+describe('DeletedFoldersPage search and filters', () => {
+  const actors = [{ id: 'u-pat', name: 'Pat' }, { id: 'u-gone' }];
+  beforeEach(() => {
+    vi.spyOn(api, 'listFolderDeletionActors').mockResolvedValue(actors);
+  });
+
+  it('searches on the server after a pause, and shows how many match', async () => {
+    const list = vi
+      .spyOn(api, 'listFolderDeletions')
+      .mockResolvedValueOnce(pageOf([deletion({ folderName: 'Q3 Close' }), deletion()]))
+      .mockResolvedValue(pageOf([deletion({ folderName: 'Q3 Close' })], { total: 1 }));
+    renderPage();
+    await screen.findByText('Q3 Close');
+    await userEvent.type(
+      screen.getByRole('searchbox', { name: 'Search deleted folders' }),
+      'close%',
+    );
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({ q: 'close%', limit: 25, cursor: null }),
+    );
+    // One request for the whole word, not one per key.
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(
+      await screen.findByText('1–1 of 1 deleted folder matching your filters'),
+    ).toBeInTheDocument();
+  });
+
+  it('filters by who deleted it and by local days, both inclusive', async () => {
+    const list = vi.spyOn(api, 'listFolderDeletions').mockResolvedValue(pageOf([deletion()]));
+    renderPage();
+    const by = await screen.findByLabelText('Deleted by');
+    await waitFor(() =>
+      expect(within(by).getByRole('option', { name: 'Pat' })).toBeInTheDocument(),
+    );
+    // A deleter no longer in the user list is offered by ID.
+    expect(within(by).getByRole('option', { name: 'u-gone' })).toBeInTheDocument();
+    await userEvent.selectOptions(by, 'u-pat');
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({ actorId: 'u-pat', limit: 25, cursor: null }),
+    );
+    await userEvent.type(screen.getByLabelText('Deleted from'), '2026-11-01');
+    await userEvent.type(screen.getByLabelText('Deleted to'), '2026-11-03');
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({
+        actorId: 'u-pat',
+        from: new Date(2026, 10, 1).toISOString(),
+        to: new Date(2026, 10, 4).toISOString(),
+        limit: 25,
+        cursor: null,
+      }),
+    );
+    expect(startOfDayIso('2026-11-01')).toBe(new Date(2026, 10, 1).toISOString());
+    expect(deletedRange('', '')).toEqual({ from: undefined, to: undefined });
+    expect(deletedRange('bad', '2026-11-03')).toEqual({
+      from: undefined,
+      to: new Date(2026, 10, 4).toISOString(),
+    });
+  });
+
+  it('does not ask the server when "to" is before "from"', async () => {
+    const list = vi.spyOn(api, 'listFolderDeletions').mockResolvedValue(pageOf([deletion()]));
+    renderPage();
+    await screen.findByRole('table', { name: 'Deleted folders' });
+    await userEvent.type(screen.getByLabelText('Deleted to'), '2026-11-01');
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    await userEvent.type(screen.getByLabelText('Deleted from'), '2026-11-05');
+    expect(await screen.findByText(/nothing can match/)).toBeInTheDocument();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Pick a day on or after “Deleted from”.')).toBeInTheDocument();
+  });
+
+  it('starts again from page 1 when a filter changes, and never reuses a cursor', async () => {
+    const list = vi
+      .spyOn(api, 'listFolderDeletions')
+      .mockResolvedValue(pageOf([deletion({ folderName: 'Row' })], { hasMore: true, next: 'c1' }));
+    renderPage();
+    await screen.findByText('Row');
+    await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith({ limit: 25, cursor: 'c1' }));
+    await screen.findByText('Row');
+    await userEvent.selectOptions(screen.getByLabelText('Deleted by'), 'u-pat');
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({ actorId: 'u-pat', limit: 25, cursor: null }),
+    );
+    expect(list.mock.calls.filter((c) => c[0]?.actorId && c[0]?.cursor)).toEqual([]);
+    expect(await screen.findByText('Page 1')).toBeInTheDocument();
+  });
+
+  it('keeps the filters visible when nothing matches, and clears them', async () => {
+    const list = vi
+      .spyOn(api, 'listFolderDeletions')
+      .mockResolvedValueOnce(pageOf([deletion({ folderName: 'Kept' })]))
+      .mockResolvedValueOnce(pageOf([]))
+      .mockResolvedValue(pageOf([deletion({ folderName: 'Kept' })]));
+    renderPage();
+    await screen.findByText('Kept');
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search deleted folders' }), 'zzz');
+    expect(await screen.findByText('No deleted folders match these filters.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'No deleted folders' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export list' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(await screen.findByText('Kept')).toBeInTheDocument();
+    expect(list).toHaveBeenLastCalledWith({ limit: 25, cursor: null });
+    expect(screen.getByRole('searchbox', { name: 'Search deleted folders' })).toHaveValue('');
+  });
+
+  it('exports the filtered list as CSV', async () => {
+    vi.spyOn(api, 'listFolderDeletions').mockResolvedValue(pageOf([deletion()]));
+    const exp = vi
+      .spyOn(api, 'exportFolderDeletions')
+      .mockResolvedValue({ filename: 'deleted-folders.csv' } as Awaited<
+        ReturnType<typeof api.exportFolderDeletions>
+      >);
+    renderPage();
+    await screen.findByRole('table', { name: 'Deleted folders' });
+    await userEvent.click(screen.getByRole('button', { name: 'Export list' }));
+    expect(exp).toHaveBeenLastCalledWith({});
+    expect(
+      await screen.findByText('Downloaded deleted-folders.csv with every deleted folder.'),
+    ).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText('Deleted by'), 'u-pat');
+    await screen.findByRole('table', { name: 'Deleted folders' });
+    await userEvent.click(screen.getByRole('button', { name: 'Export list' }));
+    expect(exp).toHaveBeenLastCalledWith({ actorId: 'u-pat' });
+    expect(
+      await screen.findByText(
+        'Downloaded deleted-folders.csv with the deleted folders matching your filters.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('still lists deletions when the deleted-by choices cannot be read', async () => {
+    vi.spyOn(api, 'listFolderDeletionActors').mockRejectedValue(new Error('down'));
+    vi.spyOn(api, 'listFolderDeletions').mockResolvedValue(
+      pageOf([deletion({ folderName: 'Ok' })]),
+    );
+    renderPage();
+    expect(await screen.findByText('Ok')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Deleted by')).getAllByRole('option')).toHaveLength(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

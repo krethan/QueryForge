@@ -56,7 +56,11 @@ import {
   pivotExportFormatting,
 } from '../reports/formatting.js';
 import {
+  decodeFolderDeletionCursor,
+  encodeFolderDeletionCursor,
+  folderDeletionFilterSchema,
   folderDeletionsQuerySchema,
+  type FolderDeletion,
   folderInputSchema,
   type FolderRepository,
 } from '../reports/folders.js';
@@ -542,6 +546,36 @@ const folderAuditCsvCells = (folderName: string) => (e: FolderShareAuditEvent) =
   folderName,
   e.id,
 ];
+/** Columns of the admin deleted-folders CSV export. */
+export const FOLDER_DELETIONS_CSV_HEADER = [
+  'Deleted at (UTC)',
+  'Folder name',
+  'Folder ID',
+  'Owner',
+  'Owner (user ID)',
+  'Deleted by',
+  'Deleted by (user ID)',
+  'Shares',
+  'Placed reports',
+  'Filed reports',
+  'Report sharing',
+  'Deletion ID',
+] as const;
+const folderDeletionCsvCells = (x: FolderDeletion) => [
+  x.deletedAt,
+  x.folderName,
+  x.folderId,
+  x.ownerName ?? '',
+  x.ownerId,
+  x.actorName ?? '',
+  x.actorId,
+  x.shareCount,
+  x.placedCount,
+  x.filedCount,
+  x.reportsRole ?? '',
+  x.id,
+];
+
 const folderAuditCsvName = (folderName: string, deleted: boolean) => {
   const label = `${folderName} audit${deleted ? ' - deleted' : ''}`;
   return {
@@ -1512,12 +1546,56 @@ export function apiRouter(d: ApiDeps): Router {
       throw new AppError(404, 'DELETION_NOT_FOUND', 'No deletion is recorded for this folder.');
     return deletion;
   };
+  /**
+   * Deleted folders, newest first, with optional search / "deleted by" / date-range filters
+   * applied in SQL, the total that match, and a keyset `next` cursor for the following page
+   * (`offset` still works for the first API version). A cursor only continues the search it
+   * came from; with different filters it is refused (400 BAD_CURSOR).
+   */
   r.get(
     '/admin/folder-deletions',
     h(async (req, res) => {
       requireAdmin(req);
-      const { limit, offset } = folderDeletionsQuerySchema.parse(req.query);
-      res.json({ ...(await d.folders.listDeletions(limit, offset)), limit, offset });
+      const { limit, offset, cursor, ...filter } = folderDeletionsQuerySchema.parse(req.query);
+      const after = cursor ? decodeFolderDeletionCursor(cursor, filter) : null;
+      const [page, total] = await Promise.all([
+        d.folders.searchDeletions(filter, { limit, offset, after }),
+        d.folders.countDeletions(filter),
+      ]);
+      res.json({
+        deletions: page.deletions,
+        hasMore: page.hasMore,
+        total,
+        next: page.next ? encodeFolderDeletionCursor(page.next, filter) : null,
+        limit,
+        offset,
+      });
+    }),
+  );
+  /** Who has deleted recorded folders: the choices for the "Deleted by" filter. */
+  r.get(
+    '/admin/folder-deletions/actors',
+    h(async (req, res) => {
+      requireAdmin(req);
+      res.json({ actors: await d.folders.deletionActors() });
+    }),
+  );
+  /** The filtered deleted-folders list as CSV (every match, read in keyset batches). */
+  r.get(
+    '/admin/folder-deletions/export',
+    h(async (req, res) => {
+      requireAdmin(req);
+      const filter = folderDeletionFilterSchema.parse(req.query);
+      await streamCsv(
+        res,
+        {
+          filename: 'deleted-folders.csv',
+          utf8Filename: 'deleted-folders.csv',
+          header: FOLDER_DELETIONS_CSV_HEADER,
+        },
+        d.folders.allDeletions(filter),
+        folderDeletionCsvCells,
+      );
     }),
   );
   r.get(
