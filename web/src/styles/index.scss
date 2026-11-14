@@ -182,6 +182,11 @@ body {
     min-height: 14rem;
     max-height: 32rem;
   }
+
+  // the statement Ctrl/Cmd+Enter runs when the editor holds several statements
+  .qf-editor__statement {
+    background-color: var(--cds-highlight, #d0e2ff);
+  }
 }
 
 .qf-editor-actions {
