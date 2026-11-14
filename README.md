@@ -18,7 +18,7 @@ stored in Db2 for i as well.
 > connected to or verified against a real IBM i system.** See `docs/IBMI_SETUP.md`, and
 > [`docs/ibmi-verification.md`](docs/ibmi-verification.md) for the non-production test plan and the
 > `npm run verify:ibmi` kit. Upgrading an existing install: follow [`docs/upgrade.md`](docs/upgrade.md)
-> (backup, migrations 001–015 and their locking, new settings, rollback); changes are listed in
+> (backup, migrations 001–016 and their locking, new settings, rollback); changes are listed in
 > [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Layout
@@ -757,10 +757,61 @@ Storage is migration `015_share_notifications.sql`, additive only: new tables `Q
 `QF_USER_SETTINGS` (foreign key to `QF_USERS`, `ON DELETE CASCADE`). Nothing existing is altered.
 **Not tested on a real IBM i or a real mail server:** the notifications, the reminder claims and
 migration 015 have only run against the in-memory fake metadata database, the in-memory mailer and the
-demo. Limitations: e-mail only (no in-app notification list), no digest (one e-mail per save per person,
+demo. Limitations: no digest (one e-mail per save per person,
 one per reminder), at most 500 group members per save, reminder rows are kept until [History retention](#history-retention) removes them (180 days after the end date by default),
 and a reminder that was claimed but whose app instance stopped before sending is not sent (at most
 once, never twice).
+
+## In-app notifications
+
+The bell in the header shows how many notifications you haven't read; select it to open a panel of the
+last 30 days, newest first:
+
+- a report or folder was **shared with you** (directly or through one of your groups), or **your role
+  changed**, by someone else;
+- a share **ends soon** (within `QF_SHARE_REMINDER_DAYS`, or 3 days when reminders are off) or **has
+  ended**: shares you gave on your own reports and folders (with who they were for), and shares given
+  to you;
+- a delivery of a **schedule you created failed**, with the error.
+
+Each item links to the report, the folder (the dashboard opens filtered to it) or the schedule (the
+Schedules page opens its delivery history). **Show older** pages back; **Mark all read** clears the count.
+The count is fetched when the app loads and then every 60 seconds, only while the tab is visible (and at
+once when you come back to it); the list is fetched only when you open the panel.
+
+**Nothing new is stored per notification.** The server works the list out on each request, for the
+signed-in user only, from what is already recorded: the report and folder sharing audit
+(`QF_SHARE_AUDIT`, `QF_FOLDER_SHARE_AUDIT`), shares with an end date (`EXPIRES_AT`, migration 014) and
+delivery history (`QF_SCHEDULE_DELIVERIES`). Reminder e-mails (`QF_SHARE_REMINDERS`) are not needed: the
+panel reads the end dates themselves, so it works without SMTP.
+
+**Access is enforced on the server.** A share event is listed only while that share is still in force
+(not removed, not expired), so a revoked or expired share never shows the report's or folder's name. When
+a share given to you ends, the item names the report or folder only if you can still open it some other
+way; otherwise it says "a report" or "a folder", links nowhere and does not carry its ID. Owners always
+see their own reports' and folders' names. A failed delivery is listed only while you can still open its
+report. Your own share changes are never listed.
+
+**Read state** is one timestamp per user, `QF_USER_SETTINGS.NOTICES_READ_AT` (migration
+`016_notification_read_state.sql`: one nullable column, nothing else). Anything newer is unread. Without
+016 the panel still works, everything counts as unread, and **Mark all read** is disabled with a note
+(the API answers `503 MIGRATION_REQUIRED`).
+
+API: `GET /api/notifications/count` (`{ unread, capped }`, at most 99, shown as "99+"),
+`GET /api/notifications?limit=&cursor=` (20 per page by default, at most 50; keyset paging on time and
+ID with an opaque `nextCursor`, so new events never shift later pages) and `POST /api/notifications/read`
+(CSRF-protected like every other change). Each source reads at most 100 rows per request and the access
+checks for ended shares and failed deliveries are capped too, failing closed (an item is hidden or
+anonymous rather than shown).
+
+**Not tested on a real IBM i:** the queries and migration 016 have only run against the in-memory fake
+metadata database and the demo. Limitations: no per-item "mark read" or dismiss, no push (polling only),
+30 days only, and the list depends on history retention (audit rows and delivery history deleted by
+[History retention](#history-retention) drop out of it). "Ends soon" is dated from when the end entered
+the window (or when the share was made, if later), not from when the end date was last changed. Looking
+up shares by person in the audit tables has no index of its own (the existing ones are by report or
+folder), so on a very large audit history these reads scan; the 30-day bound and the row caps limit the
+work.
 
 ## Rearranging dashboard tiles
 
@@ -900,8 +951,8 @@ Administrators inherit read/Editor-equivalent access to every report without an 
 - Folders and favorites: there is no bulk move (one report at a time) and no dragging a tile into a
   folder, and no nested folders. Migration 006 has not been applied to a real Db2 for i.
 - Shared folders: unless the owner shares the folder's reports too, people may see an emptier folder
-  than the owner. Notifications about folder shares are e-mail only (see
-  [Share notifications](#share-notifications)).
+  than the owner. Folder shares are announced by e-mail (see
+  [Share notifications](#share-notifications)) and in the [notifications panel](#in-app-notifications).
 - Folder audit export and deletion audit: deleted-folder records are admin-only, are kept forever unless `QF_RETAIN_AUDIT_DAYS` is set (see [History retention](#history-retention)), and only cover deletions made through Uncle Bob after
   migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+); the Deleted folders
   screen has no search, filter or sort and does not show a total count (the API returns only `hasMore`). The CSV export's

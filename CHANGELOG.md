@@ -6,7 +6,7 @@ All notable changes to Uncle Bob (repository `krethan/QueryForge`) are recorded 
 
 > **Unreleased and not verified on IBM i.** Nothing below has run against a real IBM i or a real Mapepire
 > server. Every feature has only been tested with the in-memory fakes and in demo mode, and **migrations
-> 001–015 have never been applied to Db2 for i**. Run the [verification kit](docs/ibmi-verification.md)
+> 001–016 have never been applied to Db2 for i**. Run the [verification kit](docs/ibmi-verification.md)
 > on a non-production partition first. To upgrade an install, follow the [upgrade runbook](docs/upgrade.md).
 
 ## [Unreleased]
@@ -35,6 +35,7 @@ There are no "down" scripts: you roll back by restoring the save taken before th
 | 013 | `013_folder_deletion_audit.sql`        | `QF_FOLDER_DELETIONS` (folder deletion audit)                                                                             | Yes       | New table only                                                                                                                                                                        |
 | 014 | `014_share_expiry.sql`                 | `EXPIRES_AT` on both share tables, `OLD_/NEW_EXPIRES_AT` on both share audit tables, `EXPIRY` audit action, column labels | No        | **Six `ADD COLUMN`s rebuild four tables under exclusive locks, and two check constraints are replaced (each re-validated over every row). Stop the app and run it in a quiet window** |
 | 015 | `015_share_notifications.sql`          | `QF_SHARE_REMINDERS`, `QF_USER_SETTINGS`                                                                                  | Yes       | New tables only                                                                                                                                                                       |
+| 016 | `016_notification_read_state.sql`      | `QF_USER_SETTINGS.NOTICES_READ_AT` (in-app notifications "Mark all read")                                                 | Yes       | One nullable `ADD COLUMN` rebuilds the small `QF_USER_SETTINGS` table under an exclusive lock. The app still runs without it                                                          |
 
 History retention (#34) needs no migration. It does, however, **delete rows by default** once the
 scheduler runs. See the Changed section below.
@@ -82,6 +83,15 @@ scheduler runs. See the Changed section below.
   run history and audit records when you opt in. An admin **Data retention** screen and
   `GET/POST /api/admin/retention`. Settings: `QF_RETAIN_*`.
 - **Upgrade runbook** ([docs/upgrade.md](docs/upgrade.md)) and this changelog.
+- **In-app notifications** (migration 016 for the read state only): a bell in the header with an unread
+  count, and a panel of the last 30 days: a report or folder shared with you or your role changed, a
+  share of yours (given or received) ending soon or ended, and a failed delivery of a schedule you
+  created. Each item links to the report, folder or schedule's delivery history. Worked out on each
+  request from the share audit, share end dates and delivery history, for the signed-in user only and
+  only while they can still open the item; an ended share of yours names nothing you can no longer
+  open. **Mark all read** stores one timestamp per user in `QF_USER_SETTINGS.NOTICES_READ_AT`. The
+  count is fetched on load and every minute while the tab is visible. `GET /api/notifications/count`,
+  `GET /api/notifications?limit=&cursor=` (keyset paging), `POST /api/notifications/read`.
 
 ### Changed
 
