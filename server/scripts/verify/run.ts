@@ -1081,10 +1081,23 @@ async function metadataQueries(job: SqlJobLike, rec: Recorder, schema: string) {
       },
     ],
     [
-      'Folder deletion audit and audit export (migration 013, keyset paging)',
+      'Folder deletion audit, deleted-folder search and audit export (migration 013, keyset paging)',
       async () => {
         await folders.listDeletions(25, 25);
         await folders.findDeletion(nobody);
+        // Admin Deleted folders search: every filter, the count, keyset continuation, actors.
+        const filter = {
+          q: 'a%b_c\\d',
+          actorId: nobody,
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-02-01T00:00:00.000Z',
+        };
+        await folders.searchDeletions(filter, {
+          limit: 25,
+          after: { deletedAt: '2026-01-15 00:00:00.000000', id: nobody },
+        });
+        await folders.countDeletions(filter);
+        await folders.deletionActors();
         await folderAccess.auditBatch(
           nobody,
           { occurredAt: '2026-01-01 00:00:00.000000', id: nobody },

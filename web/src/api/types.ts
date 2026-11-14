@@ -489,8 +489,28 @@ export interface FolderDeletion {
 export interface FolderDeletionPage {
   deletions: FolderDeletion[];
   hasMore: boolean;
+  /** Deletions matching the filters (all pages). */
+  total: number;
+  /** Pass back as `cursor` for the next (older) page with the same filters; null on the last. */
+  next: string | null;
   limit: number;
   offset: number;
+}
+/** Server-side filters for the deleted-folders list and its CSV export. */
+export interface FolderDeletionFilter {
+  /** Part of the folder name, or of the owner's name or username (any case), or an owner ID. */
+  q?: string;
+  /** Who deleted it (user ID). */
+  actorId?: string;
+  /** ISO-8601 instant, inclusive. */
+  from?: string;
+  /** ISO-8601 instant, exclusive. */
+  to?: string;
+}
+/** GET /admin/folder-deletions/actors: one choice of the "Deleted by" filter. */
+export interface FolderDeletionActor {
+  id: string;
+  name?: string;
 }
 /** GET /admin/folder-deletions/:folderId/audit: a deleted folder's sharing history, newest first. */
 export interface DeletedFolderAuditPage {

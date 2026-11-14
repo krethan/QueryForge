@@ -556,26 +556,131 @@ export class FakeMetadataDb implements MetadataDb {
         .slice(0, take)
         .map((a) => this.withAuditNames(a));
     }
-    if (/FROM \w+\.QF_FOLDER_DELETIONS D LEFT JOIN/.test(s)) {
-      const page = /(?:OFFSET (\d+) ROWS )?FETCH FIRST (\d+) ROWS ONLY$/.exec(s);
-      const skip = Number(page?.[1] ?? 0);
-      const take = page ? Number(page[2]) : Infinity;
-      const byFolder = /WHERE D\.FOLDER_ID = \?/.test(s);
-      return this.folderDeletions
-        .filter((x) => !byFolder || x.FOLDER_ID === params[0])
-        .sort(
-          (a, b) =>
-            String(b.DELETED_AT).localeCompare(String(a.DELETED_AT)) ||
-            String(a.DELETION_ID).localeCompare(String(b.DELETION_ID)),
-        )
-        .slice(skip, skip + take)
-        .map((x) => ({
-          ...x,
-          OWNER_NAME: this.users.get(String(x.OWNER_ID))?.DISPLAY_NAME ?? null,
-          ACTOR_NAME: this.users.get(String(x.ACTOR_ID))?.DISPLAY_NAME ?? null,
-        }));
-    }
+    if (/FROM \w+\.QF_FOLDER_DELETIONS D\b/.test(s)) return this.folderDeletionRows(s, params);
     return undefined;
+  }
+
+  /**
+   * QF_FOLDER_DELETIONS reads (migration 013): the list / search page, its COUNT(*), the
+   * distinct "deleted by" users and the per-folder lookup. The WHERE clause is read in the order
+   * FolderRepository writes it, consuming one bound value per marker, and LIKE is evaluated as
+   * Db2 does it (case-sensitive, so UPPER() on the column is applied here too, with `\` as the
+   * escape character). Anything left unconsumed is an error, so a marker / value mismatch fails.
+   */
+  private folderDeletionRows(s: string, params: P): Row[] {
+    const withNames = (x: Row): Row => {
+      const owner = this.users.get(String(x.OWNER_ID));
+      return {
+        ...x,
+        OWNER_NAME: owner?.DISPLAY_NAME ?? null,
+        OWNER_USERNAME: owner?.USERNAME ?? null,
+        ACTOR_NAME: this.users.get(String(x.ACTOR_ID))?.DISPLAY_NAME ?? null,
+      };
+    };
+    if (
+      /^SELECT DISTINCT D\.ACTOR_ID, AU\.DISPLAY_NAME AS ACTOR_NAME FROM \w+\.QF_FOLDER_DELETIONS D LEFT JOIN \w+\.QF_USERS AU ON AU\.USER_ID = D\.ACTOR_ID ORDER BY D\.ACTOR_ID FETCH FIRST (\d+) ROWS ONLY$/.test(
+        s,
+      )
+    ) {
+      const take = Number(/FETCH FIRST (\d+) ROWS ONLY$/.exec(s)![1]);
+      const ids = [...new Set(this.folderDeletions.map((x) => String(x.ACTOR_ID)))].sort();
+      return ids.slice(0, take).map((id) => ({
+        ACTOR_ID: id,
+        ACTOR_NAME: this.users.get(id)?.DISPLAY_NAME ?? null,
+      }));
+    }
+    const where = /\bWHERE (.*?)(?: ORDER BY |$)/.exec(s)?.[1] ?? '';
+    const tests: ((x: Row) => boolean)[] = [];
+    let rest = where;
+    let i = 0;
+    const take = () => {
+      if (i >= params.length) throw new Error(`Too few parameters for: ${s}`);
+      return params[i++];
+    };
+    const eat = (re: RegExp) => {
+      const m = re.exec(rest);
+      if (!m) return null;
+      rest = rest.slice(m[0].length).replace(/^ AND /, '');
+      return m;
+    };
+    const like = (pattern: unknown) => {
+      const re = String(pattern).replace(/\\(.)|([%_])|([^\\%_]+)/g, (_, esc, wild, lit) =>
+        esc !== undefined
+          ? esc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          : wild === '%'
+            ? '[\\s\\S]*'
+            : wild === '_'
+              ? '[\\s\\S]'
+              : String(lit).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      );
+      const rx = new RegExp(`^${re}$`);
+      return (v: unknown) => v !== null && v !== undefined && rx.test(String(v).toUpperCase());
+    };
+    if (eat(/^D\.FOLDER_ID = \?/)) {
+      const id = take();
+      tests.push((x) => x.FOLDER_ID === id);
+    }
+    const q = eat(
+      /^\(UPPER\(D\.FOLDER_NAME\) LIKE \? ESCAPE '\\' OR UPPER\(OU\.DISPLAY_NAME\) LIKE \? ESCAPE '\\' OR UPPER\(OU\.USERNAME\) LIKE \? ESCAPE '\\'( OR D\.OWNER_ID = \?)?\)/,
+    );
+    if (q) {
+      if (!/LEFT JOIN \w+\.QF_USERS OU ON OU\.USER_ID = D\.OWNER_ID/.test(s))
+        throw new Error('Owner search without the owner join');
+      const [a, b, c] = [like(take()), like(take()), like(take())];
+      const id = q[1] ? take() : undefined;
+      tests.push((x) => {
+        const n = withNames(x);
+        return (
+          a(n.FOLDER_NAME) ||
+          b(n.OWNER_NAME) ||
+          c(n.OWNER_USERNAME) ||
+          (id !== undefined && n.OWNER_ID === id)
+        );
+      });
+    }
+    if (eat(/^D\.ACTOR_ID = \?/)) {
+      const id = take();
+      tests.push((x) => x.ACTOR_ID === id);
+    }
+    if (eat(/^D\.DELETED_AT >= CAST\(\? AS TIMESTAMP\)/)) {
+      const t = String(take());
+      tests.push((x) => String(x.DELETED_AT) >= t);
+    }
+    if (eat(/^D\.DELETED_AT < CAST\(\? AS TIMESTAMP\)/)) {
+      const t = String(take());
+      tests.push((x) => String(x.DELETED_AT) < t);
+    }
+    if (
+      eat(
+        /^\(D\.DELETED_AT < CAST\(\? AS TIMESTAMP\) OR \(D\.DELETED_AT = CAST\(\? AS TIMESTAMP\) AND D\.DELETION_ID > \?\)\)/,
+      )
+    ) {
+      const [t, t2, id] = [String(take()), String(take()), String(take())];
+      if (t !== t2) throw new Error('Keyset timestamps differ');
+      tests.push(
+        (x) =>
+          String(x.DELETED_AT) < t || (String(x.DELETED_AT) === t && String(x.DELETION_ID) > id),
+      );
+    }
+    if (rest.trim()) throw new Error(`Unexpected QF_FOLDER_DELETIONS predicate: ${rest}`);
+    if (i !== params.length) throw new Error(`Unused parameters for: ${s}`);
+    const rows = this.folderDeletions.filter((x) => tests.every((t) => t(x)));
+    if (/^SELECT COUNT\(\*\) AS N FROM /.test(s)) return [{ N: rows.length }];
+    const page = /(?:OFFSET (\d+) ROWS )?FETCH FIRST (\d+) ROWS ONLY$/.exec(s);
+    const skip = Number(page?.[1] ?? 0);
+    const n = page ? Number(page[2]) : Infinity;
+    return rows
+      .sort(
+        (a, b) =>
+          String(b.DELETED_AT).localeCompare(String(a.DELETED_AT)) ||
+          String(a.DELETION_ID).localeCompare(String(b.DELETION_ID)),
+      )
+      .slice(skip, skip + n)
+      .map((x) => {
+        const r = withNames(x);
+        delete r.OWNER_USERNAME;
+        return r;
+      });
   }
 
   private withAuditNames(a: Row): Row {

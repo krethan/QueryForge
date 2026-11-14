@@ -59,7 +59,7 @@ app for migration 014, and note that history retention prunes old delivery and r
 `npm run demo` builds the UI and starts the app on http://127.0.0.1:3005 with the **in-memory test fakes**
 for both Mapepire and the metadata store. It never connects to IBM i, ignores `.env`, refuses
 `NODE_ENV=production`, and is not used by `npm start`/`npm run dev`. Login `demo` / `demo-password-123`;
-all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders (Sam can open the reports in "Ops Review" because its owner shares them), two deleted folders for the admin **Deleted folders** screen (the demo user is an app admin),
+all rows are fictional. Demo also seeds a parameterized report, reports shared with/by other demo users, shared folders (Sam can open the reports in "Ops Review" because its owner shares them), five deleted folders for the admin **Deleted folders** screen (the demo user is an app admin),
 three schedules (one with a delivery already in its history; e-mail is captured in memory and logged as `[demo mail — not sent]`), a fake SSO button
 ("Contoso SSO (demo fake)", signs in as Carol in Finance) and a fake directory login (`dave` / `directory-pass`).
 The fakes live in `server/test/helpers` and are only reachable from `npm run demo`, which binds 127.0.0.1. With it running, `npm run screenshots` captures 1440×900 PNGs into `screenshots/`
@@ -739,9 +739,31 @@ else, including the person who deleted the folder, gets 403. The admin endpoints
 that are actually deleted: a folder that still exists is 404 there, so they cannot be used to read a live
 personal folder's history (which admins cannot see through the normal panel either).
 
-- `GET /api/admin/folder-deletions?limit=50&offset=0` → `{ deletions, hasMore, limit, offset }`, newest
-  first (`limit` 1–200). Each is `{ id, folderId, folderName, ownerId, ownerName?, actorId, actorName?,
-shareCount, placedCount, filedCount, reportsRole, deletedAt }`.
+- `GET /api/admin/folder-deletions?limit=50&q=&actorId=&from=&to=&cursor=` → `{ deletions, hasMore,
+total, next, limit, offset }`, newest first (`limit` 1–200). Each is `{ id, folderId, folderName,
+ownerId, ownerName?, actorId, actorName?, shareCount, placedCount, filedCount, reportsRole, deletedAt }`.
+  The filters are all optional and all applied in SQL:
+  - `q` (up to 60 characters): part of the folder name, or of the owner's display name or username, in
+    any case (`UPPER(col) LIKE ? ESCAPE '\'`, the same as the saved-reports and user searches; `%`, `_`
+    and `\` are matched literally), or the owner's user ID exactly (for owners no longer in `QF_USERS`);
+  - `actorId`: who deleted the folder (exact user ID);
+  - `from` / `to`: ISO-8601 instants with a zone or offset; `from` is inclusive and `to` exclusive.
+    An empty range (`from` not before `to`) is a 400.
+
+  `total` is how many deletions match (a separate `COUNT(*)` with the same filters). `next` is an
+  opaque keyset cursor for the following page (`DELETED_AT DESC, DELETION_ID`, the last row's
+  `DELETED_AT` bound back as `CAST(? AS TIMESTAMP)`), or `null` on the last page. Send it back as
+  `cursor` with **the same filters**: it carries a fingerprint of them, and a cursor used with
+  different filters, or a damaged one, is refused with `400 BAD_CURSOR` rather than returning a wrong
+  page. A deletion recorded while someone pages cannot shift or repeat rows. `offset` still works
+  (first API version, up to 100,000) but cannot be combined with `cursor`.
+
+- `GET /api/admin/folder-deletions/actors` → `{ actors: [{ id, name? }] }`: everyone who has deleted a
+  recorded folder (up to 200), for the **Deleted by** filter.
+- `GET /api/admin/folder-deletions/export?q=&actorId=&from=&to=` → the filtered list as CSV
+  (`deleted-folders.csv`, every match, read in keyset batches of 500; same CSV format and
+  formula-injection guard as the folder audit export). Columns: deleted at (UTC), folder name and ID,
+  owner and owner ID, deleted by and their ID, the three counts, report sharing and the deletion ID.
 - `GET /api/admin/folder-deletions/:folderId/audit?limit=25&offset=0` → `{ deletion, events, hasMore,
 limit, offset }`: the deleted folder's sharing history.
 - `GET /api/admin/folder-deletions/:folderId/audit/export` → the same history as CSV (format above).
@@ -750,11 +772,25 @@ limit, offset }`: the deleted folder's sharing history.
 (`/admin/deleted-folders`); nobody else sees it, and opening the URL as a non-admin shows "Admins only"
 without calling the API (a 403 from the server is shown the same way). The table lists the deletions newest
 first: folder, owner, deleted by, deleted at (in the browser's locale and time zone), share / placed / filed
-counts and the report-sharing option, 25, 50 or 100 per page using the API's `limit` / `offset`. Each row
-has **Sharing history** (the folder's history in the same style as the Access and audit panel, with **Show
-older changes** and **Export CSV**) and **Export CSV** (the whole history, from the export endpoint). In
-demo mode the demo user is an admin and two deleted folders are seeded ("Q3 Close (old)" by Pat,
-"Scratch" by the demo user), both deleted through the real delete path.
+counts and the report-sharing option, 25, 50 or 100 per page. Above it, **Search by folder name or owner**
+(sent to the server after a short pause), **Deleted by** (anyone, or one of the people who have deleted a
+folder) and **Deleted from** / **Deleted to** (days in the browser's time zone, both included) narrow the
+list on the server; **Clear filters** resets them and **Export list** downloads the filtered list as CSV.
+The footer shows e.g. "1–25 of 57 deleted folders matching your filters"; **Next page** follows the
+server's keyset cursor and **Previous page** returns to the pages already visited. Changing any filter or
+the page size starts again at page 1. Each row has **Sharing history** (the folder's history in the same
+style as the Access and audit panel, with **Show older changes** and **Export CSV**) and **Export CSV**
+(the whole history, from the export endpoint). In demo mode the demo user is an admin and five deleted
+folders are seeded (for example "Q3 Close (old)" by Pat and "Scratch" by the demo user), all deleted
+through the real delete path.
+
+**Search cost (no index).** Migration 013's `DELETED_AT DESC, DELETION_ID` index serves the newest-first
+order, the date range and the keyset cursor. Nothing indexes the text search (`UPPER(...) LIKE '%…%'`
+cannot use an index anyway), `ACTOR_ID`, or the owner join, and `total` is a `COUNT(*)` over every
+matching row, so a search or "deleted by" filter (and the **Deleted by** list itself, a `SELECT DISTINCT`)
+reads the whole `QF_FOLDER_DELETIONS` table on each request. That table gains one row per folder
+deletion and is pruned by `QF_RETAIN_AUDIT_DAYS`, so it should stay small; adding an index would need a
+migration and has been left out on purpose.
 
 Storage is migration `013_folder_deletion_audit.sql`,
 which is additive: one new table, two indexes (`DELETED_AT DESC, DELETION_ID` for the list, `FOLDER_ID`
@@ -1029,9 +1065,11 @@ Administrators inherit read/Editor-equivalent access to every report without an 
   than the owner. Folder shares are announced by e-mail (see
   [Share notifications](#share-notifications)) and in the [notifications panel](#in-app-notifications).
 - Folder audit export and deletion audit: deleted-folder records are admin-only, are kept forever unless `QF_RETAIN_AUDIT_DAYS` is set (see [History retention](#history-retention)), and only cover deletions made through Uncle Bob after
-  migration 013 (not direct SQL). The admin list pages with `OFFSET` (IBM i 7.2+); the Deleted folders
-  screen has no search, filter or sort and does not show a total count (the API returns only `hasMore`). The CSV export's
-  keyset cursor binds back Db2's own timestamp text; not yet confirmed on a real IBM i.
+  migration 013 (not direct SQL). The Deleted folders screen always lists newest first (no other sort),
+  and Previous / Next only step one page at a time (keyset paging has no "jump to page"). Its search, "deleted
+  by" filter and total count scan the whole `QF_FOLDER_DELETIONS` table (no index; see
+  [Search cost](#folder-deletion-audit)). The list's and the CSV exports' keyset cursors bind
+  back Db2's own timestamp text; none of this SQL has been confirmed on a real IBM i.
 - Sharing a folder's reports: only reports the folder owner owns and placed there are covered (no way to
   share someone else's report, by design). The folder's Share dialog lists only reports the owner can see.
   Folder-granted schedule visibility covers up to 1000 such reports per person. Migration 011 has not been

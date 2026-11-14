@@ -1,7 +1,9 @@
 import {
   Button,
   DataTableSkeleton,
-  Pagination,
+  Search,
+  Select,
+  SelectItem,
   Table,
   TableCell,
   TableContainer,
@@ -10,14 +12,20 @@ import {
   TableRow,
   Tag,
 } from '@carbon/react';
-import { Download, RecentlyViewed } from '@carbon/icons-react';
-import { useEffect, useState } from 'react';
+import { ChevronLeft, ChevronRight, Download, RecentlyViewed } from '@carbon/icons-react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from '../api/client';
-import type { FolderDeletion, FolderDeletionPage } from '../api/types';
+import type {
+  FolderDeletion,
+  FolderDeletionActor,
+  FolderDeletionFilter,
+  FolderDeletionPage,
+} from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { DeletedFolderAuditModal } from '../components/DeletedFolderAuditModal';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { reportSharingLabel } from '../components/FolderAccessAuditModal';
+import { browserTimeZone, endOfDayIso } from '../utils/expiry';
 import { formatDateTime } from '../utils/format';
 
 export const DELETED_FOLDERS_PAGE_SIZES = [25, 50, 100];
@@ -35,8 +43,9 @@ function AdminsOnly() {
 }
 
 /**
- * Admin screen: every folder deletion recorded by migration 013, newest first, a page at a time
- * (the API's limit / offset). Each row can open the deleted folder's sharing history or export
+ * Admin screen: every folder deletion recorded by migration 013, newest first, a page at a time.
+ * Search, "deleted by" and the date range are applied on the server, which also returns the
+ * total that match and a keyset cursor for the next page (kept per page here for Previous). Each row can open the deleted folder's sharing history or export
  * it as CSV. Admin-only in the nav and here; the server enforces it (403) regardless.
  */
 export function DeletedFoldersPage() {
@@ -57,9 +66,75 @@ export function DeletedFoldersPage() {
   );
 }
 
+/**
+ * A native date input in Carbon's text-input style. Carbon's TextInput adds an always-present
+ * live "alert" region, which would compete with the page's real error notices.
+ */
+function DateField(props: {
+  id: string;
+  label: string;
+  value: string;
+  min?: string;
+  max?: string;
+  invalidText?: string;
+  onChange: (value: string) => void;
+}) {
+  const { id, label, value, min, max, invalidText, onChange } = props;
+  return (
+    <div className="cds--form-item cds--text-input-wrapper">
+      <label htmlFor={id} className="cds--label">
+        {label}
+      </label>
+      <input
+        id={id}
+        type="date"
+        className={`cds--text-input cds--text-input--md${invalidText ? ' cds--text-input--invalid' : ''}`}
+        value={value}
+        min={min}
+        max={max}
+        aria-invalid={invalidText ? true : undefined}
+        aria-describedby={invalidText ? `${id}-error` : undefined}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {invalidText && (
+        <div id={`${id}-error`} className="cds--form-requirement qf-deleted-folders__invalid">
+          {invalidText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** How long typing in the search box waits before asking the server. */
+export const DELETED_FOLDERS_SEARCH_DELAY_MS = 300;
+
+/** Start of a local calendar day (YYYY-MM-DD) as an ISO-8601 instant, or null if invalid. */
+export function startOfDayIso(day: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * The server filter for a "deleted from / to" pair of local days, both inclusive: from the
+ * start of `from` to the start of the day after `to` (the server's `to` is exclusive).
+ */
+export function deletedRange(from: string, to: string): { from?: string; to?: string } {
+  return {
+    from: from ? (startOfDayIso(from) ?? undefined) : undefined,
+    to: to ? (endOfDayIso(to) ?? undefined) : undefined,
+  };
+}
+
 function DeletedFoldersList() {
-  const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DELETED_FOLDERS_PAGE_SIZES[0]);
+  const [search, setSearch] = useState('');
+  const [q, setQ] = useState('');
+  const [actorId, setActorId] = useState('');
+  const [fromDay, setFromDay] = useState('');
+  const [toDay, setToDay] = useState('');
+  const [actors, setActors] = useState<FolderDeletionActor[]>([]);
   const [data, setData] = useState<FolderDeletionPage | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
@@ -68,12 +143,55 @@ function DeletedFoldersList() {
   const [exported, setExported] = useState<string | null>(null);
   const [viewing, setViewing] = useState<FolderDeletion | null>(null);
 
+  const rangeBad = fromDay !== '' && toDay !== '' && fromDay > toDay;
+  const filter = useMemo<FolderDeletionFilter>(
+    () => ({
+      q: q.trim() || undefined,
+      actorId: actorId || undefined,
+      ...deletedRange(fromDay, toDay),
+    }),
+    [q, actorId, fromDay, toDay],
+  );
+  const filtered = Boolean(filter.q || filter.actorId || filter.from || filter.to);
+  // Keyset cursors of the pages visited so far (the last is the page on screen), for one set of
+  // filters and page size only: any change starts again at page 1 in the same render, so a
+  // cursor is never sent with filters it did not come from.
+  const pagingKey = JSON.stringify([filter, pageSize]);
+  const [paging, setPaging] = useState<{ key: string; cursors: (string | null)[] }>({
+    key: pagingKey,
+    cursors: [null],
+  });
+  const cursors = paging.key === pagingKey ? paging.cursors : [null];
+  const page = cursors.length;
+  const cursor = cursors[cursors.length - 1];
+  const setCursors = (c: (string | null)[]) => setPaging({ key: pagingKey, cursors: c });
+
+  // Typing waits a moment; the other filters apply at once.
   useEffect(() => {
+    const t = setTimeout(() => setQ(search), DELETED_FOLDERS_SEARCH_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .listFolderDeletionActors()
+      .then((a) => {
+        if (live) setActors(a);
+      })
+      .catch(() => undefined); // the filter just offers "Anyone"; the list reports real errors
+    return () => {
+      live = false;
+    };
+  }, [reload]);
+
+  useEffect(() => {
+    if (rangeBad) return;
     let live = true;
     setData(null);
     setLoadError(null);
     api
-      .listFolderDeletions((page - 1) * pageSize, pageSize)
+      .listFolderDeletions({ ...filter, limit: pageSize, cursor })
       .then((d) => {
         if (live) setData(d);
       })
@@ -83,7 +201,7 @@ function DeletedFoldersList() {
     return () => {
       live = false;
     };
-  }, [page, pageSize, reload]);
+  }, [filter, pageSize, cursor, reload, rangeBad]);
 
   const exportCsv = async (d: FolderDeletion) => {
     setExporting(d.folderId);
@@ -99,11 +217,94 @@ function DeletedFoldersList() {
     }
   };
 
+  const exportList = async () => {
+    setExporting('*list');
+    setExported(null);
+    setActionError(null);
+    try {
+      const { filename } = await api.exportFolderDeletions(filter);
+      setExported(
+        `Downloaded ${filename} with ${filtered ? 'the deleted folders matching your filters' : 'every deleted folder'}.`,
+      );
+    } catch (e) {
+      setActionError(e);
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  const clearFilters = () => {
+    setSearch('');
+    setQ('');
+    setActorId('');
+    setFromDay('');
+    setToDay('');
+  };
+
   if (isForbidden(loadError) || isForbidden(actionError)) return <AdminsOnly />;
+
+  const toolbar = (
+    <div className="qf-toolbar qf-deleted-folders__filters">
+      <Search
+        labelText="Search deleted folders"
+        placeholder="Search by folder name or owner"
+        size="md"
+        value={search}
+        maxLength={60}
+        onChange={(e: { target: { value: string } }) => setSearch(e.target.value)}
+      />
+      <Select
+        id="qf-deleted-by"
+        labelText="Deleted by"
+        size="md"
+        value={actorId}
+        onChange={(e: { target: { value: string } }) => setActorId(e.target.value)}
+      >
+        <SelectItem value="" text="Anyone" />
+        {actors.map((a) => (
+          <SelectItem key={a.id} value={a.id} text={a.name ?? a.id} />
+        ))}
+        {actorId && !actors.some((a) => a.id === actorId) && (
+          <SelectItem value={actorId} text={actorId} />
+        )}
+      </Select>
+      <DateField
+        id="qf-deleted-from"
+        label="Deleted from"
+        value={fromDay}
+        max={toDay || undefined}
+        onChange={setFromDay}
+      />
+      <DateField
+        id="qf-deleted-to"
+        label="Deleted to"
+        value={toDay}
+        min={fromDay || undefined}
+        invalidText={rangeBad ? 'Pick a day on or after “Deleted from”.' : undefined}
+        onChange={setToDay}
+      />
+      <div className="qf-deleted-folders__filter-actions">
+        <Button kind="ghost" size="md" disabled={!filtered && !search} onClick={clearFilters}>
+          Clear filters
+        </Button>
+        <Button
+          kind="tertiary"
+          size="md"
+          renderIcon={Download}
+          disabled={exporting !== null || rangeBad || data === null || data.total === 0}
+          onClick={() => void exportList()}
+        >
+          Export list
+        </Button>
+      </div>
+    </div>
+  );
+  const zone = browserTimeZone();
 
   if (loadError)
     return (
       <>
+        {toolbar}
         <ErrorNotice error={loadError} />
         <Button kind="tertiary" size="sm" onClick={() => setReload((n) => n + 1)}>
           Try again
@@ -111,16 +312,27 @@ function DeletedFoldersList() {
       </>
     );
 
-  if (data === null)
+  if (rangeBad)
     return (
-      <div aria-busy="true" aria-label="Loading deleted folders">
-        <DataTableSkeleton columnCount={8} rowCount={4} showHeader={false} showToolbar={false} />
-      </div>
+      <>
+        {toolbar}
+        <p className="qf-muted" role="status">
+          “Deleted to” is before “Deleted from”, so nothing can match.
+        </p>
+      </>
     );
 
-  const first = (page - 1) * pageSize + 1;
+  if (data === null)
+    return (
+      <>
+        {toolbar}
+        <div aria-busy="true" aria-label="Loading deleted folders">
+          <DataTableSkeleton columnCount={8} rowCount={4} showHeader={false} showToolbar={false} />
+        </div>
+      </>
+    );
 
-  if (data.deletions.length === 0 && page === 1)
+  if (data.total === 0 && data.deletions.length === 0 && !filtered && page === 1)
     return (
       <div className="qf-empty">
         <h2>No deleted folders</h2>
@@ -131,8 +343,20 @@ function DeletedFoldersList() {
       </div>
     );
 
+  const first = data.deletions.length ? (page - 1) * pageSize + 1 : 0;
+  const last = first ? first + data.deletions.length - 1 : 0;
+  const summary = data.deletions.length
+    ? `${first}–${last} of ${data.total} deleted ${data.total === 1 ? 'folder' : 'folders'}${filtered ? ' matching your filters' : ''}`
+    : filtered
+      ? 'No deleted folders match your filters'
+      : 'No deleted folders on this page';
+
   return (
     <>
+      {toolbar}
+      <p className="qf-muted qf-deleted-folders__zone">
+        Days are in your time zone ({zone}); “Deleted to” includes that whole day.
+      </p>
       <ErrorNotice error={actionError} onClose={() => setActionError(null)} />
       <p className="qf-muted qf-deleted-folders__status" role="status">
         {exporting ? 'Exporting…' : (exported ?? '')}
@@ -161,7 +385,11 @@ function DeletedFoldersList() {
           <tbody aria-live="polite">
             {data.deletions.length === 0 && (
               <TableRow>
-                <TableCell colSpan={9}>No more deleted folders.</TableCell>
+                <TableCell colSpan={9}>
+                  {filtered
+                    ? 'No deleted folders match these filters.'
+                    : 'No more deleted folders.'}
+                </TableCell>
               </TableRow>
             )}
             {data.deletions.map((d) => (
@@ -212,28 +440,45 @@ function DeletedFoldersList() {
           </tbody>
         </Table>
       </TableContainer>
-      <Pagination
-        page={page}
-        pageSize={pageSize}
-        pageSizes={DELETED_FOLDERS_PAGE_SIZES}
-        pagesUnknown
-        isLastPage={!data.hasMore}
-        itemText={() =>
-          data.deletions.length
-            ? `${first}–${first + data.deletions.length - 1} deleted folders`
-            : 'No deleted folders on this page'
-        }
-        pageText={(p: number) => `Page ${p}`}
-        backwardText="Previous page"
-        forwardText="Next page"
-        itemsPerPageText="Deleted folders per page:"
-        onChange={({ page: p, pageSize: size }: { page: number; pageSize: number }) => {
-          if (size !== pageSize) {
-            setPageSize(size);
-            setPage(1);
-          } else setPage(p);
-        }}
-      />
+      <div className="qf-deleted-folders__pager">
+        <Select
+          id="qf-deleted-page-size"
+          labelText="Deleted folders per page:"
+          inline
+          size="sm"
+          value={String(pageSize)}
+          onChange={(e: { target: { value: string } }) => setPageSize(Number(e.target.value))}
+        >
+          {DELETED_FOLDERS_PAGE_SIZES.map((n) => (
+            <SelectItem key={n} value={String(n)} text={String(n)} />
+          ))}
+        </Select>
+        <span className="qf-deleted-folders__summary">{summary}</span>
+        <span className="qf-muted">Page {page}</span>
+        <Button
+          kind="ghost"
+          size="sm"
+          hasIconOnly
+          renderIcon={ChevronLeft}
+          iconDescription="Previous page"
+          tooltipPosition="top"
+          disabled={page === 1}
+          onClick={() => setCursors(cursors.slice(0, -1))}
+        />
+        <Button
+          kind="ghost"
+          size="sm"
+          hasIconOnly
+          renderIcon={ChevronRight}
+          iconDescription="Next page"
+          tooltipPosition="top"
+          disabled={!data.next}
+          onClick={() => {
+            const next = data.next;
+            if (next) setCursors([...cursors, next]);
+          }}
+        />
+      </div>
       {viewing && <DeletedFolderAuditModal deletion={viewing} onClose={() => setViewing(null)} />}
     </>
   );

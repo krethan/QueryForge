@@ -993,6 +993,53 @@ body {
   white-space: nowrap;
 }
 
+.qf-deleted-folders__filters {
+  margin-bottom: 0.5rem;
+
+  .cds--select,
+  .cds--text-input-wrapper {
+    flex: 0 0 auto;
+    min-width: 10rem;
+  }
+
+  .cds--text-input-wrapper {
+    position: relative;
+  }
+
+  // Shown without Carbon's invalid wrapper, so make it visible and keep the row in line.
+  .qf-deleted-folders__invalid {
+    display: block;
+    position: absolute;
+    top: 100%;
+    max-width: 16rem;
+    color: var(--cds-text-error, #da1e28);
+  }
+}
+
+.qf-deleted-folders__filter-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.qf-deleted-folders__zone {
+  margin-bottom: 0.25rem;
+  font-size: 0.75rem;
+}
+
+.qf-deleted-folders__pager {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 0 0 1rem;
+  border-top: 1px solid var(--cds-border-subtle, #c6c6c6);
+  background: var(--cds-layer, #f4f4f4);
+  min-height: 3rem;
+
+  .qf-deleted-folders__summary {
+    flex: 1;
+  }
+}
+
 // Data retention (admin)
 .qf-retention {
   display: flex;

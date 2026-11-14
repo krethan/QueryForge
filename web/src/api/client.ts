@@ -43,6 +43,8 @@ import type {
   Folder,
   FolderAccess,
   FolderAuditPage,
+  FolderDeletionActor,
+  FolderDeletionFilter,
   FolderDeletionPage,
   DeletedFolderAuditPage,
   RetentionRun,
@@ -225,9 +227,32 @@ export const api = {
   async exportFolderAudit(id: string) {
     return downloadFile(await raw('GET', `/folders/${id}/audit/export`), 'folder-audit.csv');
   },
-  /** Deleted folders, newest first (app admins only; migration 013). */
-  listFolderDeletions: (offset = 0, limit = 50) =>
-    json<FolderDeletionPage>('GET', `/admin/folder-deletions?limit=${limit}&offset=${offset}`),
+  /**
+   * Deleted folders matching the filters, newest first, with the total that match (app admins
+   * only; migration 013). Pass the previous page's `next` as `cursor` for the following page.
+   */
+  listFolderDeletions: (
+    opts: FolderDeletionFilter & { limit?: number; cursor?: string | null } = {},
+  ) => {
+    const { limit = 50, cursor, ...filter } = opts;
+    const qs = folderDeletionQuery(filter);
+    qs.set('limit', String(limit));
+    if (cursor) qs.set('cursor', cursor);
+    return json<FolderDeletionPage>('GET', `/admin/folder-deletions?${qs}`);
+  },
+  /** Everyone who has deleted a recorded folder (the "Deleted by" filter; app admins only). */
+  listFolderDeletionActors: () =>
+    json<{ actors: FolderDeletionActor[] }>('GET', '/admin/folder-deletions/actors').then(
+      (r) => r.actors,
+    ),
+  /** Downloads the filtered deleted-folders list as CSV (every match; app admins only). */
+  async exportFolderDeletions(filter: FolderDeletionFilter = {}) {
+    const qs = folderDeletionQuery(filter).toString();
+    return downloadFile(
+      await raw('GET', `/admin/folder-deletions/export${qs ? `?${qs}` : ''}`),
+      'deleted-folders.csv',
+    );
+  },
   /** One page of a deleted folder's sharing history, newest first (app admins only). */
   getDeletedFolderAudit: (folderId: string, offset = 0, limit = FOLDER_AUDIT_PAGE) =>
     json<DeletedFolderAuditPage>(
@@ -561,6 +586,16 @@ export const api = {
     return download(await raw('POST', `/reports/${id}/drill/export`, req));
   },
 };
+
+/** Query string for the deleted-folders filters; blank ones are left out. */
+function folderDeletionQuery(f: FolderDeletionFilter): URLSearchParams {
+  const qs = new URLSearchParams();
+  for (const k of ['q', 'actorId', 'from', 'to'] as const) {
+    const v = f[k]?.trim();
+    if (v) qs.set(k, v);
+  }
+  return qs;
+}
 
 /** Saves a response body as a file named by its Content-Disposition (or `fallback`). */
 async function downloadFile(res: Response, fallback: string) {

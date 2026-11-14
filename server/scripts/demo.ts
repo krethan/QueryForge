@@ -1253,6 +1253,16 @@ async function main() {
     exists,
   );
   await folders.remove('u-demo', scratch.id);
+  // A few more, from different people, so the screen's search and "Deleted by" filter have
+  // something to narrow down.
+  for (const [owner, name] of [
+    ['u-sam', 'Close checklist 2025'],
+    ['u-pat', 'Budget 2025 draft'],
+    ['u-sam', 'Month-end close (copy)'],
+  ] as const) {
+    const f = await folders.create(owner, name);
+    await folders.remove(owner, f.id);
+  }
 
   // History retention: a few delivery and reminder rows from long ago, so Admin > Data retention
   // has something to show. They are removed by the first automatic run (or Run now).
