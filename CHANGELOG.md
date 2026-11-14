@@ -97,9 +97,23 @@ scheduler runs. See the Changed section below.
   statements (shaded in the editor). Only the parameters for the part's `?` markers are asked for, and
   the part goes through the normal ad-hoc validation in `POST /api/query/execute`. Results and the
   run form say which lines ran, and Excel export exports that part. Browser-only change.
+- **Copy from the results grid** (no migration): select cells with the mouse (click, Shift+click,
+  drag) or keyboard (arrow keys, Shift+arrows, Shift+Space for rows, Ctrl/⌘+A), then Ctrl/⌘+C or the
+  toolbar's **Copy** menu (selected cells, selected rows, this page, all loaded matching rows) with an
+  optional header row. The clipboard gets tab-separated text quoted the way Excel reads it, plus an
+  HTML table so text and too-wide exact numbers stay text. NULL, decimals, dates, timestamps,
+  binary values and formula-like text are converted like the Excel export. Capped at 100,000 cells
+  and about 5 million characters, with a message. Only rows already loaded in the browser are
+  copied. The grid is now an ARIA grid (`role="grid"`, `aria-multiselectable`, `aria-selected`, one
+  tab stop) with keyboard help for screen readers.
+- **Resizable result columns**: drag a column header's edge or use the arrow keys on it; double-click
+  or Escape resets. Not saved with the report.
 
 ### Changed
 
+- The results table is exposed as an ARIA `grid` named "Query results" instead of a `table`, so
+  selectors such as Playwright's `getByRole('table', { name: 'Query results' })` need `'grid'`
+  (the screenshot scripts are updated).
 - The product is now called **Uncle Bob** (#12). Internal names are unchanged: the repository, the
   `QFMETA` schema, `QF_*` tables and settings, the cookie name and `qf-*` CSS classes, so existing
   installs keep working.
