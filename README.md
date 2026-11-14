@@ -153,6 +153,27 @@ The fakes live in `server/test/helpers` and are only reachable from `npm run dem
 | `QF_RETAIN_BATCH_SIZE` / `QF_RETAIN_MAX_BATCHES` | 1000 / 100      | Rows per `DELETE` statement, and statements per table per run                                                                                                                                   |
 | `SMTP_REJECT_UNAUTHORIZED` / `SMTP_CA_FILE`      | true / —        | TLS verification                                                                                                                                                                                |
 
+## Running part of the SQL
+
+In the SQL editor, **Ctrl/⌘ + Enter** (or the Run button) runs:
+
+- **the selected text** when you have selected something (the button reads **Run selection**). Use it
+  to try a sub-query, one CTE body or a `SELECT` without its `WHERE` clause;
+- **the statement at the cursor** when the editor holds several statements separated by `;` (the button
+  reads **Run statement** and that statement is shaded). A cursor after a `;` or on a blank line belongs to
+  the statement before it. The editor can be used as a scratch pad of queries this way; saving still needs a
+  single statement;
+- otherwise the whole editor, as before (a clean saved report still runs its stored definition).
+
+The split is done in the browser and skips `;` inside 'strings', "delimited identifiers" and comments. The
+part is sent unchanged to `POST /api/query/execute`, so the server validates it exactly like any ad-hoc
+query (single read-only statement, protected schemas, rate limit). Parameters are positional, so only the
+definitions for the `?` markers inside the part are asked for and bound, in order. If the number of
+definitions does not match the markers in the whole editor, a part with markers is not run and the editor
+says why. The results show a **Selection** or **Statement** tag with the line numbers; Excel export then
+exports that part, and drill-down and the report's last-run status are not used for it. Viewers of a shared
+report always run the saved definition.
+
 ## Exact numbers
 
 DECIMAL/NUMERIC and BIGINT values are kept as **strings** from the Mapepire job through the API and the
@@ -968,6 +989,8 @@ Administrators inherit read/Editor-equivalent access to every report without an 
   fire, so touch-only devices cannot rearrange tiles yet (the handle's arrow-key controls need a keyboard). Rearranging is off while searching.
   Migration 008 has not been applied to a real Db2 for i.
 - Conditional formatting has not been tested on a real IBM i.
+- Running part of the SQL: the statement split is a small browser-side scanner, not a Db2 parser. It does
+  not understand a `;` inside an SQL routine body (not allowed in a reporting query anyway). Results of a partial run do not use the saved report's conditional formatting.
 - Not yet validated against a live IBM i / Mapepire server (this includes the Report Builder catalog queries and
   `QSYS2.SQL_CHECK_AUTHORITY`, which have only been exercised against scripted catalog rows).
 - Mapepire 1.0.2 has no statement cancel API; cancel/timeout close the job.

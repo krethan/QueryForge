@@ -8,7 +8,7 @@ import {
   StopFilled,
   Time,
 } from '@carbon/icons-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import type {
@@ -38,6 +38,12 @@ import { DrillSettings } from '../components/DrillSettings';
 import { PivotTable } from '../components/PivotTable';
 import { pivotChartDefault, pivotChartable } from '../utils/pivot';
 import { decodeDrill, drillFields, keysForRow } from '../utils/drill';
+import {
+  describeLines,
+  resolveRunTarget,
+  type RunTarget,
+  type TextRange,
+} from '../utils/sqlStatements';
 
 export function ReportEditorPage() {
   const { id } = useParams();
@@ -69,14 +75,25 @@ export function ReportEditorPage() {
     hasMore: false,
   });
 
+  // editor selection, and the selection or statement the current result came from (null: whole text)
+  const [selection, setSelection] = useState<TextRange>({ from: 0, to: 0 });
+  const [pendingPart, setPendingPart] = useState<RunTarget | null>(null);
+  const [ranPart, setRanPart] = useState<RunTarget | null>(null);
+
   const [drill, setDrill] = useState<{ keys: DrillKeys; n: number } | null>(null);
   const openDrill = (keys: DrillKeys) => setDrill((d) => ({ keys, n: (d?.n ?? 0) + 1 }));
   const access = report?.access ?? 'OWNER';
   const canEdit = access !== 'VIEWER';
   const defsChanged = JSON.stringify(defs) !== JSON.stringify(report?.parameters ?? []);
   const dirty = canEdit && (report ? sql !== report.sql || defsChanged : sql.trim().length > 0);
-  // drill runs the saved definition, so it is off while there are unsaved edits
-  const fields = report && !dirty ? drillFields(report.drill) : null;
+  // Run executes the selection, or the statement at the cursor when there are several (editors only;
+  // viewers always run the saved definition).
+  const target = useMemo(
+    () => (canEdit ? resolveRunTarget(sql, selection, defs) : null),
+    [canEdit, sql, selection, defs],
+  );
+  // drill runs the saved definition, so it is off while there are unsaved edits or for a partial run
+  const fields = report && !dirty && !ranPart ? drillFields(report.drill) : null;
   // a saved pivot report is run (and exported) as a crosstab; edited SQL runs as plain SQL
   const isPivot = Boolean(report?.builderDef?.spec.pivot) && !dirty;
 
@@ -111,7 +128,7 @@ export function ReportEditorPage() {
   }, [id]);
 
   const runWith = useCallback(
-    async (values?: ParameterValues) => {
+    async (values?: ParameterValues, part: RunTarget | null = null) => {
       if (runningRef.current || !sql.trim()) return; // duplicate-click guard
       runningRef.current = true;
       setParamErrors(null);
@@ -120,10 +137,25 @@ export function ReportEditorPage() {
       setError(null);
       setNotice(null);
       try {
+        if (part) {
+          // part of the editor text: always an ad-hoc run of exactly that text
+          const r = await api.execute(part.text, execId, undefined, {
+            parameters: part.parameters,
+            values: values ?? {},
+          });
+          setPivotRun(null);
+          setResult(r);
+          setRanPart(part);
+          setAskParams(false);
+          setPendingPart(null);
+          setLastValues(values);
+          return;
+        }
         if (report && isPivot) {
           const pr = await api.runReportPivot(report.id, execId, undefined, values);
           setPivotRun(pr);
           setResult(null);
+          setRanPart(null);
           setAskParams(false);
           setLastValues(values);
           setChart((c) => c ?? pivotChartDefault(pr.pivot));
@@ -136,6 +168,7 @@ export function ReportEditorPage() {
             ? await api.executeReport(report.id, execId, undefined, values)
             : await api.execute(sql, execId, undefined, { parameters: defs, values: values ?? {} });
         setResult(r);
+        setRanPart(null);
         setAskParams(false);
         setLastValues(values);
         if (report && !dirty)
@@ -155,10 +188,12 @@ export function ReportEditorPage() {
           return;
         }
         setAskParams(false);
+        setPendingPart(null);
         setError(e);
         if (!(e instanceof ApiError && e.code === 'CANCELLED')) {
           setResult(null);
           setPivotRun(null);
+          setRanPart(null);
         }
       } finally {
         runningRef.current = false;
@@ -168,11 +203,23 @@ export function ReportEditorPage() {
     [sql, report, dirty, defs, askParams, isPivot],
   );
 
-  // Parameterized reports show the Carbon run form first.
-  const run = useCallback(() => {
-    if (defs.some((d) => !d.fixed)) setAskParams(true);
-    else void runWith();
-  }, [defs, runWith]);
+  // Parameterized reports show the Carbon run form first. `sel` is the editor selection when run
+  // from the keyboard (it can be newer than the last selection event).
+  const run = useCallback(
+    (sel?: TextRange) => {
+      if (runningRef.current) return;
+      const part = sel ? (canEdit ? resolveRunTarget(sql, sel, defs) : null) : target;
+      if (part?.error) {
+        setError(new ApiError(400, 'PARAMETER_MISMATCH', part.error));
+        return;
+      }
+      const asked = part ? part.parameters : defs;
+      setPendingPart(part);
+      if (asked.some((d) => !d.fixed)) setAskParams(true);
+      else void runWith(undefined, part);
+    },
+    [canEdit, sql, defs, target, runWith],
+  );
 
   // Auto-run when opened from a dashboard "Run" action.
   useEffect(() => {
@@ -298,6 +345,8 @@ export function ReportEditorPage() {
         value={sql}
         onChange={setSql}
         onRun={run}
+        onSelectionChange={setSelection}
+        highlightStatement={canEdit}
         readOnly={Boolean(running) || !canEdit}
       />
       {(canEdit || defs.length > 0) && (
@@ -329,8 +378,17 @@ export function ReportEditorPage() {
         </details>
       )}
       <div className="qf-editor-actions">
-        <Button renderIcon={Play} onClick={run} disabled={Boolean(running) || !sql.trim()}>
-          Run
+        <Button
+          renderIcon={Play}
+          onClick={() => run()}
+          disabled={Boolean(running) || !sql.trim()}
+          title={
+            target
+              ? `Run only the ${target.kind === 'selection' ? 'selected text' : 'statement at the cursor'} (${describeLines(target)})`
+              : undefined
+          }
+        >
+          {target ? (target.kind === 'selection' ? 'Run selection' : 'Run statement') : 'Run'}
         </Button>
         {running && (
           <>
@@ -378,7 +436,7 @@ export function ReportEditorPage() {
           Clear
         </Button>
         <span style={{ fontSize: '0.75rem', color: 'var(--cds-text-helper)' }}>
-          Ctrl/⌘ + Enter to run
+          Ctrl/⌘ + Enter to run · select text to run only that part
         </span>
       </div>
       {notice && (
@@ -392,6 +450,15 @@ export function ReportEditorPage() {
       <ErrorNotice error={error} onClose={() => setError(null)} />
       {result && (
         <section className="qf-section" aria-label="Results">
+          {ranPart && (
+            <p className="qf-ran-part" role="status">
+              <Tag size="sm" type="blue">
+                {ranPart.kind === 'selection' ? 'Selection' : 'Statement'}
+              </Tag>{' '}
+              Results for the {ranPart.kind === 'selection' ? 'selected text' : 'statement'} on{' '}
+              {describeLines(ranPart)}, not the whole editor.
+            </p>
+          )}
           <ChartPanel
             columns={result.columns}
             rows={loadedRows.rows}
@@ -455,16 +522,25 @@ export function ReportEditorPage() {
                     )}
                     <ExportButton
                       source={
-                        report && !dirty
-                          ? { reportId: report.id, values: lastValues, ...chartSource }
-                          : {
+                        ranPart
+                          ? {
                               ...chartSource,
-                              sql,
+                              sql: ranPart.text,
                               name: report?.name ?? 'Query results',
-                              ...(defs.length
-                                ? { parameters: defs, values: lastValues ?? {} }
+                              ...(ranPart.parameters.length
+                                ? { parameters: ranPart.parameters, values: lastValues ?? {} }
                                 : {}),
                             }
+                          : report && !dirty
+                            ? { reportId: report.id, values: lastValues, ...chartSource }
+                            : {
+                                ...chartSource,
+                                sql,
+                                name: report?.name ?? 'Query results',
+                                ...(defs.length
+                                  ? { parameters: defs, values: lastValues ?? {} }
+                                  : {}),
+                              }
                       }
                       disabled={Boolean(running)}
                       onError={(m) => setError(new ApiError(500, 'EXPORT_FAILED', m))}
@@ -578,14 +654,29 @@ export function ReportEditorPage() {
       />
       <RunParamsModal
         open={askParams}
-        title={`Run ${report?.name ?? 'query'}`}
-        parameters={defs}
+        title={
+          pendingPart
+            ? `Run the ${pendingPart.kind === 'selection' ? 'selection' : 'statement'} (${describeLines(pendingPart)})`
+            : `Run ${report?.name ?? 'query'}`
+        }
+        parameters={pendingPart?.parameters ?? defs}
         initial={lastValues}
         serverErrors={paramErrors}
         primaryText={running ? 'Running…' : 'Run'}
-        onClose={() => setAskParams(false)}
-        onSubmit={(v) => void runWith(v)}
-        onPresetChange={setDefs}
+        onClose={() => {
+          setAskParams(false);
+          setPendingPart(null);
+        }}
+        onSubmit={(v) => void runWith(v, pendingPart)}
+        onPresetChange={(next) => {
+          if (!pendingPart) return setDefs(next);
+          // the form only holds this part's parameters: merge the change back by name
+          const byName = new Map(next.map((d) => [d.name, d]));
+          setDefs((ds) => ds.map((d) => byName.get(d.name) ?? d));
+          setPendingPart((p) =>
+            p ? { ...p, parameters: p.parameters.map((d) => byName.get(d.name) ?? d) } : p,
+          );
+        }}
       />
       {shareOpen && report && <ShareModal report={report} onClose={() => setShareOpen(false)} />}
       {schedOpen && report && (

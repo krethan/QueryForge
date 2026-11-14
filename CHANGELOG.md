@@ -92,6 +92,11 @@ scheduler runs. See the Changed section below.
   open. **Mark all read** stores one timestamp per user in `QF_USER_SETTINGS.NOTICES_READ_AT`. The
   count is fetched on load and every minute while the tab is visible. `GET /api/notifications/count`,
   `GET /api/notifications?limit=&cursor=` (keyset paging), `POST /api/notifications/read`.
+- **Run selection / statement at cursor** (no migration): Ctrl/⌘ + Enter or Run executes the
+  selected text, or the statement under the cursor when the editor holds several `;`-separated
+  statements (shaded in the editor). Only the parameters for the part's `?` markers are asked for, and
+  the part goes through the normal ad-hoc validation in `POST /api/query/execute`. Results and the
+  run form say which lines ran, and Excel export exports that part. Browser-only change.
 
 ### Changed
 
