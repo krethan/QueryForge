@@ -48,7 +48,7 @@ await save(panel, 'v10-calc-editor-valid');
 await page.getByRole('button', { name: 'Add sort column' }).click();
 await page.getByLabel('Sort 1 column').selectOption({ label: 'ƒ Line total' });
 await page.getByRole('button', { name: 'Run report' }).click();
-await page.getByRole('table', { name: 'Query results' }).waitFor();
+await page.getByRole('grid', { name: 'Query results' }).waitFor();
 await save(page.getByRole('region', { name: 'Results' }), 'v10-calc-results');
 await save(page.getByRole('region', { name: 'SQL preview' }), 'v10-calc-sql-preview');
 
@@ -66,7 +66,7 @@ await page.getByLabel('Sort 1 column').selectOption({ label: 'Revenue' });
 await save(page.locator('.qf-builder__grouping'), 'v10-calc-grouping');
 await page.waitForTimeout(1200);
 await page.getByRole('button', { name: 'Run report' }).click();
-await page.getByRole('table', { name: 'Query results' }).waitFor();
+await page.getByRole('grid', { name: 'Query results' }).waitFor();
 await page.waitForTimeout(800);
 
 // 4. chart of the grouped calculated total

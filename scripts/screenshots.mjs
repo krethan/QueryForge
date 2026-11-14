@@ -25,7 +25,7 @@ for (const name of ['Open Orders by Region', 'Customer Credit Limits']) {
   await page.goto(`${base}/`);
   const tile = page.locator('.qf-tile', { hasText: name });
   await tile.getByRole('button', { name: /run/i }).first().click();
-  await page.getByRole('table').waitFor();
+  await page.getByRole('grid', { name: 'Query results' }).waitFor();
 }
 await page.goto(`${base}/`);
 await page.getByText('Low Inventory').first().waitFor();
@@ -38,7 +38,7 @@ await page.keyboard.type(
 );
 await page.keyboard.press('Escape');
 await page.getByRole('button', { name: 'Run', exact: true }).click();
-await page.getByRole('table').waitFor();
+await page.getByRole('grid', { name: 'Query results' }).waitFor();
 await shot('03-editor-results');
 
 await page.getByRole('button', { name: /save as report/i }).click();
@@ -103,10 +103,10 @@ const runSaved = async (name) => {
   await page.goto(`${base}/reports`);
   await page.getByRole('link', { name }).click();
   await page.getByRole('button', { name: 'Run', exact: true }).click();
-  await page.getByRole('table', { name: 'Query results' }).waitFor();
+  await page.getByRole('grid', { name: 'Query results' }).waitFor();
 };
 await runSaved('GL Balances (exact decimals)');
-await page.getByRole('table', { name: 'Query results' }).scrollIntoViewIfNeeded();
+await page.getByRole('grid', { name: 'Query results' }).scrollIntoViewIfNeeded();
 await shot('v3-exact-decimals');
 
 await runSaved('All Order Lines (1,200 rows)');

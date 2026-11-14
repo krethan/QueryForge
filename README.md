@@ -207,6 +207,39 @@ ahead, so the prompt appears only when another row really exists. Cursors:
 
 Client-side sort and filter apply to the rows loaded so far.
 
+## Copying from the results grid
+
+Select cells in any results grid and paste them into Excel (or another spreadsheet) as cells.
+
+- **Selecting:** click a cell, then Shift+click or drag to select a range. With the keyboard, Tab
+  into the grid, move with the arrow keys (Home/End, Ctrl/⌘+Home/End) and hold Shift to extend.
+  Shift+Space widens the selection to whole rows, Ctrl/⌘+A selects every loaded row that matches the
+  filter, and Escape clears the selection. A selection can span pages, and it is cleared when the
+  filter, the sort or the result changes. In a drill-down grid a plain click still opens the detail
+  rows; a Shift+click or a drag only selects.
+- **Copying:** Ctrl/⌘+C copies the selected cells (or the focused cell). The toolbar's **Copy** menu
+  copies the selected cells, the selected rows with all columns, the current page, or all loaded
+  rows that match the filter, in the order shown. **Include column headers** adds the column labels
+  as the first row and is remembered in the browser.
+- **Format:** tab-separated text with CRLF line ends. A value with a tab, a line break or a double
+  quote is wrapped in double quotes with the quotes doubled, which is how Excel reads pasted text.
+  An HTML table is put on the clipboard too, so Excel keeps text columns (such as `00123`) and exact
+  numbers too wide for Excel as text. Values are converted like the [Excel export](#exact-numbers):
+  NULL is an empty cell, DECIMAL and BIGINT values keep their exact digits (written as text when
+  they have more than 15 significant digits), dates are `yyyy-mm-dd`, timestamps
+  `yyyy-mm-dd hh:mm:ss.000`, binary values `[binary: N bytes]`, and text starting with `=`, `+`, `-`
+  or `@` gets a leading `'` (the export's formula-injection guard).
+- **Limits:** up to 100,000 cells (header included) and about 5 million characters per copy. A larger
+  copy is refused with a message suggesting a smaller selection or **Export to Excel**.
+- **Access:** copying uses only the rows already loaded in your browser, which the server returned
+  under your own access. Nothing is fetched from the server for a copy.
+- **Column widths:** drag the handle on the right edge of a column header, or focus it and use the
+  arrow keys (Shift for bigger steps). Double-click the handle or press Escape on it to go back to
+  automatic widths. Widths last until the next run; they are not saved with the report.
+
+This is a browser-only change with no migration. It has been tested with jsdom and in Chromium
+against the demo; pasting into a real Excel has not been tested.
+
 ## Report Builder
 
 **Report Builder** (nav item next to _New Report_) builds a report from a table instead of from typed SQL.
@@ -1003,6 +1036,11 @@ Administrators inherit read/Editor-equivalent access to every report without an 
   (flagged in the UI); use Node.js 22+. The exact-value path has been tested with fakes only.
 - Paged results are capped at `MAX_RESULT_ROWS`; each open cursor holds one Mapepire job until it completes,
   is closed, or expires. Sort/filter only cover loaded rows. Paging has been tested with a fake Mapepire job only.
+- Copying from the results grid: only loaded rows can be copied (load more pages or use Export to
+  Excel for the rest). The clipboard needs a secure context (HTTPS or localhost) for the Clipboard
+  API; otherwise the older copy command is used, and some browsers allow only plain text then, so
+  Excel may turn long numbers or codes with leading zeros into numbers. Paste into Excel itself
+  has not been tested. Column widths are not saved.
 - OIDC, LDAP and SMTP are implemented against their standard protocols but have **only been tested with
   in-process fakes** — not with a real IdP, directory or mail server.
 - Schedule times are computed with the server runtime's ICU time-zone data. Alberta moved to permanent

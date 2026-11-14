@@ -72,7 +72,7 @@ const dlg = page.getByRole('dialog', { name: 'Report parameters' });
 await dlg.getByLabel(/Orders since/).fill('2025-01-01');
 await shot('v7-ask-when-run');
 await dlg.getByRole('button', { name: 'Run' }).click();
-await page.getByRole('table', { name: 'Query results' }).waitFor();
+await page.getByRole('grid', { name: 'Query results' }).waitFor();
 await page.getByRole('region', { name: 'Results' }).scrollIntoViewIfNeeded();
 await shot('v7-grouped-results');
 
