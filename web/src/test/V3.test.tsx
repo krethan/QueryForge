@@ -79,7 +79,7 @@ describe('ResultsTable server paging', () => {
     expect(next).toHaveBeenCalledWith('cur-1');
     expect(await screen.findByText('3.00')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Load next/ })).not.toBeInTheDocument();
-    const table = screen.getByRole('table', { name: 'Query results' });
+    const table = screen.getByRole('grid', { name: 'Query results' });
     expect(within(table).getAllByRole('row')).toHaveLength(4);
     expect(screen.getByText('3.00').closest('td')).toHaveAttribute('data-format-color', 'green');
   });

@@ -51,7 +51,7 @@ const base: RunResponse = {
   dataSource: 'TEST400',
 };
 
-const bodyRows = () => within(screen.getByRole('table')).getAllByRole('row').slice(1);
+const bodyRows = () => within(screen.getByRole('grid')).getAllByRole('row').slice(1);
 
 describe('ResultsTable', () => {
   it('shows headers, row count, duration and data source', () => {
