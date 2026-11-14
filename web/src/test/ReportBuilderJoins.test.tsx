@@ -140,7 +140,10 @@ describe('describeSelection with joins', () => {
   });
 });
 
-describe('ReportBuilderPage joins', () => {
+// Full ReportBuilderPage renders take 1–3 s each on an idle WSL machine and went past the
+// default 5 s under load, so this page's tests get the same 20 s budget as the pivot and
+// calculated-field tests. The rest of the suite keeps the default.
+describe('ReportBuilderPage joins', { timeout: 20000 }, () => {
   it('adds a joined table and applies the suggested foreign-key condition', async () => {
     const { suggest, preview } = mockApi();
     const user = await setup();

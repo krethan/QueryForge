@@ -134,6 +134,10 @@ scheduler runs. See the Changed section below.
 
 ### Fixed
 
+- Report Builder page tests could pass the 5 s per-test limit on a busy WSL machine
+  (`ReportBuilderJoins` took 5.4 s). The `ReportBuilderPage` tests in `ReportBuilder`,
+  `ReportBuilderFilters` and `ReportBuilderJoins` now get the same 20 s budget as the pivot and
+  calculated-field tests; the global timeout is unchanged (this branch).
 - Metadata reads no longer stop at Mapepire's default of 100 rows (#29). Before this, report lists,
   shares, folder items, audit pages and schedules could have been cut short. They now page until the
   end and fail with a clear error past 100,000 rows. A page that is exactly full no longer shows

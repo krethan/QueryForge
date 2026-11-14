@@ -168,7 +168,10 @@ describe('builder filter helpers', () => {
   });
 });
 
-describe('ReportBuilderPage filters', () => {
+// Full ReportBuilderPage renders take 1–3 s each on an idle WSL machine and went past the
+// default 5 s under load, so this page's tests get the same 20 s budget as the pivot and
+// calculated-field tests. The rest of the suite keeps the default.
+describe('ReportBuilderPage filters', { timeout: 20000 }, () => {
   it('adds a typed filter and sends it in the spec', async () => {
     const { preview } = mockApi();
     const user = await setup();
@@ -231,7 +234,7 @@ describe('ReportBuilderPage filters', () => {
   });
 });
 
-describe('ReportBuilderPage grouping', () => {
+describe('ReportBuilderPage grouping', { timeout: 20000 }, () => {
   it('groups, totals numeric columns only, and sorts by a total', async () => {
     const { preview } = mockApi();
     const user = await setup();
